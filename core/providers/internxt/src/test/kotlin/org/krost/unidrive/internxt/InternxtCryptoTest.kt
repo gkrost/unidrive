@@ -111,6 +111,35 @@ class InternxtCryptoTest {
     }
 
     @Test
+    fun `char array password overloads preserve KDF and mnemonic decryption behavior`() {
+        val password = "pāssword-🔐"
+        val passwordChars = password.toCharArray()
+        val cryptoKey = InternxtConfig.CRYPTO_KEY
+        val challenge = crypto.cryptoJsEncrypt("001122aabbcc", cryptoKey)
+        val sKey =
+            java.util.Base64.getDecoder().decode(challenge).joinToString("") { "%02x".format(it) }
+
+        val stringHash = crypto.hashPassword(password, sKey, cryptoKey)
+        val charArrayHash = crypto.hashPassword(passwordChars, sKey, cryptoKey)
+        assertEquals(decryptHashResult(stringHash, cryptoKey), decryptHashResult(charArrayHash, cryptoKey))
+
+        val encryptedMnemonic = crypto.cryptoJsEncrypt("word1 word2 word3", password)
+        val encryptedMnemonicHex =
+            java.util.Base64.getDecoder().decode(encryptedMnemonic).joinToString("") { "%02x".format(it) }
+        assertEquals("word1 word2 word3", crypto.decryptMnemonic(encryptedMnemonicHex, passwordChars))
+        assertEquals(password, passwordChars.concatToString(), "char-array APIs must not clear caller-owned input")
+    }
+
+    private fun decryptHashResult(
+        hashHex: String,
+        cryptoKey: String,
+    ): String {
+        val encrypted = InternxtCrypto.hexToBytes(hashHex)
+        val base64 = java.util.Base64.getEncoder().encodeToString(encrypted)
+        return crypto.cryptoJsDecrypt(base64, cryptoKey)
+    }
+
+    @Test
     fun `encrypt produces output decodable by JS reference implementation`() {
         // Use same deterministic salt/iv as the JS test vector
         val salt = ByteArray(64) { it.toByte() }

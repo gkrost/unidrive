@@ -6,8 +6,10 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CompleteAuthResult
+import org.krost.unidrive.auth.CredentialProtectionException
 import org.krost.unidrive.internxt.BadCredentialsException
 import org.krost.unidrive.internxt.InternxtConfig
+import org.krost.unidrive.internxt.InternxtCredentialProtectors
 import org.krost.unidrive.internxt.TfaInvalidException
 import org.krost.unidrive.internxt.TfaRequiredException
 import picocli.CommandLine.Command
@@ -207,12 +209,26 @@ class AuthLoginCommand : Callable<Int> {
             withProfileLock(target) {
                 try {
                     runBlocking {
-                        LifecycleHooks.internxtLogin(InternxtConfig(tokenPath = target.profileDir), email.trim(), password, totp?.trim()?.takeIf { it.isNotEmpty() })
+                        LifecycleHooks.internxtLogin(
+                            InternxtConfig(
+                                tokenPath = target.profileDir,
+                                credentialProtector = InternxtCredentialProtectors.forCurrentPlatform(),
+                            ),
+                            email.trim(),
+                            password,
+                            totp?.trim()?.takeIf { it.isNotEmpty() },
+                        )
                     }
                 } catch (_: TfaRequiredException) {
                     throw LifecycleError("tfa_required", "this account needs a two-factor code; repeat with --totp")
                 } catch (_: TfaInvalidException) {
                     throw LifecycleError("tfa_invalid", "the two-factor code was rejected")
+                } catch (e: CredentialProtectionException) {
+                    throw LifecycleError(
+                        "credential_protection_unavailable",
+                        e.message ?: "unlock the native credential store and retry",
+                        e,
+                    )
                 } catch (_: BadCredentialsException) {
                     throw LifecycleError("bad_credentials", "wrong e-mail or password")
                 } catch (_: AuthenticationException) {

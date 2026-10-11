@@ -50,6 +50,22 @@ object CoroutineDebug {
     /** Where the dump lands: next to the trigger, overwritten on every request. */
     const val DUMP_FILE_NAME = "coroutine-dump.txt"
 
+    /**
+     * Called with what failed and why each time this facility swallows an error (installing the probes, dumping,
+     * removing the trigger). Production leaves the default no-op: the error is logged and the daemon carries on. A test
+     * sets it to see why no dump appeared, instead of waiting for a timeout (#713).
+     */
+    @Volatile
+    internal var onFailure: (what: String, cause: Throwable) -> Unit = { _, _ -> }
+
+    private fun reportFailure(
+        what: String,
+        cause: Throwable,
+    ) {
+        // The hook must never turn a swallowed error into a thrown one.
+        runCatching { onFailure(what, cause) }
+    }
+
     private const val POLL_INTERVAL_MS = 2_000L
 
     /** How long the arming self-check waits for its probe coroutine to be captured. */
@@ -112,6 +128,7 @@ object CoroutineDebug {
             }
         }.onFailure {
             log.warn("could not install the coroutine debug probes; dumps are unavailable: {}", it.message)
+            reportFailure("install", it)
         }
     }
 
@@ -142,7 +159,10 @@ object CoroutineDebug {
                 if (!Files.exists(trigger)) continue
                 dumpCoroutines(dir)
                 runCatching { Files.deleteIfExists(trigger) }
-                    .onFailure { log.warn("could not delete the dump trigger {}: {}", trigger, it.message) }
+                    .onFailure {
+                        log.warn("could not delete the dump trigger {}: {}", trigger, it.message)
+                        reportFailure("delete trigger", it)
+                    }
             }
         }
     }
@@ -172,6 +192,7 @@ object CoroutineDebug {
             }
         } catch (e: Exception) {
             log.warn("coroutine dump failed: {}", e.message)
+            reportFailure("dump", e)
         }
     }
 }

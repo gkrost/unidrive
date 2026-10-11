@@ -1,8 +1,10 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.debug.DebugProbes
 import kotlinx.coroutines.delay
@@ -12,6 +14,8 @@ import org.krost.unidrive.cli.CoroutineDebug.DUMP_FILE_NAME
 import org.krost.unidrive.cli.CoroutineDebug.TRIGGER_FILE_NAME
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -31,7 +35,13 @@ import kotlin.test.assertTrue
 class CoroutineDebugTest {
     @AfterTest
     fun uninstallProbes() {
+        CoroutineDebug.onFailure = { _, _ -> }
         runCatching { DebugProbes.uninstall() }
+    }
+
+    private companion object {
+        /** How long the watcher test waits for a dump: the poll is 2 s, the rest is slack for a loaded machine. */
+        const val DUMP_BUDGET_MS = 20_000L
     }
 
     @Test
@@ -63,22 +73,69 @@ class CoroutineDebugTest {
 
     @Test
     fun `creating the trigger file in the watched folder produces a dump`() = runBlocking {
+        // install() and the dump swallow their errors (best effort in the daemon); the hook is how this test sees them
+        // instead of waiting out the budget below with no reason (#713).
+        val failures = CopyOnWriteArrayList<String>()
+        CoroutineDebug.onFailure = { what, cause -> failures.add("$what: ${cause::class.simpleName}: ${cause.message}") }
         CoroutineDebug.install()
+        assertTrue(
+            DebugProbes.isInstalled,
+            "step \"install the probes\": install() returned with the probes not installed; swallowed errors: $failures",
+        )
         val dir = Files.createTempDirectory("unidrive-coroutine-watch")
-        val scope = kotlinx.coroutines.CoroutineScope(Dispatchers.Default)
+        // The watcher gets a thread of its own: on the shared Dispatchers.Default a busy pool could delay its 2 s poll.
+        val watcherThread = Executors.newSingleThreadExecutor { Thread(it, "coroutine-dump-watcher-test").apply { isDaemon = true } }
+        val scope = CoroutineScope(watcherThread.asCoroutineDispatcher())
         try {
             CoroutineDebug.watchForDumpRequests(dir, scope)
-            Files.writeString(dir.resolve(TRIGGER_FILE_NAME), "now")
+            val trigger = dir.resolve(TRIGGER_FILE_NAME)
+            Files.writeString(trigger, "now")
             val dump = dir.resolve(DUMP_FILE_NAME)
-            val deadline = System.currentTimeMillis() + 10_000
-            while (!Files.exists(dump) && System.currentTimeMillis() < deadline) {
-                delay(200)
+            val startedAt = System.nanoTime()
+            fun waitedMs() = (System.nanoTime() - startedAt) / 1_000_000
+            // A working watcher answers within one poll (2 s); the rest is slack for a busy machine.
+            // An install error alone is not fatal here (the probes can fail to arm and still dump); a failed dump is.
+            while (!Files.exists(dump) && failures.none { it.startsWith("dump:") } && waitedMs() < DUMP_BUDGET_MS) {
+                delay(100)
             }
-            assertTrue(Files.exists(dump), "the watcher answered the trigger with a dump")
+            assertTrue(
+                Files.exists(dump),
+                "step \"the watcher answers the trigger with a dump\": no dump after ${waitedMs()} ms (budget $DUMP_BUDGET_MS ms); " +
+                    "swallowed errors: $failures; trigger still there: ${Files.exists(trigger)}",
+            )
             assertTrue(Files.readString(dump).startsWith("unidrive coroutine dump: "))
-            assertFalse(Files.exists(dir.resolve(TRIGGER_FILE_NAME)), "the trigger is consumed")
+            // The watcher deletes the trigger right after the dump; allow it that moment.
+            val consumeBy = System.nanoTime() + 5_000_000_000L
+            while (Files.exists(trigger) && System.nanoTime() < consumeBy) delay(50)
+            assertFalse(Files.exists(trigger), "the trigger is consumed")
         } finally {
             scope.cancel()
+            watcherThread.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `a dump that cannot be written reaches the failure hook instead of vanishing`() {
+        val failures = CopyOnWriteArrayList<Pair<String, Throwable>>()
+        CoroutineDebug.onFailure = { what, cause -> failures.add(what to cause) }
+        val notADirectory = Files.createTempFile("unidrive-coroutine-not-a-dir", ".tmp")
+        try {
+            CoroutineDebug.dumpCoroutines(notADirectory.resolve("sub")) // the folder cannot be created under a file
+
+            assertTrue(failures.size == 1 && failures[0].first == "dump", "one swallowed dump error reached the hook: $failures")
+        } finally {
+            Files.deleteIfExists(notADirectory)
+        }
+    }
+
+    @Test
+    fun `a hook that throws does not turn a swallowed dump error into a thrown one`() {
+        CoroutineDebug.onFailure = { _, _ -> throw IllegalStateException("the hook itself failed") }
+        val notADirectory = Files.createTempFile("unidrive-coroutine-not-a-dir", ".tmp")
+        try {
+            CoroutineDebug.dumpCoroutines(notADirectory.resolve("sub")) // must return normally
+        } finally {
+            Files.deleteIfExists(notADirectory)
         }
     }
 

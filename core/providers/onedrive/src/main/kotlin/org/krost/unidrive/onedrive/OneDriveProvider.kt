@@ -366,7 +366,7 @@ class OneDriveProvider(
                     isFolder = item.isFolder,
                     modified = modifiedSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
                     created = createdSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
-                    hash = item.file?.hashes?.sha256Hash,
+                    hash = item.file?.hashes?.quickXorHash ?: item.file?.hashes?.sha256Hash,
                     mimeType = item.file?.mimeType,
                 )
             }

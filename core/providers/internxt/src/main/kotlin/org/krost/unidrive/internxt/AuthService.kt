@@ -117,12 +117,66 @@ open class AuthService(
     }
 
     private fun readPassword(prompt: String): CharArray {
-        System.console()?.let { console ->
-            return console.readPassword(prompt)
-        }
-        // Fallback: no console (e.g. Gradle run) — warn and read as plain text
+        val console = System.console() ?: return readPasswordFromStdin(prompt)
+        return console.readPassword(prompt) ?: throw AuthenticationException("No input provided")
+    }
+
+    private fun readPasswordFromStdin(prompt: String): CharArray {
+        // Fallback: no console (e.g. Gradle run) — warn that terminal echo
+        // cannot be disabled, but avoid materializing the input as a String.
         System.err.println("Warning: no console available — password will be echoed")
-        return readLine(prompt).toCharArray()
+        print(prompt)
+        System.out.flush()
+        return trimWhitespace(readPasswordCharacters())
+    }
+
+    private fun readPasswordCharacters(): CharArray {
+        var buffer = CharArray(128)
+        var length = 0
+        try {
+            while (true) {
+                when (val next = stdinReader.read()) {
+                    -1 -> return charsAtEndOfInput(buffer, length)
+                    '\n'.code -> return buffer.copyOf(length)
+                    '\r'.code -> Unit
+                    else -> {
+                        buffer = appendCharacter(buffer, length, next)
+                        length++
+                    }
+                }
+            }
+        } finally {
+            buffer.fill('\u0000')
+        }
+    }
+
+    private fun charsAtEndOfInput(
+        buffer: CharArray,
+        length: Int,
+    ): CharArray {
+        if (length == 0) throw AuthenticationException("No input provided")
+        return buffer.copyOf(length)
+    }
+
+    private fun appendCharacter(
+        buffer: CharArray,
+        length: Int,
+        character: Int,
+    ): CharArray {
+        val target = if (length == buffer.size) growAndClear(buffer) else buffer
+        target[length] = character.toChar()
+        return target
+    }
+
+    private fun growAndClear(buffer: CharArray): CharArray =
+        buffer.copyOf(buffer.size * 2).also { buffer.fill('\u0000') }
+
+    private fun trimWhitespace(chars: CharArray): CharArray {
+        var start = 0
+        var end = chars.size
+        while (start < end && chars[start].isWhitespace()) start++
+        while (end > start && chars[end - 1].isWhitespace()) end--
+        return chars.copyOfRange(start, end).also { chars.fill('\u0000') }
     }
 
     /**
@@ -146,23 +200,53 @@ open class AuthService(
      * Request shape: when [tfaCode] is null, the `tfa` field is omitted from
      * the `/auth/login/access` POST body entirely (not sent as null / empty).
      */
+    /**
+     * Compatibility overload for callers that already hold a String. The caller-owned String is
+     * immutable and cannot be wiped; interactive authentication uses the CharArray overload.
+     * The raw password is only used by local crypto and is never included in the HTTP request.
+     */
     suspend fun authenticate(
         email: String,
         password: String,
         tfaCode: String? = null,
     ): InternxtCredentials {
-        // Step 1: challenge.
-        val challengeText = postLoginChallenge(email)
-        val challenge = json.decodeFromString<LoginChallengeResponse>(challengeText)
-
-        // Step 2: TFA gate.
-        if (challenge.tfa && tfaCode == null) {
-            throw TfaRequiredException()
+        val passwordChars = password.toCharArray()
+        try {
+            return authenticateWithPassword(
+                email,
+                passwordChars,
+                tfaCode,
+                hashPassword = { _, sKey, cryptoKey -> crypto.hashPassword(password, sKey, cryptoKey) },
+                decryptMnemonic = { encrypted, _ -> crypto.decryptMnemonic(encrypted, password) },
+            )
+        } finally {
+            passwordChars.fill('\u0000')
         }
+    }
 
-        // Step 3: password hash.
-        val sKey = challenge.sKey ?: throw AuthenticationException("No sKey in login challenge")
-        val hashedPassword = crypto.hashPassword(password, sKey, InternxtConfig.CRYPTO_KEY)
+    /** Interactive-auth overload that keeps the password in mutable characters through KDF use. */
+    suspend fun authenticate(
+        email: String,
+        password: CharArray,
+        tfaCode: String? = null,
+    ): InternxtCredentials =
+        authenticateWithPassword(
+            email,
+            password,
+            tfaCode,
+            hashPassword = { chars, sKey, cryptoKey -> crypto.hashPassword(chars, sKey, cryptoKey) },
+            decryptMnemonic = { encrypted, chars -> crypto.decryptMnemonic(encrypted, chars) },
+        )
+
+    private suspend fun authenticateWithPassword(
+        email: String,
+        password: CharArray,
+        tfaCode: String?,
+        hashPassword: (CharArray, String, String) -> String,
+        decryptMnemonic: (String, CharArray) -> String,
+    ): InternxtCredentials {
+        val sKey = loginChallengeKey(email, tfaCode)
+        val hashedPassword = hashPassword(password, sKey, InternxtConfig.CRYPTO_KEY)
 
         // Step 4: access POST (omit `tfa` field when not provided).
         val accessBody = buildJsonObject {
@@ -173,12 +257,10 @@ open class AuthService(
         val accessText = postLoginAccess(accessBody)
         val loginResult = json.decodeFromString<LoginAccessResponse>(accessText)
 
-        val rootFolderId = loginResult.user.rootFolderId
-            ?: loginResult.user.rootFolderIdNum?.toString()
-            ?: throw AuthenticationException("No root folder ID in login response")
+        val rootFolderId = loginResult.rootFolderId()
 
-        // Step 5: decrypt mnemonic with the plaintext password.
-        val mnemonic = crypto.decryptMnemonic(loginResult.user.mnemonic, password)
+        // Step 5: decrypt mnemonic with the password characters.
+        val mnemonic = decryptMnemonic(loginResult.user.mnemonic, password)
 
         val creds = InternxtCredentials(
             jwt = loginResult.newToken,
@@ -193,6 +275,21 @@ open class AuthService(
         credentials = creds
         return creds
     }
+
+    private suspend fun loginChallengeKey(
+        email: String,
+        tfaCode: String?,
+    ): String {
+        val challengeText = postLoginChallenge(email)
+        val challenge = json.decodeFromString<LoginChallengeResponse>(challengeText)
+        if (challenge.tfa && tfaCode == null) throw TfaRequiredException()
+        return challenge.sKey ?: throw AuthenticationException("No sKey in login challenge")
+    }
+
+    private fun LoginAccessResponse.rootFolderId(): String =
+        user.rootFolderId
+            ?: user.rootFolderIdNum?.toString()
+            ?: throw AuthenticationException("No root folder ID in login response")
 
     /**
      * HTTP seam: POST `/auth/login` with the given email; return the response body.
@@ -252,18 +349,14 @@ open class AuthService(
 
         val passwordChars = readPassword("Password: ")
         if (passwordChars.isEmpty()) throw AuthenticationException("No password provided")
-        val password = String(passwordChars)
-
         // passwordChars stays populated during the readLine prompts between
         // retries. The outer finally guarantees zeroing on any exit (success,
         // BadCredentialsException, TfaInvalid exhaustion, or unexpected
-        // throw). `password` (the immutable String above) is GC's problem
-        // regardless; the CLI tool is short-lived enough that this is
-        // acceptable. A longer-running daemon would route through
-        // SecureCredentialStore.
+        // throw). The raw password is used only by the local KDF and mnemonic
+        // decryption; the HTTP body contains the derived hash, not the password.
         try {
             try {
-                return authenticate(email, password, tfaCode = null)
+                return authenticate(email, passwordChars, tfaCode = null)
             } catch (_: TfaRequiredException) {
                 // First attempt told us 2FA is required; prompt and retry up to 3 times.
             }
@@ -272,7 +365,7 @@ open class AuthService(
             while (attempts < 3) {
                 val tfaCode = readLine("2FA code: ")
                 try {
-                    return authenticate(email, password, tfaCode = tfaCode)
+                    return authenticate(email, passwordChars, tfaCode = tfaCode)
                 } catch (_: TfaInvalidException) {
                     attempts++
                     if (attempts >= 3) throw AuthenticationException("Too many invalid 2FA attempts")
@@ -424,13 +517,15 @@ open class AuthService(
     // race-window fix only existed in OneDrive's copy. Lifting closes the gap
     // for Internxt without copy-pasting the logic.
     //
-    // Note: credentials include mnemonic in plaintext (file is chmod 600).
-    // For additional protection, use: unidrive vault encrypt
+    // The shipped Linux factory injects Secret Service protection. The
+    // credential store migrates legacy plaintext only after keyring storage
+    // succeeds and replaces it atomically.
     private val credentialStore: CredentialStore<InternxtCredentials> =
         CredentialStore(
             dir = config.tokenPath,
             fileName = CREDENTIALS_FILE,
             serializer = InternxtCredentials.serializer(),
+            protector = config.credentialProtector,
         )
 
     private fun loadCredentials(): InternxtCredentials? = credentialStore.load()

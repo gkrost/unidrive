@@ -13,6 +13,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Advisory full-history secret scan. AGENTS.md keeps `check` as the only
+  # merge gate; this job reports findings without becoming a required check.
+  gitleaks:
+    name: gitleaks (advisory)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_VERSION: 8.28.0
+
   # Docs-only changes (Markdown and docs/) must not start a Gradle build. `check` is a REQUIRED status check (repository
   # ruleset), so the workflow itself cannot be path-filtered: a workflow that never starts leaves the required check
   # pending forever. Instead the heavy jobs are skipped; a skipped job satisfies a required check.
@@ -116,6 +136,29 @@ jobs:
         working-directory: core
         shell: bash
         run: ./gradlew check --no-daemon
+
+  check-macos-keychain:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Gradle dependency cache
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Verify macOS Keychain credential protection
+        working-directory: core
+        run: >-
+          ./gradlew :providers:internxt:test
+          --tests org.krost.unidrive.internxt.MacKeychainCredentialProtectorTest
+          :providers:internxt:detekt --no-daemon
 
   # The ignore matcher (org.krost.unidrive.sync.ignore) is checked against `git check-ignore` itself. The oracle
   # is a pinned git built from its release tag, never the runner's git, which moves with the runner image; the

@@ -55,7 +55,7 @@ class InternxtNotificationsSwitchTest {
             val tmp = Files.createTempDirectory("internxt-notif-oneshot-")
             try {
                 writeValidCredentials(tmp)
-                val provider = InternxtProvider(InternxtConfig(tokenPath = tmp, notificationsUrl = "http://127.0.0.1:9", notificationsEnabled = true))
+                val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp, notificationsUrl = "http://127.0.0.1:9", notificationsEnabled = true))
                 try {
                     provider.authenticate()
                     provider.authenticate()
@@ -75,7 +75,7 @@ class InternxtNotificationsSwitchTest {
             try {
                 writeValidCredentials(tmp)
                 for (registerFirst in listOf(true, false)) {
-                    val provider = InternxtProvider(InternxtConfig(tokenPath = tmp, notificationsUrl = "http://127.0.0.1:9", notificationsEnabled = true))
+                    val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp, notificationsUrl = "http://127.0.0.1:9", notificationsEnabled = true))
                     try {
                         if (registerFirst) provider.onRemoteChangeHint { }
                         provider.authenticate()
@@ -107,7 +107,7 @@ class InternxtNotificationsSwitchTest {
                 val creds = InternxtCredentials(jwt = jwt, mnemonic = "m", rootFolderId = "root", email = "t@example.invalid")
                 Files.writeString(tmp.resolve("credentials.json"), Json.encodeToString(InternxtCredentials.serializer(), creds))
 
-                val provider = InternxtProvider(InternxtConfig(tokenPath = tmp, notificationsEnabled = false))
+                val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp, notificationsEnabled = false))
                 try {
                     provider.onRemoteChangeHint { }
                     provider.authenticate()

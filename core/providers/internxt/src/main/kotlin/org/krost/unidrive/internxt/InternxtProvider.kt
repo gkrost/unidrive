@@ -457,7 +457,13 @@ class InternxtProvider(
                             ?: throw ProviderException("No download URL in bridge info for $remotePath")
 
                     val cipher = crypto.createContentDecryptCipher(fileKey, iv)
-                    api.downloadFileStreaming(downloadUrl, cipher, destination, expectedSize = expected)
+                    api.downloadFileStreaming(
+                        downloadUrl,
+                        cipher,
+                        destination,
+                        expectedSize = expected,
+                        expectedCiphertextSha256 = usableShards.first().hash,
+                    )
                 }
             } catch (e: RemoteIncompleteDownloadException) {
                 // The stored object cannot produce a whole file; say so with the

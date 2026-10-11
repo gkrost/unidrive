@@ -40,7 +40,7 @@ class InternxtMultiShardDownloadTest {
 
     private fun newProvider(): InternxtProvider {
         destination = Files.createTempDirectory("ud-shard-dl").resolve("out.bin")
-        val provider = InternxtProvider(InternxtConfig(tokenPath = Files.createTempFile("ud-shard-token", ".tmp")))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = Files.createTempFile("ud-shard-token", ".tmp")))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)
@@ -80,7 +80,12 @@ class InternxtMultiShardDownloadTest {
     private fun bridgeInfoJsonWith(shardUrls: List<String>): String =
         buildString {
             append("""{"bucket":"$bucket","id":"$fileId","index":"$index64","shards":[""")
-            append(shardUrls.joinToString(",") { url -> """{"index":0,"hash":"h","url":"$url"}""" })
+            val hash =
+                java.security.MessageDigest
+                    .getInstance("SHA-256")
+                    .digest("0123456789A".toByteArray())
+                    .joinToString("") { "%02x".format(it) }
+            append(shardUrls.joinToString(",") { url -> """{"index":0,"hash":"$hash","url":"$url"}""" })
             append("]}")
         }
 
@@ -155,6 +160,33 @@ class InternxtMultiShardDownloadTest {
             assertTrue(Files.exists(destination), "the destination file must exist")
             assertTrue(requestLog.any { it.contains("shard-host.invalid") }, "the shard was fetched")
         }
+
+    @Test
+    fun `single-shard ciphertext hash mismatch fails permanently and leaves no destination`() {
+        bridgeInfoJson = bridgeInfoJsonWith(listOf(shardUrl1)).replace(
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest("0123456789A".toByteArray())
+                .joinToString("") { "%02x".format(it) },
+            "00".repeat(32),
+        )
+        val provider = newProvider()
+
+        val e =
+            assertFailsWith<PermanentDownloadFailureException> {
+                kotlinx.coroutines.test.runTest {
+                    provider.downloadById(fileUuid, "/tampered.bin", destination)
+                }
+            }
+
+        assertTrue("SHA-256 mismatch" in (e.message ?: ""), "got: ${e.message}")
+        assertTrue(requestLog.any { it.contains("shard-host.invalid") }, "the shard was fetched")
+        assertTrue(Files.notExists(destination), "unverified plaintext must not be published")
+        assertTrue(
+            Files.list(destination.parent).use { paths ->
+                paths.noneMatch { it.fileName.toString().contains("unidrive-tmp") }
+            },
+        )
+    }
 
     @Test
     fun `a blank shard URL among several usable ones still counts as multi-shard`() {
