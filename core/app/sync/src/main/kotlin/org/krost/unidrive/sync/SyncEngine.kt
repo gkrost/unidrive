@@ -809,7 +809,9 @@ open class SyncEngine(
         // actual verdict — which a 410 cursor-expiry recovery can upgrade inside
         // the gather — is read back after the gather below.
         val preGatherTrackedRows = db.getEntryCount()
-        val fullEnumerationExpected = db.getSyncState("delta_cursor").isNullOrEmpty() || provider.deltaIsFullListing
+        val fullEnumerationExpected =
+            db.getSyncState("delta_cursor").isNullOrEmpty() || provider.deltaIsFullListing ||
+                db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY)?.equals("true", ignoreCase = true) == true
         // A full enumeration against an established baseline must run NON-streaming
         // so the remote-shrink guard can abort before any transfer is dispatched —
         // the streaming gather dispatches safe-now uploads/downloads mid-scan, which
@@ -910,15 +912,32 @@ open class SyncEngine(
         // skipRemoteGather (apply mode) has no fresh listing to judge.
         val actualFullEnumeration =
             db.getSyncState("last_gather_full")?.toBooleanStrictOrNull() ?: fullEnumerationExpected
-        if (actualFullEnumeration && runScope.isEmpty() && !skipRemoteGather) {
-            val observedAlive = allRemoteChanges.values.count { !it.deleted }
-            remoteShrinkWarningOrNull(observedAlive, preGatherTrackedRows)?.let { msg ->
+        val remoteShrinkWarning =
+            if (actualFullEnumeration && runScope.isEmpty() && !skipRemoteGather) {
+                val observedAlive = allRemoteChanges.values.count { !it.deleted }
+                remoteShrinkWarningOrNull(observedAlive, preGatherTrackedRows)
+            } else {
+                null
+            }
+        if (remoteShrinkWarning != null) {
+            remoteShrinkWarning.let { msg ->
                 if (dryRun) {
                     reporter.onWarning(msg)
                 } else {
                     throw IllegalStateException(msg)
                 }
             }
+        }
+        // Keep the recovery latch set until a complete full listing passes the
+        // remote-shrink guard. The gather itself cannot know whether a smaller
+        // inventory is trustworthy; clearing here prevents falling back to the
+        // cursor that could have hidden the skipped paths.
+        val fullRecoveryTrusted =
+            actualFullEnumeration && runScope.isEmpty() && !skipRemoteGather &&
+                db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() == true &&
+                remoteShrinkWarning == null
+        if (fullRecoveryTrusted) {
+            db.setSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY, "false")
         }
 
         // Streaming-reconciliation auto-flip: after the first successful
@@ -977,10 +996,12 @@ open class SyncEngine(
         // the union of streamed safe-now + deferred-drained actions here
         // so the recovery loops, case-collision detection, move detection,
         // and final sort run exactly once against the full action set.
-        // Upload-direction completeness gate: when the just-completed gather is
-        // INCOMPLETE, a local-present/remote-absent path may be an un-enumerated
-        // subtree rather than a genuinely-new file, so the reconciler must defer
-        // new-local creates (mirror of the delete-side "reap only on complete").
+        // Completeness gate: an incomplete full inventory cannot distinguish a
+        // genuinely new local path from an un-enumerated remote object, and cannot
+        // establish that a locally deleted path is absent remotely. Defer both
+        // directions until a complete full inventory. Incremental deltas remain
+        // complete for ordinary local creates/deletes unless a prior incomplete
+        // gather forces this run to retry the full listing.
         // apply mode (skipRemoteGather) has no fresh listing, so it is never gated.
         val enumerationComplete =
             skipRemoteGather || (db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() ?: true)
@@ -1856,7 +1877,14 @@ open class SyncEngine(
         executedPaths: MutableSet<String>,
         transferSemaphore: kotlinx.coroutines.sync.Semaphore,
     ): Pair<Map<String, CloudItem>, List<SyncAction>> = withContext(Priority.Background) {
-        val storedCursor = db.getSyncState("delta_cursor")
+        val retryIncompleteEnumeration =
+            db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY)?.equals("true", ignoreCase = true) == true
+        // Drop a checkpoint from an incomplete incremental delta before the
+        // recovery full listing, whose provider resume marker has different semantics.
+        if (retryIncompleteEnumeration && db.getSyncState("last_gather_full") == "false") {
+            db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let(db::completeScan)
+        }
+        val storedCursor = if (retryIncompleteEnumeration) null else db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
         val isFullSync = cursor == null || provider.deltaIsFullListing
         val changes = mutableMapOf<String, CloudItem>()
@@ -1882,7 +1910,10 @@ open class SyncEngine(
         // UD-223 fast-bootstrap mirror: bootstrap adopts the cursor with
         // zero enumeration, so there's nothing to stream — fall through
         // to the same map-only path as the non-streaming gather.
-        if (fastBootstrap && cursor == null && Capability.FastBootstrap in provider.capabilities()) {
+        val canFastBootstrap =
+            fastBootstrap && cursor == null && !retryIncompleteEnumeration &&
+                Capability.FastBootstrap in provider.capabilities()
+        if (canFastBootstrap) {
             when (val result = provider.deltaFromLatest()) {
                 is CapabilityResult.Success -> {
                     val page = result.value
@@ -2303,6 +2334,9 @@ open class SyncEngine(
         }
         // Record the gather's full-enumeration verdict (see gatherRemoteChanges).
         db.setSyncState("last_gather_full", isFullSync.toString())
+        if (!allComplete) {
+            db.setSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY, "true")
+        }
 
         val deferred = buffer.drainDeferred()
         changes to (safeAccumulator + deferred)

@@ -387,6 +387,68 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `incomplete full inventory is retried before an unseen local path can be created remotely`() =
+        runTest {
+            // The first full inventory skips a subtree, while a local file sits
+            // below that subtree. A promoted cursor must not turn the next pass
+            // into an incremental view that mistakes the path for a new upload.
+            val skippedFile = syncRoot.resolve("skipped/notes.txt")
+            Files.createDirectories(skippedFile.parent)
+            Files.writeString(skippedFile, "same bytes")
+            provider.deltaItems = emptyList()
+            provider.deltaComplete = false
+            provider.deltaCursor = "cursor-after-incomplete-full"
+            engine.syncOnce()
+
+            assertEquals("true", db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY))
+            assertEquals("cursor-after-incomplete-full", db.getSyncState("delta_cursor"))
+
+            // The retry's authoritative full listing finds the file that was
+            // omitted from the prior pass. Its bytes already match locally.
+            provider.deltaComplete = true
+            provider.deltaItems =
+                listOf(
+                    cloudItem("/skipped", isFolder = true),
+                    cloudItem("/skipped/notes.txt", size = "same bytes".length.toLong()),
+                )
+            provider.files["/skipped/notes.txt"] = "same bytes".toByteArray()
+            engine.syncOnce()
+
+            assertEquals(listOf<String?>(null, null), provider.deltaCursorArguments)
+            assertEquals("false", db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY))
+            assertFalse("/skipped" in provider.createdFolders, "existing folder must not be recreated remotely")
+            assertFalse("/skipped/notes.txt" in provider.uploadedPaths, "existing remote file must not be overwritten")
+            assertEquals("same bytes", Files.readString(skippedFile))
+        }
+
+    @Test
+    fun `incomplete full inventory defers remote deletion until the retry confirms the item`() =
+        runTest {
+            provider.files["/kept.txt"] = "still in cloud".toByteArray()
+            provider.deltaItems = listOf(cloudItem("/kept.txt", size = "still in cloud".length.toLong()))
+            engine.syncOnce()
+            Files.delete(syncRoot.resolve("kept.txt"))
+
+            // A partial full listing omits the remote item, but that omission is
+            // not enough evidence to propagate the local delete to the provider.
+            provider.deltaItems = emptyList()
+            provider.deltaComplete = false
+            provider.deltaCursor = "cursor-after-incomplete-delete-scan"
+            engine.syncOnce()
+
+            assertFalse("/kept.txt" in provider.deletedPaths, "partial listing cannot authorize remote deletion")
+            assertEquals("true", db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY))
+
+            // Recovery starts at cursor=null and finds the live cloud object.
+            provider.deltaComplete = true
+            provider.deltaItems = listOf(cloudItem("/kept.txt", size = "still in cloud".length.toLong()))
+            engine.syncOnce()
+
+            assertEquals(listOf<String?>(null, "cursor-1", null), provider.deltaCursorArguments)
+            assertTrue("/kept.txt" in provider.deletedPaths, "the confirmed local deletion can then propagate")
+        }
+
+    @Test
     fun `delta cursor advances even when some downloads fail`() =
         runTest {
             // Regression for the 2026-05-20 first-sync loop: when transferFailures > 0
@@ -1026,6 +1088,45 @@ class SyncEngineTest {
             val next = RecordingReporter()
             engineWithReporter(next).syncOnce()
             assertEquals(emptyList(), next.actions, "the next pass plans nothing")
+        }
+
+    @Test
+    fun `remote rename with a local destination is reconciled as keep-both conflict`() =
+        runTest {
+            val stamp = Instant.parse("2026-03-28T12:00:00Z")
+            fun item(path: String, id: String, bytes: String) =
+                CloudItem(
+                    id = id,
+                    name = path.substringAfterLast("/"),
+                    path = path,
+                    size = bytes.length.toLong(),
+                    isFolder = false,
+                    modified = stamp,
+                    created = stamp,
+                    hash = "hash-$id",
+                    mimeType = "application/octet-stream",
+                )
+
+            provider.files["/a.txt"] = "remote bytes".toByteArray()
+            provider.deltaItems = listOf(item("/a.txt", "remote-a", "remote bytes"))
+            engine.syncOnce()
+
+            Files.writeString(syncRoot.resolve("b.txt"), "local unsynced bytes")
+            provider.files["/b.txt"] = provider.files.remove("/a.txt")!!
+            provider.deltaItems = listOf(item("/b.txt", "remote-a", "remote bytes"))
+            provider.deltaCursor = "cursor-2"
+            val renameRun = RecordingReporter()
+            engineWithReporter(renameRun).syncOnce()
+
+            assertEquals(listOf("CONFLICT"), renameRun.actions.map { it.label })
+            assertEquals("remote bytes", Files.readString(syncRoot.resolve("b.txt")), "remote rename owns the canonical path")
+            val keptCopy =
+                Files.list(syncRoot).use { paths ->
+                    paths.filter { it.fileName.toString().contains(".conflict-local-") }.findFirst().orElse(null)
+                }
+            assertNotNull(keptCopy, "pre-existing local destination must survive as a conflict copy")
+            assertEquals("local unsynced bytes", Files.readString(keptCopy), "conflict copy retains local bytes")
+            assertEquals("remote-a", db.getEntry("/b.txt")?.remoteId, "the renamed remote item remains tracked")
         }
 
     // UD-297 — empty-local + populated-DB sanity check

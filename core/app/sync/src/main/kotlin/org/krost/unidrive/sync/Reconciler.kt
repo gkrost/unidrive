@@ -652,14 +652,15 @@ class Reconciler(
         if (enumerationComplete) return
         val before = actions.size
         actions.removeAll { a ->
-            (a is SyncAction.Upload || a is SyncAction.CreateRemoteFolder) &&
-                localChanges[a.path] == ChangeState.NEW
+            ((a is SyncAction.Upload || a is SyncAction.CreateRemoteFolder) &&
+                localChanges[a.path] == ChangeState.NEW) ||
+                (a is SyncAction.DeleteRemote && localChanges[a.path] == ChangeState.DELETED)
         }
         val deferred = before - actions.size
         if (deferred > 0) {
             log.warn(
-                "Enumeration incomplete: deferred {} new-local create(s) (Upload/CreateRemoteFolder) " +
-                    "until a complete enumeration — avoids duplicating un-enumerated remote files",
+                "Enumeration incomplete: deferred {} local create/delete action(s) " +
+                    "until a complete enumeration — avoids duplicating or deleting un-enumerated remote items",
                 deferred,
             )
         }

@@ -16,6 +16,7 @@ class FakeCloudProvider : CloudProvider {
     var supportsFastBootstrap = false
     var deltaFromLatestCalls = 0
     var deltaCalls = 0
+    val deltaCursorArguments = mutableListOf<String?>()
 
     // #396: null = hashless provider (Internxt-style, the default); set before the
     // engine is constructed to stand in for a hash-capable one (OneDrive-style).
@@ -315,6 +316,7 @@ class FakeCloudProvider : CloudProvider {
         scanContext: org.krost.unidrive.ScanContext?,
     ): DeltaPage {
         deltaCalls++
+        deltaCursorArguments.add(cursor)
         lastScanContext = scanContext
         if (deltaThrowExpiredOnResumedCursor && cursor != null) {
             deltaThrowExpiredOnResumedCursor = false // self-clearing; recovery pass uses cursor=null

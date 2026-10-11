@@ -277,7 +277,18 @@ class RemoteGather(
         readOnly: Boolean = false,
         progress: EnumerationTracker? = null,
     ): Map<String, CloudItem> = withContext(Priority.Background) {
-        val storedCursor = db.getSyncState("delta_cursor")
+        // #268: after any incomplete gather, its promoted cursor cannot prove that
+        // absent paths are truly absent. Retry from the provider's full-listing
+        // entry point instead of treating an incremental delta as authoritative.
+        val retryIncompleteEnumeration =
+            db.getSyncState(INCOMPLETE_ENUMERATION_KEY)?.equals("true", ignoreCase = true) == true
+        // A checkpoint from an incomplete incremental delta has a different
+        // cursor/offset meaning from a full listing. Drop that slice before
+        // forcing the recovery inventory from its beginning.
+        if (retryIncompleteEnumeration && db.getSyncState("last_gather_full") == "false") {
+            db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let(db::completeScan)
+        }
+        val storedCursor = if (retryIncompleteEnumeration) null else db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
         var isFullSync = cursor == null || provider.deltaIsFullListing
         var changes = mutableMapOf<String, CloudItem>()
@@ -301,7 +312,7 @@ class RemoteGather(
         // deletion sweep (detectMissingAfterFullSync) is skipped — no enumeration
         // means no authoritative item set to diff against, so we must NOT treat
         // absence as deletion.
-        if (options.fastBootstrap && cursor == null) {
+        if (options.fastBootstrap && cursor == null && !retryIncompleteEnumeration) {
             if (Capability.FastBootstrap in provider.capabilities()) {
                 // #532: the preview's bootstrap carries readOnly, so a dry-run --fast-bootstrap
                 // stamps nothing in the provider's own storage (OneDrive's delta_last_seen).
@@ -611,6 +622,9 @@ class RemoteGather(
         // can upgrade an incremental pass to full) so the sync-path remote-shrink
         // guard judges the real mode, not just the pre-gather cursor state.
         db.setSyncState("last_gather_full", isFullSync.toString())
+        if (!allComplete) {
+            db.setSyncState(INCOMPLETE_ENUMERATION_KEY, "true")
+        }
         changes
     }
 
@@ -922,6 +936,9 @@ class RemoteGather(
     }
 
     companion object {
+        /** A provider gather was incomplete; the next run must recover from a full listing. */
+        const val INCOMPLETE_ENUMERATION_KEY = "incomplete_enumeration_recovery_required"
+
         @JvmField
         val RECENT_UPLOAD_REAP_GRACE: java.time.Duration = java.time.Duration.ofSeconds(120)
 
