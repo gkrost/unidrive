@@ -22,7 +22,8 @@ import java.nio.file.Path
 internal class LifecycleError(
     val token: String,
     message: String,
-) : Exception(message)
+    cause: Throwable? = null,
+) : Exception(message, cause)
 
 /** One compact JSON object on stdout. Anything else on stdout would break a front-end's parser. */
 internal fun emitJson(obj: JsonObject) = println(obj.toString())

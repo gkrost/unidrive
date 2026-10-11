@@ -224,7 +224,11 @@ class AuthLoginCommand : Callable<Int> {
                 } catch (_: TfaInvalidException) {
                     throw LifecycleError("tfa_invalid", "the two-factor code was rejected")
                 } catch (e: CredentialProtectionException) {
-                    throw LifecycleError("credential_protection_unavailable", e.message ?: "unlock the Linux user keyring and retry")
+                    throw LifecycleError(
+                        "credential_protection_unavailable",
+                        e.message ?: "unlock the Linux user keyring and retry",
+                        e,
+                    )
                 } catch (_: BadCredentialsException) {
                     throw LifecycleError("bad_credentials", "wrong e-mail or password")
                 } catch (_: AuthenticationException) {
