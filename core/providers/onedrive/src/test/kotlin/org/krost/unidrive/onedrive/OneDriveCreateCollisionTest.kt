@@ -11,8 +11,10 @@ import kotlinx.coroutines.test.runTest
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.krost.unidrive.PermanentUploadFailureException
 
 /**
  * UD-366 data-loss regression on OneDrive: create-collision must never blind-overwrite.
@@ -204,6 +206,58 @@ class OneDriveCreateCollisionTest {
                 sessionBody.contains("\"@microsoft.graph.conflictBehavior\":\"fail\""),
                 "DATA LOSS: a chunked create must open its session with fail, not replace; body was $sessionBody",
             )
+            provider.close()
+            Files.deleteIfExists(local)
+        }
+
+    @Test
+    fun `invalidRequest on a new file is a permanent upload failure`() =
+        runTest {
+            val engine =
+                MockEngine {
+                    respond(
+                        content = """{"error":{"code":"invalidRequest","message":"Invalid name"}}""",
+                        status = HttpStatusCode.BadRequest,
+                        headers = jsonHeaders(),
+                    )
+                }
+            val provider = providerWith(engine)
+            val local = Files.createTempFile("ud-invalid-request", ".txt")
+            Files.write(local, "content".toByteArray())
+
+            val failure =
+                assertFailsWith<PermanentUploadFailureException> {
+                    provider.upload(local, "/con.txt", existingRemoteId = null)
+                }
+
+            assertTrue(failure.message?.contains("invalidRequest") == true)
+            provider.close()
+            Files.deleteIfExists(local)
+        }
+
+    @Test
+    fun `invalidRequest when updating a file is a permanent upload failure`() =
+        runTest {
+            val engine =
+                MockEngine { request ->
+                    if (request.method == HttpMethod.Get) {
+                        respond(driveItemJson("existing-id", "con.txt"), HttpStatusCode.OK, jsonHeaders())
+                    } else {
+                        respond(
+                            content = """{"error":{"code":"invalidRequest","message":"Invalid name"}}""",
+                            status = HttpStatusCode.BadRequest,
+                            headers = jsonHeaders(),
+                        )
+                    }
+                }
+            val provider = providerWith(engine)
+            val local = Files.createTempFile("ud-invalid-update", ".txt")
+            Files.write(local, "content".toByteArray())
+
+            assertFailsWith<PermanentUploadFailureException> {
+                provider.upload(local, "/con.txt", existingRemoteId = "existing-id")
+            }
+
             provider.close()
             Files.deleteIfExists(local)
         }

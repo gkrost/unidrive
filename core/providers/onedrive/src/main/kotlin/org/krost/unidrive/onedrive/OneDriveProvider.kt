@@ -133,6 +133,9 @@ class OneDriveProvider(
     private fun GraphApiException.isItemNotFound(): Boolean =
         message?.contains("\"code\":\"itemNotFound\"") == true
 
+    private fun GraphApiException.isInvalidRequest(): Boolean =
+        statusCode == 400 && message?.contains("\"code\":\"invalidRequest\"") == true
+
     override suspend fun upload(
         localPath: Path,
         remotePath: String,
@@ -197,6 +200,12 @@ class OneDriveProvider(
                         remotePath,
                     )
                 }
+                if (e.isInvalidRequest()) {
+                    throw PermanentUploadFailureException(
+                        "OneDrive rejected the upload to '$remotePath' as invalidRequest: ${e.message}",
+                        cause = e,
+                    )
+                }
                 throw e
             }
         }
@@ -215,6 +224,11 @@ class OneDriveProvider(
                     remotePath,
                 )
                 put("rename").toCloudItem()
+            } else if (e.isInvalidRequest()) {
+                throw PermanentUploadFailureException(
+                    "OneDrive rejected the upload to '$remotePath' as invalidRequest: ${e.message}",
+                    cause = e,
+                )
             } else {
                 throw e
             }
