@@ -7,6 +7,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.RemoteObjectAuditReport
 import org.krost.unidrive.RemoteObjectStatus
 import org.krost.unidrive.authenticateAndLog
+import org.krost.unidrive.io.OwnerOnly
 import org.krost.unidrive.sync.HashVerifier
 import org.krost.unidrive.sync.PathNormalizer
 import org.krost.unidrive.sync.Reconciler
@@ -181,6 +182,13 @@ class VerifyCommand : Callable<Int> {
             System.err.println("verify: --remote-objects requires --json-report FILE so the audit is preserved")
             return EXIT_UNAUDITABLE
         }
+        // A drive-long audit must not end at "could not write the report": prove the destination usable first.
+        try {
+            checkReportWritable(reportPath)
+        } catch (e: Exception) {
+            System.err.println("verify: cannot write the JSON report: ${e.message ?: e.javaClass.simpleName}")
+            return EXIT_UNAUDITABLE
+        }
         val excludes = parent.loadSyncConfig().effectiveExcludePatterns(profileName)
         val scope = SyncScope.normalize(syncPaths)
         val provider = parent.createProvider()
@@ -234,6 +242,15 @@ class VerifyCommand : Callable<Int> {
         }
     }
 
+    /** Fails now, with the reason, when [reportPath] cannot take a report; leaves nothing behind but the folder. */
+    private fun checkReportWritable(reportPath: Path) {
+        val destination = reportPath.toAbsolutePath().normalize()
+        if (Files.isDirectory(destination)) throw IOException("$destination is a directory")
+        val parentDir = destination.parent ?: throw IOException("report path has no parent directory")
+        Files.createDirectories(parentDir)
+        Files.deleteIfExists(Files.createTempFile(parentDir, REPORT_TEMP_PREFIX, REPORT_TEMP_SUFFIX))
+    }
+
     internal fun writeRemoteAuditReport(
         reportPath: Path,
         profileName: String,
@@ -276,8 +293,14 @@ class VerifyCommand : Callable<Int> {
                     }
                 }
             }
-        val temporary = Files.createTempFile(parentDir, ".unidrive-verify-", ".json.tmp")
+        val temporary = Files.createTempFile(parentDir, REPORT_TEMP_PREFIX, REPORT_TEMP_SUFFIX)
         try {
+            // The report lists remote paths and sizes, which the engine keeps owner-only everywhere else
+            // (StoragePermissions): restrict the file before it holds anything. The move keeps the permissions.
+            val restricted = OwnerOnly.restrictFile(temporary)
+            if (!restricted.restricted) {
+                System.err.println("verify: warning: could not restrict the report to the current user ($restricted)")
+            }
             Files.writeString(temporary, json.encodeToString(JsonObject.serializer(), body))
             try {
                 Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
@@ -370,5 +393,7 @@ class VerifyCommand : Callable<Int> {
         const val EXIT_CONVERGED = 0
         const val EXIT_DIVERGED = 1
         const val EXIT_UNAUDITABLE = 2
+        private const val REPORT_TEMP_PREFIX = ".unidrive-verify-"
+        private const val REPORT_TEMP_SUFFIX = ".json.tmp"
     }
 }
