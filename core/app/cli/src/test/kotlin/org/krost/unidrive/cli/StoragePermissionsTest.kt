@@ -40,12 +40,13 @@ class StoragePermissionsTest {
         val profileDir = Files.createDirectory(root.resolve("profile"))
         val token = Files.writeString(profileDir.resolve("token.json"), "{}")
         val credentials = Files.writeString(profileDir.resolve("credentials.json"), "{}")
+        val deviceFlow = Files.writeString(profileDir.resolve("device-flow.json"), "{}")
         val stateDb = Files.writeString(profileDir.resolve("state.db"), "x")
         assertTrue(WindowsAclProbe.USERS_SID in sids(token) || "BU" in sids(token), "precondition: inherited extra grant")
 
         StoragePermissions.restrictProfile(profileDir)
 
-        for (file in listOf(token, credentials)) {
+        for (file in listOf(token, credentials, deviceFlow)) {
             val dacl = WindowsAclProbe.dacl(file)
             assertTrue(dacl.startsWith("D:P"), "$file: explicit, protected: $dacl")
             assertEquals(ownerOnlySids, sids(file), dacl)
@@ -82,6 +83,8 @@ class StoragePermissionsTest {
         Files.setPosixFilePermissions(profileDir, PosixFilePermissions.fromString("rwxr-xr-x"))
         val token = Files.writeString(profileDir.resolve("token.json"), "{}")
         Files.setPosixFilePermissions(token, PosixFilePermissions.fromString("rw-r--r--"))
+        val deviceFlow = Files.writeString(profileDir.resolve("device-flow.json"), "{}")
+        Files.setPosixFilePermissions(deviceFlow, PosixFilePermissions.fromString("rw-r--r--"))
         val cacheRoot = root.resolve("cache").resolve("p1")
         val logDir = Files.createDirectory(root.resolve("logs"))
         Files.setPosixFilePermissions(logDir, PosixFilePermissions.fromString("rwxr-xr-x"))
@@ -91,6 +94,7 @@ class StoragePermissionsTest {
 
         fun mode(p: Path) = PosixFilePermissions.toString(Files.getPosixFilePermissions(p))
         assertEquals("rw-------", mode(token))
+        assertEquals("rw-------", mode(deviceFlow))
         assertEquals("rwx------", mode(profileDir))
         assertEquals("rwx------", mode(cacheRoot))
         assertEquals("rwx------", mode(logDir))

@@ -17,7 +17,7 @@ internal object StoragePermissions {
     private val log = LoggerFactory.getLogger(StoragePermissions::class.java)
 
     /** The credential files a profile folder can hold (the ones `logout` removes). */
-    val CREDENTIAL_FILES = listOf("token.json", "credentials.json")
+    val CREDENTIAL_FILES = listOf("token.json", "credentials.json", "device-flow.json")
 
     /**
      * The credential files of [profileDir] first, then the folder itself (it also holds state.db and

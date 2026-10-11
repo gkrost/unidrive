@@ -32,12 +32,12 @@ class LogoutCommand : Runnable {
             }
 
             // Clean up local files
-            val tokenFile = profileDir.resolve("token.json")
-            val credentialsFile = profileDir.resolve("credentials.json")
             val deleted = mutableListOf<String>()
 
-            if (Files.deleteIfExists(tokenFile)) deleted.add(tokenFile.toString())
-            if (Files.deleteIfExists(credentialsFile)) deleted.add(credentialsFile.toString())
+            for (name in StoragePermissions.CREDENTIAL_FILES) {
+                val credentialFile = profileDir.resolve(name)
+                if (Files.deleteIfExists(credentialFile)) deleted.add(credentialFile.toString())
+            }
 
             if (!keepState) {
                 val stateDb = profileDir.resolve("state.db")
