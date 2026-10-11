@@ -83,7 +83,12 @@ class InternxtRemoteIncompleteDownloadTest {
     private fun bridgeInfoJsonWith(shardUrls: List<String>): String =
         buildString {
             append("""{"bucket":"$bucket","id":"$fileId","index":"$index64","shards":[""")
-            append(shardUrls.joinToString(",") { url -> """{"index":0,"hash":"h","url":"$url"}""" })
+            val hash =
+                java.security.MessageDigest
+                    .getInstance("SHA-256")
+                    .digest(shardBody)
+                    .joinToString("") { "%02x".format(it) }
+            append(shardUrls.joinToString(",") { url -> """{"index":0,"hash":"$hash","url":"$url"}""" })
             append("]}")
         }
 
