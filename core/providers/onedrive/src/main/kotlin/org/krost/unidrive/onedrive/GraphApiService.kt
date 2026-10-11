@@ -441,6 +441,7 @@ class GraphApiService(
         log.debug("Upload (simple): {} ({} bytes, conflictBehavior={})", remotePath, content.size, conflictBehavior)
         val cleanPath = remotePath.removePrefix("/")
         val encoded = encodePath(cleanPath)
+        val uploadTimeoutMs = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
 
         // conflictBehavior pins the simple-PUT and upload-session paths to the same overwrite
         // policy so it doesn't shift based on file size crossing the 4-MiB threshold. The
@@ -451,7 +452,8 @@ class GraphApiService(
         val response =
             sendThrottled("$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=$conflictBehavior", HttpMethod.Put) {
                 timeout {
-                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
+                    requestTimeoutMillis = uploadTimeoutMs
+                    socketTimeoutMillis = uploadTimeoutMs
                 }
                 contentType(ContentType.Application.OctetStream)
                 // #291: If-Match makes the content PUT conditional on the caller's view of the item
@@ -661,6 +663,7 @@ class GraphApiService(
         if (initialOffset > 0) log.debug("Upload resuming at offset {} / {} bytes", initialOffset, fileSize)
         var offset = initialOffset
         var result: DriveItem? = null
+        var finalChunkConfirmedByProbe = false
         try {
             while (offset < fileSize) {
                 val currentChunkSize = minOf(chunkSize, fileSize - offset).toInt()
@@ -675,8 +678,16 @@ class GraphApiService(
                     }
 
                 val endByte = offset + currentChunkSize - 1
-                val response = uploadChunkWithRetry(uploadUrl, bytes, offset, endByte, fileSize)
+                val chunkResult = uploadChunkWithRetry(uploadUrl, bytes, offset, endByte, fileSize)
+                if (chunkResult is ChunkUploadResult.Committed) {
+                    offset = chunkResult.nextOffset
+                    finalChunkConfirmedByProbe = offset >= fileSize
+                    log.debug("Upload progress: {}/{} bytes", offset, fileSize)
+                    onProgress?.invoke(offset, fileSize)
+                    continue
+                }
 
+                val response = (chunkResult as ChunkUploadResult.Response).response
                 when (response.status.value) {
                     200, 201 -> result = json.decodeFromString<DriveItem>(response.bodyAsText())
                     202 -> {} // More chunks needed
@@ -685,19 +696,22 @@ class GraphApiService(
                         response.status.value,
                     )
                 }
-
                 offset += currentChunkSize
                 log.debug("Upload progress: {}/{} bytes", offset, fileSize)
                 onProgress?.invoke(offset, fileSize)
             }
-        } catch (e: Exception) {
-            // On permanent failure (session expired, auth error) remove the stored session.
-            sessionStore.delete(remotePath)
+        } catch (e: GraphApiException) {
+            // Terminal 4xx responses cannot be resumed. Keep the session for 408/429
+            // and server errors so a later attempt can continue from its committed offset.
+            if (e.statusCode in 400..499 && e.statusCode != 408 && e.statusCode != 429) {
+                sessionStore.delete(remotePath)
+            }
             throw e
         }
 
+        val uploadedItem = result ?: if (finalChunkConfirmedByProbe) getItemByPath(remotePath) else null
         sessionStore.delete(remotePath)
-        return result ?: throw GraphApiException("Upload session completed but no DriveItem returned")
+        return uploadedItem ?: throw GraphApiException("Upload session completed but no DriveItem returned")
     }
 
     /**
@@ -843,7 +857,7 @@ class GraphApiService(
         offset: Long,
         endByte: Long,
         fileSize: Long,
-    ): HttpResponse {
+    ): ChunkUploadResult {
         val retryDelays = listOf(2_000L, 4_000L, 8_000L)
         var currentOffset = offset
         var currentBytes = bytes
@@ -855,7 +869,9 @@ class GraphApiService(
             val response =
                 httpClient.put(uploadUrl) {
                     timeout {
-                        requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(currentBytes.size.toLong())
+                        val uploadTimeoutMs = UploadTimeoutPolicy.computeRequestTimeoutMs(currentBytes.size.toLong())
+                        requestTimeoutMillis = uploadTimeoutMs
+                        socketTimeoutMillis = uploadTimeoutMs
                     }
                     contentType(ContentType.Application.OctetStream)
                     header("Content-Range", "bytes $currentOffset-$endByte/$fileSize")
@@ -865,7 +881,7 @@ class GraphApiService(
             // Success or "more chunks" — return immediately
             if (response.status.value in listOf(200, 201, 202)) {
                 throttleBudget.recordSuccess()
-                return response
+                return ChunkUploadResult.Response(response)
             }
 
             // Session expired or gone — surface as a 404/410 so uploadLargeFile's two-attempt
@@ -923,6 +939,11 @@ class GraphApiService(
                         ?.firstOrNull()
                         ?.substringBefore("-")
                         ?.toLongOrNull()
+                if (nextStart != null && nextStart > endByte) {
+                    // The server accepted the entire chunk but its response was lost.
+                    // Advance the outer loop instead of retrying an empty byte range.
+                    return ChunkUploadResult.Committed(nextStart)
+                }
                 if (nextStart != null && nextStart > currentOffset) {
                     // Server committed some bytes; trim our buffer to what's still needed
                     val skip = (nextStart - currentOffset).toInt()
@@ -1289,3 +1310,9 @@ class GraphApiException(
     val statusCode: Int = 0,
     requestId: String? = null,
 ) : ProviderException(message, requestId = requestId)
+
+private sealed interface ChunkUploadResult {
+    data class Response(val response: HttpResponse) : ChunkUploadResult
+
+    data class Committed(val nextOffset: Long) : ChunkUploadResult
+}
