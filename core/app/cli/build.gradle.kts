@@ -249,6 +249,9 @@ tasks.register("runtimeImage") {
             "what a packaged distribution ships instead of a user-installed JDK"
 
     dependsOn(tasks.shadowJar)
+    // The shadow jar it reads lies in build/libs, where copyCoroutineDebugAgent stages the agent (a finalizer of shadowJar): Gradle 9
+    // fails the build on that undeclared overlap, as for verifyThirdPartyNotices above. The copy goes first.
+    mustRunAfter(copyCoroutineDebugAgent)
 
     val imageDir = layout.buildDirectory.dir("runtime-image")
     outputs.dir(imageDir).withPropertyName("imageDir")
