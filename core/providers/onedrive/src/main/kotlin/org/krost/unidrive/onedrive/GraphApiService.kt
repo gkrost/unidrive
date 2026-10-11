@@ -661,6 +661,7 @@ class GraphApiService(
         if (initialOffset > 0) log.debug("Upload resuming at offset {} / {} bytes", initialOffset, fileSize)
         var offset = initialOffset
         var result: DriveItem? = null
+        var finalChunkConfirmedByProbe = false
         try {
             while (offset < fileSize) {
                 val currentChunkSize = minOf(chunkSize, fileSize - offset).toInt()
@@ -675,8 +676,16 @@ class GraphApiService(
                     }
 
                 val endByte = offset + currentChunkSize - 1
-                val response = uploadChunkWithRetry(uploadUrl, bytes, offset, endByte, fileSize)
+                val chunkResult = uploadChunkWithRetry(uploadUrl, bytes, offset, endByte, fileSize)
+                if (chunkResult is ChunkUploadResult.Committed) {
+                    offset = chunkResult.nextOffset
+                    finalChunkConfirmedByProbe = offset >= fileSize
+                    log.debug("Upload progress: {}/{} bytes", offset, fileSize)
+                    onProgress?.invoke(offset, fileSize)
+                    continue
+                }
 
+                val response = (chunkResult as ChunkUploadResult.Response).response
                 when (response.status.value) {
                     200, 201 -> result = json.decodeFromString<DriveItem>(response.bodyAsText())
                     202 -> {} // More chunks needed
@@ -685,7 +694,6 @@ class GraphApiService(
                         response.status.value,
                     )
                 }
-
                 offset += currentChunkSize
                 log.debug("Upload progress: {}/{} bytes", offset, fileSize)
                 onProgress?.invoke(offset, fileSize)
@@ -696,8 +704,9 @@ class GraphApiService(
             throw e
         }
 
+        val uploadedItem = result ?: if (finalChunkConfirmedByProbe) getItemByPath(remotePath) else null
         sessionStore.delete(remotePath)
-        return result ?: throw GraphApiException("Upload session completed but no DriveItem returned")
+        return uploadedItem ?: throw GraphApiException("Upload session completed but no DriveItem returned")
     }
 
     /**
@@ -843,7 +852,7 @@ class GraphApiService(
         offset: Long,
         endByte: Long,
         fileSize: Long,
-    ): HttpResponse {
+    ): ChunkUploadResult {
         val retryDelays = listOf(2_000L, 4_000L, 8_000L)
         var currentOffset = offset
         var currentBytes = bytes
@@ -865,7 +874,7 @@ class GraphApiService(
             // Success or "more chunks" — return immediately
             if (response.status.value in listOf(200, 201, 202)) {
                 throttleBudget.recordSuccess()
-                return response
+                return ChunkUploadResult.Response(response)
             }
 
             // Session expired or gone — surface as a 404/410 so uploadLargeFile's two-attempt
@@ -923,6 +932,11 @@ class GraphApiService(
                         ?.firstOrNull()
                         ?.substringBefore("-")
                         ?.toLongOrNull()
+                if (nextStart != null && nextStart > endByte) {
+                    // The server accepted the entire chunk but its response was lost.
+                    // Advance the outer loop instead of retrying an empty byte range.
+                    return ChunkUploadResult.Committed(nextStart)
+                }
                 if (nextStart != null && nextStart > currentOffset) {
                     // Server committed some bytes; trim our buffer to what's still needed
                     val skip = (nextStart - currentOffset).toInt()
@@ -1289,3 +1303,9 @@ class GraphApiException(
     val statusCode: Int = 0,
     requestId: String? = null,
 ) : ProviderException(message, requestId = requestId)
+
+private sealed interface ChunkUploadResult {
+    data class Response(val response: HttpResponse) : ChunkUploadResult
+
+    data class Committed(val nextOffset: Long) : ChunkUploadResult
+}
