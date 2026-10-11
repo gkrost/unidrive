@@ -125,4 +125,37 @@ class AllZeroNewFileTest {
             assertContentEquals(remoteBytes, Files.readAllBytes(stub), "the recovery download fills the stub")
             assertEquals(emptyList(), provider.uploadedPaths, "the stub is never uploaded")
         }
+
+    @Test
+    fun `a freed stub that lost its row is filled from the cloud, never uploaded over it`() =
+        runTest {
+            // What `sync --reset` (or a lost state.db) leaves behind a `unidrive free`: zeros of the remote size, and no
+            // row. The scanner now takes it for real content, so the guard is the both-new path: same size as the cloud
+            // file, it is compared, and the cloud's bytes win. Uploading the zeros would destroy the cloud copy.
+            val remoteBytes = ByteArray(size) { (it % 251 + 1).toByte() }
+            val stub = syncRoot.resolve("big.bin")
+            Files.write(stub, ByteArray(size))
+            provider.files["/big.bin"] = remoteBytes
+            provider.deltaItems =
+                listOf(
+                    org.krost.unidrive.CloudItem(
+                        id = "id-/big.bin",
+                        name = "big.bin",
+                        path = "/big.bin",
+                        size = size.toLong(),
+                        isFolder = false,
+                        modified = Instant.parse("2026-03-28T12:00:00Z"),
+                        created = Instant.parse("2026-03-28T10:00:00Z"),
+                        hash = "hash-big",
+                        mimeType = "application/octet-stream",
+                    ),
+                )
+
+            engine().syncOnce()
+            engine().syncOnce()
+
+            assertEquals(emptyList(), provider.uploadedPaths, "the zeros must never be uploaded over the cloud file")
+            assertContentEquals(remoteBytes, provider.files["/big.bin"], "the cloud copy is intact")
+            assertContentEquals(remoteBytes, Files.readAllBytes(stub), "the stub is filled from the cloud")
+        }
 }
