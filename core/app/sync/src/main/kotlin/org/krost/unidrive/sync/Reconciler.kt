@@ -1268,6 +1268,47 @@ class Reconciler(
                 ),
             )
         }
+        dropMovesCarriedByFolderMoves(actions)
+    }
+
+    /**
+     * #424: a remote folder rename reports the folder AND its descendants at their new paths, so the loop
+     * above plans a MoveLocal for each. The folder's move already carries every descendant (on disk, and
+     * in state.db through renamePrefix), so a descendant move whose destination is just its old path
+     * re-rooted under the folder's new path has nothing left to do. Run anyway, it found its source gone
+     * and recreated an empty placeholder over the file the folder move had put there. Such moves are
+     * dropped here. A descendant that ALSO got a new name inside the moved folder keeps its move, with
+     * its source re-rooted under the folder's new path: that is where the file is once the folder move
+     * (which sorts first, its destination being shallower) has run.
+     */
+    private fun dropMovesCarriedByFolderMoves(actions: MutableList<SyncAction>) {
+        val folderMoves = actions.filterIsInstance<SyncAction.MoveLocal>().filter { it.remoteItem.isFolder }
+        if (folderMoves.isEmpty()) return
+        actions.removeAll { action ->
+            action is SyncAction.MoveLocal &&
+                folderMoves.any { folder ->
+                    folder !== action &&
+                        action.fromPath.startsWith(folder.fromPath + "/") &&
+                        action.path == folder.path + action.fromPath.removePrefix(folder.fromPath)
+                }
+        }
+        for (i in actions.indices) {
+            val move = actions[i] as? SyncAction.MoveLocal ?: continue
+            // The deepest folder move that both contains the source and keeps the destination inside its new
+            // path. Re-rooting is exact only when no other folder move sits between it and the source.
+            val carrier =
+                folderMoves
+                    .filter { f ->
+                        f !== move && move.fromPath.startsWith(f.fromPath + "/") && move.path.startsWith(f.path + "/")
+                    }.maxByOrNull { it.fromPath.length } ?: continue
+            val between =
+                folderMoves.any { n ->
+                    n !== move && n !== carrier &&
+                        n.fromPath.startsWith(carrier.fromPath + "/") && move.fromPath.startsWith(n.fromPath + "/")
+                }
+            if (between) continue
+            actions[i] = move.copy(fromPath = carrier.path + move.fromPath.removePrefix(carrier.fromPath))
+        }
     }
 
     private fun sortActions(actions: List<SyncAction>): List<SyncAction> =
