@@ -164,8 +164,8 @@ object DaemonAutospawn {
             addAll(staticJvmFlags(jar.resolveSibling("jvm-flags.txt")))
             addAll(localeArgs(env, props))
             props("java.io.tmpdir")?.takeIf { it.isNotBlank() }?.let { add("-Djdk.net.unixdomain.tmpdir=$it") }
-            if (CoroutineDebug.enabled()) {
-                CoroutineDebug.agentJarBeside(jar)?.let { add("-javaagent=$it") }
+            if (CoroutineDebug.enabled(env)) {
+                CoroutineDebug.agentJarBeside(jar)?.let { add("-javaagent:$it") }
             }
             addAll(diagArgs(diagDir(env, props, windows)))
             add("-jar")

@@ -74,8 +74,8 @@ object CoroutineDebug {
     /** File-name prefix of the standalone probe jar the deploy places beside the fat jar. */
     const val AGENT_JAR_PREFIX = "kotlinx-coroutines-core-jvm-"
 
-    fun enabled(): Boolean {
-        val value = System.getenv(ENV_FLAG) ?: return false
+    fun enabled(env: (String) -> String? = System::getenv): Boolean {
+        val value = env(ENV_FLAG) ?: return false
         return value.isNotBlank() && value != "0"
     }
 
