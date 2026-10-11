@@ -641,11 +641,9 @@ dependencies {
     implementation(project(":app:engine-core"))
     // The CliExtension SPI that CliExtensionLoader discovers implementations of (#560).
     implementation(project(":app:cli-spi"))
-    // Runtime-only: the tracking-set engine implements the CliExtension SPI
-    // from :app:cli-spi. Declaring it runtimeOnly puts TrackingCliExtension
-    // (+ its META-INF/services registration) on the shadowJar runtime
-    // classpath for ServiceLoader discovery; the CLI never compiles against it.
-    runtimeOnly(project(":app:sync-tracking"))
+    // The CLI owns the tracking-set commands and renders their user-facing
+    // text; the tracking-set engine remains a separately consumable module.
+    implementation(project(":app:sync-tracking"))
     implementation(project(":app:hydration"))
 
     implementation(libs.kotlinx.coroutines.core)
