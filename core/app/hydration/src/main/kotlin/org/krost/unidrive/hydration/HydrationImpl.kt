@@ -25,6 +25,7 @@ import kotlinx.coroutines.withTimeout
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.RemoteIncompleteDownloadException
+import org.krost.unidrive.RemoteObjectMissingDownloadException
 import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.MountHost
 import org.krost.unidrive.sync.PathNormalizer
@@ -2090,6 +2091,7 @@ class HydrationImpl(
     // numbers, a genuinely-gone read the not_found token, everything else stays Generic (→ EIO).
     private fun downloadFailureOf(e: Exception, fallback: String): HydrationError = when {
         e is RemoteIncompleteDownloadException -> HydrationError.RemoteIncomplete(e.storedBytes, e.declaredBytes)
+        e is RemoteObjectMissingDownloadException -> HydrationError.RemoteObjectMissing
         isNotFound(e) -> HydrationError.NotFound
         else -> HydrationError.Generic(e.message ?: fallback)
     }
@@ -2105,6 +2107,7 @@ class HydrationImpl(
         // A short stored object (#536) IS a PermanentDownloadFailureException — quarantined like
         // one — but it is not a gone file: it keeps its own remote_incomplete token.
         if (e is RemoteIncompleteDownloadException) return false
+        if (e is RemoteObjectMissingDownloadException) return false
         if (e is PermanentDownloadFailureException) return true
         return statusCodeOf(e) == 404 || (e.cause?.let { statusCodeOf(it) } == 404)
     }

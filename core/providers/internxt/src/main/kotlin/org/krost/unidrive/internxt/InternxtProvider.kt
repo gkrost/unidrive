@@ -410,16 +410,11 @@ class InternxtProvider(
                         try {
                             api.getBridgeFileInfo(bucket, fileId)
                         } catch (e: InternxtApiException) {
-                            // Live evidence: a single zero-byte file
-                            // (`/Annika.txt`) was retried 1,248 times over 8h after
-                            // the user deleted it from Internxt. The 404 body is the
-                            // stable `{"error":"Bucket entry … not found"}` shape; the
-                            // bridge returns the same shape for any hard-deleted
-                            // bucket entry. Treating it as permanent (rather than
-                            // transient) lets the engine quarantine the row and stop
-                            // burning download attempts; the next delta event for the
-                            // same remote_id clears the flag.
-                            if (isBucketEntryNotFound(e)) throw permanentDownloadFailure(remotePath, e)
+                            // The drive metadata resolved above, so a bridge 404 means the
+                            // listed item has no stored encrypted object. Quarantine it as
+                            // distinct from a missing drive item; the message also survives
+                            // through hydration status for clients to explain the failure.
+                            if (isBucketEntryNotFound(e)) throw remoteObjectMissingFailure(e)
                             throw e
                         }
                     // #333 review: hexToBytes now fails loud on a malformed index. A bridge entry
@@ -562,6 +557,14 @@ class InternxtProvider(
         PermanentDownloadFailureException(
             "Internxt bucket entry for $remotePath is permanently gone (404). " +
                 "Quarantining the row; a fresh delta event clears it. Cause: ${cause.message}",
+            cause = cause,
+            requestId = cause.requestId,
+        )
+
+    private fun remoteObjectMissingFailure(cause: InternxtApiException): RemoteObjectMissingDownloadException =
+        RemoteObjectMissingDownloadException(
+            "remote_object_missing: Internxt still lists this file, but its encrypted bridge object is absent; " +
+                "the local file is preserved and this download is quarantined until the remote item changes.",
             cause = cause,
             requestId = cause.requestId,
         )
