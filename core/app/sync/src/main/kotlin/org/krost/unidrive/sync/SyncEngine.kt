@@ -156,11 +156,13 @@ open class SyncEngine(
     // records on the same tracker when it tries again after a failure.
     val enumerationTracker: EnumerationTracker = EnumerationTracker(),
     xdgUserDirsOverridesForTest: Map<String, String>? = null,
-    // #738: the clock that stamps keep-both conflict copies. Tests pin it; production uses the system clock.
-    private val conflictClock: java.time.Clock = java.time.Clock.systemDefaultZone(),
 ) : MountHost,
     EnumerationEntryPoint {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
+
+    // #738: the clock that stamps keep-both conflict copies. Tests pin it; production uses the system clock.
+    // A property rather than a constructor parameter, so the constructor's signature stays as it is.
+    internal var conflictClock: java.time.Clock = java.time.Clock.systemDefaultZone()
     private val effectiveExcludePatterns =
         validateExcludePatterns(
             (SyncConfig.DEFAULT_EXCLUDE_PATTERNS + excludePatterns).distinct(),

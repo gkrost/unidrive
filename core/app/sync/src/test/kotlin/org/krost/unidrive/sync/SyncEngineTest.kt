@@ -3506,8 +3506,7 @@ class SyncEngineTest {
                     conflictPolicy = ConflictPolicy.KEEP_BOTH,
                     reporter = ProgressReporter.Silent,
                     syncDirection = SyncDirection.BIDIRECTIONAL,
-                    conflictClock = pinned,
-                )
+                ).also { it.conflictClock = pinned }
 
             fun seedConflict(
                 mine: String,
