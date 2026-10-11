@@ -148,6 +148,32 @@ class DaemonAutospawnTest {
     }
 
     @Test
+    fun `the spawned daemon passes the coroutine debug agent with a colon`() {
+        val jarDir = Files.createTempDirectory("autospawn-agent")
+        val diagDir = Files.createTempDirectory("autospawn-agent-diag")
+        val agentJar = jarDir.resolve("${CoroutineDebug.AGENT_JAR_PREFIX}test.jar")
+        Files.createFile(agentJar)
+        val command =
+            DaemonAutospawn.spawnCommand(
+                javaBin = Path.of("java"),
+                jar = jarDir.resolve("unidrive.jar"),
+                configRoot = Files.createTempDirectory("autospawn-agent-config"),
+                profileName = "p",
+                env = { name ->
+                    when (name) {
+                        CoroutineDebug.ENV_FLAG -> "1"
+                        "UNIDRIVE_DIAG_DIR" -> diagDir.toString()
+                        else -> null
+                    }
+                },
+                props = { null },
+            )
+
+        assertTrue(command.contains("-javaagent:$agentJar"))
+        assertFalse(command.any { it.startsWith("-javaagent=") })
+    }
+
+    @Test
     fun `a jar without a sibling jvm-flags txt still spawns the heap and diagnostics flags`() {
         val diag = Files.createTempDirectory("autospawn-nostatic-diag")
         val command =
