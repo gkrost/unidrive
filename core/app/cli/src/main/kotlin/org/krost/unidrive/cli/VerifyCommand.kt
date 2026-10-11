@@ -4,6 +4,8 @@ import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.RemoteObjectAuditReport
+import org.krost.unidrive.RemoteObjectStatus
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.sync.HashVerifier
 import org.krost.unidrive.sync.PathNormalizer
@@ -13,10 +15,18 @@ import org.krost.unidrive.sync.SyncScope
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.putJsonObject
 import java.io.IOException
 import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.Callable
@@ -63,8 +73,26 @@ class VerifyCommand : Callable<Int> {
     )
     var syncPaths: MutableList<String> = mutableListOf()
 
+    @Option(
+        names = ["--remote-objects"],
+        description = ["Audit provider-side object metadata and shard availability without downloading content (currently Internxt)."],
+    )
+    var remoteObjects: Boolean = false
+
+    @Option(
+        names = ["--json-report"],
+        paramLabel = "FILE",
+        description = ["Write the --remote-objects audit as an atomic JSON report to this path."],
+    )
+    var jsonReport: Path? = null
+
     override fun call(): Int {
         val profile = parent.resolveCurrentProfile()
+        if (remoteObjects) return auditRemoteObjects(profile.name, jsonReport)
+        if (jsonReport != null) {
+            System.err.println("verify: --json-report requires --remote-objects")
+            return EXIT_UNAUDITABLE
+        }
         val configDir = parent.configBaseDir().resolve(profile.name)
         val dbPath = configDir.resolve("state.db")
         if (!Files.exists(dbPath)) {
@@ -143,6 +171,122 @@ class VerifyCommand : Callable<Int> {
             )
         println(VerifyAudit.formatReport(profile.name, report))
         return if (report.converged) EXIT_CONVERGED else EXIT_DIVERGED
+    }
+
+    private fun auditRemoteObjects(
+        profileName: String,
+        reportPath: Path?,
+    ): Int {
+        if (reportPath == null) {
+            System.err.println("verify: --remote-objects requires --json-report FILE so the audit is preserved")
+            return EXIT_UNAUDITABLE
+        }
+        val excludes = parent.loadSyncConfig().effectiveExcludePatterns(profileName)
+        val scope = SyncScope.normalize(syncPaths)
+        val provider = parent.createProvider()
+        val auditor = provider.remoteObjectAuditor
+        if (auditor == null) {
+            provider.close()
+            System.err.println("verify: provider '${provider.id}' does not support read-only remote object audits")
+            return EXIT_UNAUDITABLE
+        }
+        val report =
+            try {
+                runBlocking {
+                    provider.authenticateAndLog()
+                    val remoteFiles = listRemoteFiles(provider, excludes, scope).values.sortedBy { it.path }
+                    auditor.auditRemoteObjects(remoteFiles)
+                }
+            } catch (e: AuthenticationException) {
+                System.err.print(
+                    parent.renderAuthError(
+                        e,
+                        provider.id,
+                        provider.displayName,
+                        parent.verbose,
+                        profileName,
+                    ),
+                )
+                return EXIT_UNAUDITABLE
+            } catch (e: Exception) {
+                System.err.println("verify: remote object audit failed: ${e.message ?: e.javaClass.simpleName}")
+                return EXIT_UNAUDITABLE
+            } finally {
+                provider.close()
+            }
+        try {
+            writeRemoteAuditReport(reportPath, profileName, provider.id, SyncScope.normalize(syncPaths), report)
+        } catch (e: Exception) {
+            System.err.println("verify: could not write JSON report: ${e.message ?: e.javaClass.simpleName}")
+            return EXIT_UNAUDITABLE
+        }
+        val findings = report.objects.filter { it.status != RemoteObjectStatus.HEALTHY }
+        println("Remote objects checked: ${report.checkedCount}")
+        println("Findings:              ${findings.size}")
+        println("JSON report:           ${reportPath.toAbsolutePath().normalize()}")
+        for (finding in findings) {
+            println("${finding.status.name.lowercase()} ${finding.path} drive=${finding.driveSize} bridge=${finding.bridgeSize} shards=${finding.shardBytes}")
+        }
+        return when {
+            findings.any { it.status == RemoteObjectStatus.UNVERIFIED } -> EXIT_UNAUDITABLE
+            findings.isNotEmpty() -> EXIT_DIVERGED
+            else -> EXIT_CONVERGED
+        }
+    }
+
+    internal fun writeRemoteAuditReport(
+        reportPath: Path,
+        profileName: String,
+        providerId: String,
+        scope: List<String>,
+        report: RemoteObjectAuditReport,
+    ) {
+        val destination = reportPath.toAbsolutePath().normalize()
+        val parentDir = destination.parent ?: throw IOException("report path has no parent directory")
+        Files.createDirectories(parentDir)
+        val json = Json { prettyPrint = true }
+        val body =
+            buildJsonObject {
+                put("schemaVersion", 1)
+                put("profile", profileName)
+                put("provider", providerId)
+                putJsonArray("scope") {
+                    (if (scope.isEmpty()) listOf("/") else scope).forEach { add(it) }
+                }
+                put("checkedCount", report.checkedCount)
+                putJsonObject("summary") {
+                    RemoteObjectStatus.entries.forEach { status ->
+                        put(status.name.lowercase(), report.objects.count { it.status == status })
+                    }
+                }
+                putJsonArray("objects") {
+                    report.objects.forEach { item ->
+                        add(
+                            buildJsonObject {
+                                put("path", item.path)
+                                put("status", item.status.name.lowercase())
+                                put("driveSize", item.driveSize)
+                                item.bridgeSize?.let { put("bridgeSize", it) }
+                                item.shardCount?.let { put("shardCount", it) }
+                                item.availableShardCount?.let { put("availableShardCount", it) }
+                                item.shardBytes?.let { put("shardBytes", it) }
+                                item.detail?.let { put("detail", it) }
+                            },
+                        )
+                    }
+                }
+            }
+        val temporary = Files.createTempFile(parentDir, ".unidrive-verify-", ".json.tmp")
+        try {
+            Files.writeString(temporary, json.encodeToString(JsonObject.serializer(), body))
+            try {
+                Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            Files.deleteIfExists(temporary)
+        }
     }
 
     private fun isExcluded(

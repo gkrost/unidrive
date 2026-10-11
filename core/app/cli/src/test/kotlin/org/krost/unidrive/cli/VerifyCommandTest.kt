@@ -2,6 +2,13 @@ package org.krost.unidrive.cli
 
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.model.SyncEntry
+import org.krost.unidrive.RemoteObjectAuditRecord
+import org.krost.unidrive.RemoteObjectAuditReport
+import org.krost.unidrive.RemoteObjectStatus
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import picocli.CommandLine
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
@@ -205,6 +212,52 @@ class VerifyCommandTest {
         assertNotNull(verifyCmd, "verify subcommand should be registered")
         val options = verifyCmd.commandSpec.options().map { it.longestName() }
         assertTrue("--deep" in options)
+        assertTrue("--remote-objects" in options)
+        assertTrue("--json-report" in options)
+    }
+
+    @Test
+    fun `remote object audit requires a saved report and provider support`() {
+        assertEquals(VerifyCommand.EXIT_UNAUDITABLE, runVerify("--remote-objects"))
+        assertEquals(
+            VerifyCommand.EXIT_UNAUDITABLE,
+            runVerify("--remote-objects", "--json-report", configDir.resolve("audit.json").toString()),
+        )
+        assertTrue(!Files.exists(configDir.resolve("audit.json")), "unsupported provider must not create a report")
+    }
+
+    @Test
+    fun `remote audit report is saved as machine-readable JSON`() {
+        val reportPath = configDir.resolve("audit.json")
+        val report =
+            RemoteObjectAuditReport(
+                checkedCount = 1,
+                objects =
+                    listOf(
+                        RemoteObjectAuditRecord(
+                            path = "/synthetic.bin",
+                            status = RemoteObjectStatus.TRUNCATED,
+                            driveSize = 100,
+                            bridgeSize = 100,
+                            shardCount = 1,
+                            availableShardCount = 1,
+                            shardBytes = 40,
+                            detail = "bridge or shard byte total is below the drive size",
+                        ),
+                    ),
+            )
+
+        VerifyCommand().writeRemoteAuditReport(reportPath, "localtest", "internxt", listOf("/scope"), report)
+
+        val root = Json.parseToJsonElement(Files.readString(reportPath)).jsonObject
+        assertEquals("localtest", root.getValue("profile").jsonPrimitive.content)
+        assertEquals("internxt", root.getValue("provider").jsonPrimitive.content)
+        assertEquals("1", root.getValue("checkedCount").jsonPrimitive.content)
+        assertEquals("/scope", root.getValue("scope").jsonArray.single().jsonPrimitive.content)
+        val objectEntry = root.getValue("objects").jsonArray.single().jsonObject
+        assertEquals("/synthetic.bin", objectEntry.getValue("path").jsonPrimitive.content)
+        assertEquals("truncated", objectEntry.getValue("status").jsonPrimitive.content)
+        assertEquals("40", objectEntry.getValue("shardBytes").jsonPrimitive.content)
     }
 }
 
