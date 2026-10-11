@@ -119,6 +119,24 @@ class StateDatabaseTest {
         assertNull(db.getEntry("/nope"))
     }
 
+    // #728: the eviction pass classifies a whole batch of cache files from one query. The map is keyed
+    // by the spelling the caller asked with (NFD in, NFD key out) and a path with no alive row is absent.
+    @Test
+    fun `getEntriesByPaths resolves a batch across NFC and NFD and omits unknown paths`() {
+        val nfc = "/sch\u00F6n.txt" // composed o-with-diaeresis (U+00F6)
+        val nfd = "/scho\u0308n.txt" // decomposed o + combining diaeresis (U+0308)
+        db.upsertEntry(entry("/a.txt"))
+        db.upsertEntry(entry(nfc))
+
+        val found = db.getEntriesByPaths(listOf("/a.txt", nfd, "/missing.txt"))
+
+        assertEquals(setOf("/a.txt", nfd), found.keys)
+        assertEquals("id-/a.txt", found["/a.txt"]?.remoteId)
+        assertEquals(nfc, found[nfd]?.path, "the row is stored NFC, keyed by what the caller asked with")
+        assertNull(found["/missing.txt"], "no alive row: absent, not null")
+        assertTrue(db.getEntriesByPaths(emptyList()).isEmpty())
+    }
+
     @Test
     fun `delete entry`() {
         db.upsertEntry(entry("/del.txt"))

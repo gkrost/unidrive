@@ -7,7 +7,7 @@
     <ID>CyclomaticComplexMethod:DaemonRuntime.kt$DaemonRuntime$suspend fun start()</ID>
     <ID>CyclomaticComplexMethod:LegacyInventory.kt$LegacyInventory$private fun classify( inputs: Inputs, lockFacts: LockFacts, state: State?, ): Report</ID>
     <ID>CyclomaticComplexMethod:MigrateConvertCommand.kt$LegacyConversion$internal fun execute( setup: Setup, rawMode: String, rawDisposition: String?, restart: Boolean, verbose: Boolean, ): Int</ID>
-    <ID>CyclomaticComplexMethod:ProfileCommand.kt$ProfileAddCommand$override fun run()</ID>
+    <ID>CyclomaticComplexMethod:ProfileCommand.kt$ProfileAddCommand$private fun run()</ID>
     <ID>CyclomaticComplexMethod:SyncCommand.kt$SyncCommand$override fun run()</ID>
     <ID>FunctionOnlyReturningConstant:GlyphRenderer.kt$GlyphRenderer$fun orphanLabel(): String</ID>
     <ID>FunctionOnlyReturningConstant:GlyphRenderer.kt$GlyphRenderer$fun trackingSetLabel(): String</ID>
@@ -43,18 +43,34 @@
     <ID>NestedBlockDepth:VaultCommand.kt$VaultEncryptCommand$override fun run()</ID>
     <ID>SpreadOperator:AutostartCommand.kt$AutostartCommand$( *autostartArguments(mode, profile.name, parent.configDir, parent.verbose).toTypedArray(), )</ID>
     <ID>SpreadOperator:Main.kt$(*args)</ID>
+    <ID>SwallowedException:AuthLifecycle.kt$AuthBeginCommand$e: Exception</ID>
+    <ID>SwallowedException:AuthLifecycle.kt$AuthBeginCommand$e: IOException</ID>
+    <ID>SwallowedException:AuthLifecycle.kt$AuthCompleteCommand$e: Exception</ID>
+    <ID>SwallowedException:AuthLifecycle.kt$AuthLoginCommand$e: Exception</ID>
+    <ID>SwallowedException:AuthLifecycle.kt$AuthLoginCommand$e: IOException</ID>
+    <ID>SwallowedException:LifecycleJson.kt$e: java.io.IOException</ID>
     <ID>SwallowedException:LsCommand.kt$LsCommand$e: java.io.IOException</ID>
     <ID>SwallowedException:Main.kt$Main$e: javax.crypto.AEADBadTagException</ID>
+    <ID>SwallowedException:ProfileCreate.kt$ProfileCreator$e: Exception</ID>
+    <ID>SwallowedException:ProfileCreate.kt$ProfileCreator$e: IOException</ID>
     <ID>SwallowedException:ProfileSettings.kt$ProfileSetCommand$e: IOException</ID>
     <ID>SwallowedException:ProfileSettings.kt$ProfileSettings$e: IllegalArgumentException</ID>
     <ID>SwallowedException:RelocateCommand.kt$RelocateCommand$e: Exception</ID>
     <ID>SwallowedException:RelocateCommandTest.kt$RelocateCommandTest$e: RuntimeException</ID>
     <ID>SwallowedException:WindowsArgv.kt$WindowsArgv$e: Throwable</ID>
+    <ID>ThrowsCount:AuthLifecycleTest.kt$AuthLifecycleTest$@Test fun `login maps the provider's failures to tokens without echoing their messages`()</ID>
     <ID>ThrowsCount:DaemonRuntime.kt$DaemonRuntime$suspend fun start()</ID>
+    <ID>ThrowsCount:LifecycleJson.kt$internal fun resolveProfileTarget( main: Main, profileOption: String?, ): ProfileTarget</ID>
     <ID>ThrowsCount:Main.kt$Main$private fun loadVaultData(): Map&lt;String, Map&lt;String, String&gt;&gt;</ID>
+    <ID>ThrowsCount:ProfileCreate.kt$ProfileCreator$fun create( configDir: Path, req: NewProfile, ): JsonObject</ID>
+    <ID>ThrowsCount:ProfileCreate.kt$ProfileCreator$private fun credentialsFromOptions( prompts: List&lt;org.krost.unidrive.PromptSpec&gt;, options: List&lt;String&gt;, ): Map&lt;String, String&gt;</ID>
     <ID>ThrowsCount:ProfileSettings.kt$ProfileSetCommand$private fun applyChange(): JsonObject</ID>
     <ID>ThrowsCount:ProfileSettings.kt$ProfileSettings$private fun syncPathToml( profile: String, raw: String, ): String</ID>
     <ID>ThrowsCount:RelocateCommand.kt$RelocateCommand$private fun runRelocate()</ID>
+    <ID>TooGenericExceptionCaught:AuthLifecycle.kt$AuthBeginCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:AuthLifecycle.kt$AuthCompleteCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:AuthLifecycle.kt$AuthLoginCommand$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:AuthLifecycle.kt$e: Exception</ID>
     <ID>TooGenericExceptionCaught:CliExtensionLoader.kt$CliExtensionLoader$t: Throwable</ID>
     <ID>TooGenericExceptionCaught:CoroutineDebug.kt$CoroutineDebug$e: Exception</ID>
     <ID>TooGenericExceptionCaught:DaemonAutospawn.kt$DaemonAutospawn$e: Exception</ID>
@@ -65,6 +81,7 @@
     <ID>TooGenericExceptionCaught:GetCommand.kt$GetCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:LegacyInventory.kt$LegacyInventory$e: Exception</ID>
     <ID>TooGenericExceptionCaught:Main.kt$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:ProfileCreate.kt$ProfileCreator$e: Exception</ID>
     <ID>TooGenericExceptionCaught:ProfileCommand.kt$ProfileListCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:QuotaCommand.kt$QuotaCommand$e: Exception</ID>
     <ID>TooGenericExceptionCaught:RefreshRpcHandler.kt$RefreshRpcHandler$e: Exception</ID>

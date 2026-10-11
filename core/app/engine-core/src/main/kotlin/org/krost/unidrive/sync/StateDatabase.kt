@@ -722,6 +722,32 @@ class StateDatabase(
         }
     }
 
+    /**
+     * #728: [getEntry] for many paths in one query — one `alive_entries` statement instead of one per
+     * path, so a caller that classifies a whole batch holds the instance monitor once, not once per
+     * row. Paths are matched NFC like [getEntry]; the returned map is keyed by the caller's spelling,
+     * and a path without an alive row is simply absent. The caller keeps the batch bounded (the
+     * eviction pass asks about one LRU slice at a time): every path becomes a bound statement
+     * parameter, with SQLITE_MAX_VARIABLE_NUMBER the hard ceiling.
+     */
+    @Synchronized
+    fun getEntriesByPaths(paths: Collection<String>): Map<String, SyncEntry> {
+        if (paths.isEmpty()) return emptyMap()
+        val storedToCaller = HashMap<String, String>(paths.size * 2)
+        for (path in paths) storedToCaller[PathNormalizer.nfc(path)] = path
+        val placeholders = storedToCaller.keys.joinToString(",") { "?" }
+        conn.prepareStatement("SELECT * FROM alive_entries WHERE path IN ($placeholders)").use { stmt ->
+            storedToCaller.keys.forEachIndexed { index, stored -> stmt.setString(index + 1, stored) }
+            val rs = stmt.executeQuery()
+            val found = HashMap<String, SyncEntry>(storedToCaller.size * 2)
+            while (rs.next()) {
+                val entry = rs.toSyncEntry()
+                storedToCaller[entry.path]?.let { callerPath -> found[callerPath] = entry }
+            }
+            return found
+        }
+    }
+
     @Synchronized
     fun getEntryByRemoteId(remoteId: String): SyncEntry? {
         conn.prepareStatement("SELECT * FROM alive_entries WHERE remote_id = ?").use { stmt ->

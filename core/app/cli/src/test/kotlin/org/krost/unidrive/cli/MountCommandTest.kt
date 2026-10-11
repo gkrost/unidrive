@@ -229,6 +229,27 @@ class MountCommandTest {
     }
 
     @Test
+    fun `co_daemon_log_level_defaults_to_info_when_the_operator_set_none`() {
+        val env = mutableMapOf("PATH" to "/usr/bin")
+        MountCommand.applyDefaultCoDaemonLogLevel(env)
+        assertEquals("info", env["RUST_LOG"])
+    }
+
+    @Test
+    fun `co_daemon_log_level_keeps_the_operators_choice`() {
+        val env = mutableMapOf("RUST_LOG" to "unidrive_mount=debug")
+        MountCommand.applyDefaultCoDaemonLogLevel(env)
+        assertEquals("unidrive_mount=debug", env["RUST_LOG"])
+    }
+
+    @Test
+    fun `co_daemon_log_level_replaces_a_blank_value`() {
+        val env = mutableMapOf("RUST_LOG" to " ")
+        MountCommand.applyDefaultCoDaemonLogLevel(env)
+        assertEquals("info", env["RUST_LOG"])
+    }
+
+    @Test
     fun `exit_message_does_not_claim_the_daemon_is_down_when_it_answers`() {
         val msg = MountCommand.coDaemonExitMessage(1, "p1", MountCommand.DaemonStatus.ANSWERING)
         assertFalse(msg.contains("not running"), msg)

@@ -7,6 +7,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
@@ -31,6 +32,10 @@ import kotlin.test.assertTrue
  * is pending or failed (#136), a copy that was modified since it was recorded, a file no row owns. After
  * those, least recently used first. (#560 U6 retired the sync-root-copy ordering: every cache copy is the
  * row's only local file.)
+ *
+ * #728: a triggered pass is cheap when the cache is not plausibly over budget and does not repeat inside
+ * the pass interval (the walk itself is the expensive part); these tests pin that accounting gate, the
+ * interval and the batched row lookups, with [HydrationImpl.cacheWalkCount] as the counting seam.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HydrationCacheBudgetTest {
@@ -67,7 +72,16 @@ class HydrationCacheBudgetTest {
         budget: Long,
         graceMs: Long = 0,
         delayMs: Long = 0,
-    ) = HydrationImpl(engine, db, recoveryUploadScope = scope, cacheMaxBytes = budget, cacheAccessGraceMs = graceMs, evictionDelayMs = delayMs)
+        minIntervalMs: Long = HydrationImpl.EVICTION_MIN_INTERVAL_MS,
+    ) = HydrationImpl(
+        engine,
+        db,
+        recoveryUploadScope = scope,
+        cacheMaxBytes = budget,
+        cacheAccessGraceMs = graceMs,
+        evictionDelayMs = delayMs,
+        evictionMinIntervalMs = minIntervalMs,
+    )
 
     /** Files a normal sync run put into the sync root, then read once through the mount (the cache copy stays). */
     private suspend fun Env.syncedAndRead(vararg names: String): Map<String, Path> {
@@ -375,5 +389,116 @@ class HydrationCacheBudgetTest {
             sweep.join()
 
             assertTrue(sweep.isCancelled, "the cancelled sweep must not continue into eviction")
+        }
+
+    // ── #728: what a trigger is worth ───────────────────────────────────────────────────────────
+
+    @Test
+    fun `a trigger with the cache under budget does not walk it, an over-budget one does`() =
+        runTest {
+            val env = freshEnv()
+            env.provider.seed("/small.bin", bytesOf(1, 1_000))
+            env.engine.syncOnce()
+            // 1 KiB into the cache, hydrated before this instance exists: the sweep below finds it by
+            // walking, not by accounting.
+            env.engine.ensureHydrated("/small.bin")
+            // minIntervalMs = 0: this test isolates the accounting gate, not the pass interval.
+            val hydration = env.hydration(this, budget = 4_000, minIntervalMs = 0)
+
+            // The start sweep is a walk: it reconciles the accounting with the 1 KiB on disk.
+            hydration.sweepCache()
+            assertEquals(1, hydration.cacheWalkCount.get(), "the start sweep walks the cache")
+
+            // A warm open accounts the same 1 KiB again; the close's trigger is not worth a walk.
+            assertTrue(hydration.openForRead("conn", "h1", "/small.bin") is OpenResult.Ok)
+            hydration.closeHandle("conn", "h1")
+            advanceUntilIdle()
+
+            assertEquals(1, hydration.cacheWalkCount.get(), "an under-budget cache is not walked")
+
+            // 4 KiB of new bytes cross the budget: the next trigger walks and evicts what nobody uses.
+            env.provider.seed("/cold.bin", bytesOf(2, 4_000))
+            env.engine.syncOnce()
+            assertTrue(hydration.openForRead("conn", "h2", "/cold.bin") is OpenResult.Ok)
+            hydration.closeHandle("conn", "h2")
+            advanceUntilIdle()
+
+            assertEquals(2, hydration.cacheWalkCount.get(), "crossing the budget is worth a walk")
+            assertTrue(hydration.cacheSizeBytes() <= 4_000, "the pass brought the cache back under its budget")
+        }
+
+    @Test
+    fun `a burst of closes inside the pass interval walks the cache once`() =
+        runTest {
+            val env = freshEnv()
+            val cache = env.syncedAndRead("a.txt").getValue("a.txt")
+            val hydration = env.hydration(this, budget = 1, delayMs = 0)
+
+            hydration.openForRead("conn", "h1", "/a.txt")
+            assertTrue(Files.exists(cache))
+            // One close per scheduler turn: every trigger reaches the pass, and the interval still lets
+            // exactly one walk through. The first close is the open handle's own — that is the pass that
+            // finds the cache over budget; the burst of unregistered closes behind it must not add one.
+            repeat(20) { i ->
+                hydration.closeHandle("conn", if (i == 0) "h1" else "h$i")
+                runCurrent()
+            }
+            advanceUntilIdle()
+
+            assertEquals(1, hydration.cacheWalkCount.get(), "one walk for the whole burst")
+            assertFalse(Files.exists(cache), "the one walk that ran found the cache over budget")
+        }
+
+    @Test
+    fun `an over-budget pass classifies the cache in batches, not one row query per file`() =
+        runTest {
+            val env = freshEnv()
+            val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40
+            env.syncedAndRead(*(1..fileCount).map { "f%03d.bin".format(it) }.toTypedArray())
+            val hydration = env.hydration(this, budget = 1, delayMs = 0)
+            val batches = mutableListOf<Int>()
+            hydration.onDispositionBatch = { batches += it }
+
+            hydration.closeHandle("conn", "h")
+            advanceUntilIdle()
+
+            assertEquals(
+                listOf(HydrationImpl.EVICTION_DISPOSITION_BATCH, fileCount - HydrationImpl.EVICTION_DISPOSITION_BATCH),
+                batches,
+                "two row queries for $fileCount candidates",
+            )
+            assertEquals(0L, hydration.cacheSizeBytes(), "a 1-byte budget with every copy evictable empties the cache")
+        }
+
+    @Test
+    fun `a pass that needs a few evictions never looks at the rest of the cache`() =
+        runTest {
+            val env = freshEnv()
+            val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40
+            env.syncedAndRead(*(1..fileCount).map { "g%03d.bin".format(it) }.toTypedArray())
+            val hydration = env.hydration(this, budget = (fileCount - 2) * 1_000L, delayMs = 0)
+            val batches = mutableListOf<Int>()
+            hydration.onDispositionBatch = { batches += it }
+
+            hydration.closeHandle("conn", "h")
+            advanceUntilIdle()
+
+            assertEquals(1, batches.size, "two evictions out of the oldest batch: the rest is never asked about")
+            assertEquals((fileCount - 2) * 1_000L, hydration.cacheSizeBytes())
+        }
+
+    @Test
+    fun `the first trigger of a fresh instance reconciles instead of trusting an empty accounting`() =
+        runTest {
+            val env = freshEnv()
+            val cache = env.syncedAndRead("a.txt").getValue("a.txt")
+            // The copy was in the cache before this instance existed: its accounting starts at zero.
+            val hydration = env.hydration(this, budget = 1, delayMs = 0)
+
+            hydration.closeHandle("conn", "h")
+            advanceUntilIdle()
+
+            assertEquals(1, hydration.cacheWalkCount.get(), "the drift safety net walks on the first trigger")
+            assertFalse(Files.exists(cache), "and the walk found the cache over budget")
         }
 }
