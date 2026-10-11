@@ -42,6 +42,12 @@ class InternxtSeedCacheTest {
     private val fileId = "bridge-file-id-1"
     private val index64 = "11".repeat(32)
     private val shardUrl = "https://shard-host.invalid/seed-cache-shard"
+    private val shardBytes = "0123456789A".toByteArray()
+    private val shardSha256 =
+        java.security.MessageDigest
+            .getInstance("SHA-256")
+            .digest(shardBytes)
+            .joinToString("") { "%02x".format(it) }
 
     private val tmp: Path = Files.createTempDirectory("ud-seed-cache-")
     private val counting = CountingCrypto()
@@ -147,13 +153,13 @@ class InternxtSeedCacheTest {
             request.url.encodedPath == "/buckets/$bucket/files/$fileId/info" && request.method == HttpMethod.Get ->
                 respond(
                     """{"bucket":"$bucket","id":"$fileId","index":"$index64","shards":[""" +
-                        """{"index":0,"hash":"h","url":"$shardUrl"}]}""",
+                        """{"index":0,"hash":"$shardSha256","url":"$shardUrl"}]}""",
                     HttpStatusCode.OK,
                     json,
                 )
             request.url.host == "shard-host.invalid" && request.method == HttpMethod.Get ->
                 respond(
-                    "0123456789A".toByteArray(),
+                    shardBytes,
                     HttpStatusCode.OK,
                     headersOf(HttpHeaders.ContentType, "application/octet-stream"),
                 )
