@@ -3489,6 +3489,95 @@ class SyncEngineTest {
         provider.deltaItems = listOf(cloudItem("/c.txt", size = 6))
     }
 
+    /**
+     * #738: two keep-both conflicts on one file within the same second. Each conflict copy holds the
+     * user's own edit at that moment, so both copies must survive with their own bytes; the second must
+     * never overwrite the first. The clock is pinned so both conflicts get the same timestamp.
+     */
+    @Test
+    fun `keep_both_two_conflicts_in_the_same_second_keep_both_copies_with_their_own_bytes`() =
+        runTest {
+            val pinned = java.time.Clock.fixed(Instant.parse("2026-05-05T10:20:30Z"), java.time.ZoneOffset.UTC)
+            fun pinnedEngine() =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    syncDirection = SyncDirection.BIDIRECTIONAL,
+                    conflictClock = pinned,
+                )
+
+            fun seedConflict(
+                mine: String,
+                theirs: String,
+            ) {
+                val base = Instant.parse("2026-01-01T00:00:00Z")
+                db.upsertEntry(
+                    SyncEntry(
+                        path = "/c.txt",
+                        remoteId = "id-c",
+                        remoteHash = "base",
+                        remoteSize = 4,
+                        remoteModified = base,
+                        localMtime = base.toEpochMilli(),
+                        localSize = 4,
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = true,
+                        lastSynced = base,
+                    ),
+                )
+                db.setSyncState("delta_cursor", "existing-cursor")
+                val local = syncRoot.resolve("c.txt")
+                Files.writeString(local, mine)
+                Files.setLastModifiedTime(local, java.nio.file.attribute.FileTime.fromMillis(base.toEpochMilli() + 60_000))
+                provider.files["/c.txt"] = theirs.toByteArray()
+                provider.deltaItems = listOf(cloudItem("/c.txt", size = theirs.length.toLong()))
+            }
+
+            seedConflict(mine = "MINE-1", theirs = "THEIRS-1")
+            pinnedEngine().syncOnce(dryRun = false)
+            seedConflict(mine = "MINE-2-longer", theirs = "THEIRS-2-longer")
+            pinnedEngine().syncOnce(dryRun = false)
+
+            val copies =
+                Files.list(syncRoot).use { st ->
+                    st.filter { it.fileName.toString().contains(".conflict-local-") }.toList()
+                }
+            val bytes = copies.map { Files.readString(it) }.toSet()
+            assertEquals(2, copies.size, "two conflicts must leave two side copies; got $copies")
+            assertEquals(setOf("MINE-1", "MINE-2-longer"), bytes, "each side copy holds its own edit; got $copies")
+            assertTrue(
+                copies.all { it.fileName.toString().contains("20260505T102030") },
+                "the stamp carries seconds; got $copies",
+            )
+            assertEquals("THEIRS-2-longer", Files.readString(syncRoot.resolve("c.txt")), "canonical holds the latest remote")
+            val uploadedCopies = provider.uploadedPaths.filter { it.contains(".conflict-local-") }.toSet()
+            assertEquals(2, uploadedCopies.size, "both copies go up under their own names; uploaded=${provider.uploadedPaths}")
+            assertEquals(
+                setOf("MINE-1", "MINE-2-longer"),
+                uploadedCopies.map { String(provider.files[it]!!) }.toSet(),
+                "the remote copies hold their own bytes too",
+            )
+        }
+
+    @Test
+    fun `keep_both_copy_name_puts_the_counter_before_the_extension_and_ignores_dots_in_folders`() {
+        val taken = mutableSetOf<String>()
+        val first = SyncEngine.keepBothCopyPath("/my.dir/c.txt", "20260505T102030") { it in taken }
+        assertEquals("/my.dir/c.conflict-local-20260505T102030.txt", first)
+        taken += first
+        val second = SyncEngine.keepBothCopyPath("/my.dir/c.txt", "20260505T102030") { it in taken }
+        assertEquals("/my.dir/c.conflict-local-20260505T102030 (2).txt", second)
+        assertEquals(
+            "/my.dir/README.conflict-local-20260505T102030",
+            SyncEngine.keepBothCopyPath("/my.dir/README", "20260505T102030") { false },
+        )
+        assertFailsWith<IllegalStateException> { SyncEngine.keepBothCopyPath("/c.txt", "20260505T102030") { true } }
+    }
+
     @Test
     fun `keep_both_conflict_copy_is_uploaded_in_the_same_pass`() =
         runTest {

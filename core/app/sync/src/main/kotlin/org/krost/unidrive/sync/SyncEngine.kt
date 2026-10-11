@@ -155,6 +155,8 @@ open class SyncEngine(
     // records on the same tracker when it tries again after a failure.
     val enumerationTracker: EnumerationTracker = EnumerationTracker(),
     xdgUserDirsOverridesForTest: Map<String, String>? = null,
+    // #738: the clock that stamps keep-both conflict copies. Tests pin it; production uses the system clock.
+    private val conflictClock: java.time.Clock = java.time.Clock.systemDefaultZone(),
 ) : MountHost,
     EnumerationEntryPoint {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
@@ -3103,26 +3105,20 @@ open class SyncEngine(
     }
 
     private suspend fun applyKeepBoth(action: SyncAction.Conflict) {
+        // #738: the stamp carries seconds, and keepBothCopyPath adds a " (2)" counter when the name is
+        // still taken, so a second conflict on the same file never lands on the first one's copy.
         val timestamp =
             java.time.format.DateTimeFormatter
-                .ofPattern("yyyyMMdd'T'HHmm")
-                .withZone(java.time.ZoneId.systemDefault())
-                .format(Instant.now())
+                .ofPattern("yyyyMMdd'T'HHmmss")
+                .withZone(conflictClock.zone)
+                .format(Instant.now(conflictClock))
 
         val localPath = placeholder.resolveLocal(action.path)
-        val ext = action.path.substringAfterLast(".", "")
-        val base = action.path.substringBeforeLast(".")
         // The side copy holds the user's OWN edit, so it is named "conflict-local".
         // Keeping the user's edit on a side path (rather than the canonical path)
         // means a later delete of the canonical path by another actor reaps the
         // remote-derived canonical — NOT the user's surviving edit. The canonical
         // path becomes the remote version (the tracked entity).
-        val conflictSuffix =
-            if (ext.isNotEmpty()) {
-                ".conflict-local-$timestamp.$ext"
-            } else {
-                ".conflict-local-$timestamp"
-            }
 
         if (action.remoteItem != null && !action.remoteItem.deleted) {
             // Both sides diverged: preserve the local edit as a side copy, then
@@ -3131,13 +3127,21 @@ open class SyncEngine(
             if ((action.localState == ChangeState.NEW || action.localState == ChangeState.MODIFIED) &&
                 Files.exists(localPath)
             ) {
-                val conflictPath = "$base$conflictSuffix"
+                // A name is taken when anything exists there locally (a dangling link counts) or a row
+                // tracks it (a copy whose local file is gone but whose remote twin is still tracked).
+                val conflictPath =
+                    keepBothCopyPath(action.path, timestamp) { candidate ->
+                        val p = placeholder.resolveLocal(candidate)
+                        Files.exists(p, java.nio.file.LinkOption.NOFOLLOW_LINKS) || db.getEntry(candidate) != null
+                    }
                 val conflictLocal = placeholder.resolveLocal(conflictPath)
                 // Move the user's edit aside under the conflict-local name. It is uploaded in this same
                 // pass (below) and tracked at its own path, so a later delete of the canonical cannot
                 // reap the user's recoverable copy of their own work.
+                // #738: no REPLACE_EXISTING. An existing target is a bug, never something to overwrite: the
+                // move then throws, the conflict fails, and the canonical (the user's edit) stays untouched.
                 withEchoSuppression(conflictPath) {
-                    Files.move(localPath, conflictLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    Files.move(localPath, conflictLocal)
                 }
                 keptCopyPath = conflictPath
             }
@@ -3597,6 +3601,34 @@ open class SyncEngine(
 
     companion object {
         const val CONSECUTIVE_SYNC_FAILURE_HARD_CAP: Int = 20
+
+        /** How many " (n)" names keepBothCopyPath tries before it refuses. */
+        internal const val KEEP_BOTH_MAX_NAME_ATTEMPTS: Int = 1000
+
+        /**
+         * #738: the keep-both side-copy path for [path] at [stamp]: `dir/stem.conflict-local-<stamp>.ext`, and
+         * `dir/stem.conflict-local-<stamp> (n).ext` (n = 2, 3, …) while [isTaken] says the name is in use. The
+         * extension is taken from the file name only, so a dot in a folder name never splits the path.
+         * Throws [IllegalStateException] rather than reuse a taken name once [KEEP_BOTH_MAX_NAME_ATTEMPTS] are spent.
+         */
+        internal fun keepBothCopyPath(
+            path: String,
+            stamp: String,
+            isTaken: (String) -> Boolean,
+        ): String {
+            val cut = path.lastIndexOf('/')
+            val dir = if (cut >= 0) path.substring(0, cut + 1) else ""
+            val leaf = path.substring(cut + 1)
+            val ext = leaf.substringAfterLast(".", "")
+            val stem = if (ext.isNotEmpty()) leaf.substringBeforeLast(".") else leaf
+            val dotExt = if (ext.isNotEmpty()) ".$ext" else ""
+            for (n in 1..KEEP_BOTH_MAX_NAME_ATTEMPTS) {
+                val counter = if (n == 1) "" else " ($n)"
+                val candidate = "$dir$stem.conflict-local-$stamp$counter$dotExt"
+                if (!isTaken(candidate)) return candidate
+            }
+            throw IllegalStateException("no free keep-both copy name for $path after $KEEP_BOTH_MAX_NAME_ATTEMPTS attempts")
+        }
 
         // #560 U2b: the enumeration's and the gather's constants live in
         // RemoteEnumeration and RemoteGather (see there); these names stay for callers.
