@@ -690,9 +690,12 @@ class GraphApiService(
                 log.debug("Upload progress: {}/{} bytes", offset, fileSize)
                 onProgress?.invoke(offset, fileSize)
             }
-        } catch (e: Exception) {
-            // On permanent failure (session expired, auth error) remove the stored session.
-            sessionStore.delete(remotePath)
+        } catch (e: GraphApiException) {
+            // Terminal 4xx responses cannot be resumed. Keep the session for 408/429
+            // and server errors so a later attempt can continue from its committed offset.
+            if (e.statusCode in 400..499 && e.statusCode != 408 && e.statusCode != 429) {
+                sessionStore.delete(remotePath)
+            }
             throw e
         }
 
