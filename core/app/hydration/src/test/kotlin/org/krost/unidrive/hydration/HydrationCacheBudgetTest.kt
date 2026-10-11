@@ -184,7 +184,12 @@ class HydrationCacheBudgetTest {
             val env = freshEnv()
             // Synced file read through the mount, then edited in the cache (same size, other bytes).
             val cache = env.syncedAndRead("synced.txt").getValue("synced.txt")
+            val recordedMtimeMs = env.db.getEntry("/synced.txt")?.localMtime ?: 0L
             Files.write(cache, bytesOf(200))
+            // The engine compares mtimes in whole milliseconds, so a same-size rewrite that lands in the very
+            // millisecond the baseline was recorded looks unchanged (#718). The test must not race the clock
+            // for that: give the edit an mtime that is clearly not the recorded one, as a later edit has.
+            Files.setLastModifiedTime(cache, FileTime.fromMillis(maxOf(recordedMtimeMs, System.currentTimeMillis()) + 5_000))
             // Mount-only file: no sync-root file, the cache copy is the row's local file, then edited.
             env.provider.seed("/mountonly.txt", bytesOf(3))
             env.db.upsertEntry(

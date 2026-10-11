@@ -235,6 +235,9 @@ class EnumerateRemoteIntoStateTest {
                     Files.createDirectories(it.parent)
                     Files.writeString(it, "UNSYNCED EDIT")
                 }
+            // "Newer than the watermark" must not depend on how the wall clock and the file system's timestamp
+            // granularity happen to line up when the two writes are close (#718): set it, clearly newer.
+            Files.setLastModifiedTime(cache, FileTime.from(db.getEntry("/edited.bin")!!.lastSynced.plusSeconds(5)))
             assertTrue(
                 Files.getLastModifiedTime(cache).toMillis() > db.getEntry("/edited.bin")!!.lastSynced.toEpochMilli(),
                 "precondition: the cache looks like an un-uploaded edit",
