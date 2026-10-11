@@ -38,7 +38,7 @@ class InternxtCreateMtimeTest {
     }
 
     private fun newProvider(): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tmp))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)

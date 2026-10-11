@@ -43,7 +43,7 @@ class InternxtRemoteIncompleteDownloadTest {
 
     private fun newProvider(): InternxtProvider {
         destination = Files.createTempDirectory("ud-shard-dl").resolve("out.bin")
-        val provider = InternxtProvider(InternxtConfig(tokenPath = Files.createTempFile("ud-shard-token", ".tmp")))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = Files.createTempFile("ud-shard-token", ".tmp")))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)

@@ -4,15 +4,17 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
-import org.krost.unidrive.UnidriveJson
+import org.krost.unidrive.auth.CredentialProtector
+import org.krost.unidrive.auth.CredentialProtectionException
+import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import java.nio.file.Files
 import java.nio.file.Path
 
-class InternxtProviderFactory : ProviderFactory {
-    private val json = UnidriveJson
-
+class InternxtProviderFactory(
+    private val credentialProtector: CredentialProtector? = InternxtCredentialProtectors.forCurrentPlatform(),
+) : ProviderFactory {
     override val id = "internxt"
 
     override val metadata =
@@ -46,7 +48,12 @@ class InternxtProviderFactory : ProviderFactory {
         // `[providers.<name>] keep_overwritten = true`. ProfileResolver
         // funnels TOML keys through the properties map.
         val keepOverwritten = properties["keep_overwritten"]?.toBooleanStrictOrNull() ?: false
-        val config = InternxtConfig(tokenPath = tokenPath, keepOverwritten = keepOverwritten)
+        val config =
+            InternxtConfig(
+                tokenPath = tokenPath,
+                keepOverwritten = keepOverwritten,
+                credentialProtector = credentialProtector,
+            )
         return InternxtProvider(config)
     }
 
@@ -54,6 +61,21 @@ class InternxtProviderFactory : ProviderFactory {
         properties: Map<String, String?>,
         profileDir: Path,
     ): Boolean = Files.exists(profileDir.resolve("credentials.json"))
+
+    override fun describeConnection(
+        properties: Map<String, String?>,
+        profileDir: Path,
+    ): String {
+        if (!Files.exists(profileDir.resolve("credentials.json"))) return "internxt (no credentials)"
+        return try {
+            val credentials = credentialStore(profileDir).load() ?: return "internxt (credentials unreadable)"
+            "internxt (${credentials.email})"
+        } catch (e: CredentialProtectionException) {
+            "internxt (credentials unavailable: ${e.message})"
+        } catch (_: Exception) {
+            "internxt (credentials unreadable)"
+        }
+    }
 
     override fun checkCredentialHealth(
         properties: Map<String, String?>,
@@ -65,7 +87,7 @@ class InternxtProviderFactory : ProviderFactory {
         }
 
         return try {
-            val creds = json.decodeFromString<InternxtCredentials>(Files.readString(credFile))
+            val creds = credentialStore(profileDir).load() ?: return CredentialHealth.Missing("Invalid credentials")
             // UD-010: JWT body decode + exp extraction lifted to JwtExtractor.
             // UD-308 padding fix is preserved in the shared impl.
             val exp = JwtExtractor.extractExp(creds.jwt)
@@ -73,8 +95,18 @@ class InternxtProviderFactory : ProviderFactory {
                 return CredentialHealth.ExpiresIn(0, "JWT expired")
             }
             CredentialHealth.Ok
+        } catch (e: CredentialProtectionException) {
+            CredentialHealth.Missing(e.message ?: "Linux Secret Service unavailable")
         } catch (e: Exception) {
             CredentialHealth.Missing("Invalid credentials: ${e.message}")
         }
     }
+
+    private fun credentialStore(profileDir: Path): CredentialStore<InternxtCredentials> =
+        CredentialStore(
+            profileDir,
+            "credentials.json",
+            InternxtCredentials.serializer(),
+            protector = credentialProtector,
+        )
 }

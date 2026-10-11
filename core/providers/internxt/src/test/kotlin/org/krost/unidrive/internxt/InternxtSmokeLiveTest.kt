@@ -41,7 +41,7 @@ class InternxtSmokeLiveTest {
     }
 
     private suspend fun withProvider(block: suspend (InternxtProvider, String) -> Unit) {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tokenPath))
         provider.authenticate()
         val folder = "/ud-smoke-${System.currentTimeMillis()}"
         provider.createFolder(folder)

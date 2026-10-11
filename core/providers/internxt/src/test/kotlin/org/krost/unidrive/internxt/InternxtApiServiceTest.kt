@@ -124,7 +124,7 @@ class InternxtApiServiceTest {
 
     private fun mkService(): InternxtApiService =
         InternxtApiService(
-            InternxtConfig(),
+            InternxtConfig(credentialProtector = null, ),
             credentialsProvider = { _ ->
                 // Tests don't actually call any HTTP method that needs creds —
                 // they exercise the retry/parse helpers directly. Surface a
@@ -508,7 +508,7 @@ class InternxtApiServiceTest {
                 )
             val service =
                 InternxtApiService(
-                    InternxtConfig(),
+                    InternxtConfig(credentialProtector = null, ),
                     { _ ->
                         org.krost.unidrive.internxt.model.InternxtCredentials(
                             jwt = "test-jwt",
@@ -586,7 +586,7 @@ class InternxtApiServiceTest {
     ): InternxtApiService {
         val service =
             InternxtApiService(
-                InternxtConfig(),
+                InternxtConfig(credentialProtector = null, ),
                 { _ ->
                     org.krost.unidrive.internxt.model.InternxtCredentials(
                         jwt = "test-jwt",
@@ -1029,7 +1029,7 @@ class InternxtApiServiceTest {
                 }
             val service =
                 InternxtApiService(
-                    InternxtConfig(),
+                    InternxtConfig(credentialProtector = null, ),
                     { forceRefresh ->
                         if (forceRefresh) forcedRefreshCount.incrementAndGet()
                         else nonForcedCallCount.incrementAndGet()
@@ -1294,7 +1294,7 @@ class InternxtApiServiceTest {
      * far-future JWT exp so getValidCredentials never triggers a real refresh.
      */
     private fun newProviderRooted(tokenPath: java.nio.file.Path): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tokenPath))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)
@@ -2311,7 +2311,7 @@ class InternxtApiServiceTest {
 
     /** Mirror of [newProviderRooted] but with `keepOverwritten = true`. */
     private fun newKeepOverwrittenProviderRooted(tokenPath: java.nio.file.Path): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath, keepOverwritten = true))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tokenPath, keepOverwritten = true))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)

@@ -179,7 +179,7 @@ internal fun loopbackService(
     shardPutWatchdog: UploadWatchdogLimits = UploadWatchdogLimits.DEFAULT,
 ): InternxtApiService =
     InternxtApiService(
-        InternxtConfig(),
+        InternxtConfig(credentialProtector = null, ),
         credentialsProvider = { _ ->
             InternxtCredentials(jwt = "test-jwt", mnemonic = "test-mnemonic", rootFolderId = "test-root", email = "test@example.invalid")
         },

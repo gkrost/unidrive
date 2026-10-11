@@ -52,7 +52,7 @@ class InternxtAmbiguousPathTest {
     ) = """{"uuid":"$uuid","plainName":"$plainName","status":"EXISTS"}"""
 
     private fun newProvider(): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = java.nio.file.Files.createTempFile("ud-amb-token", ".tmp")))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = java.nio.file.Files.createTempFile("ud-amb-token", ".tmp")))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)

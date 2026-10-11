@@ -24,6 +24,7 @@ it so you can restart it. It also warns when no Java 21+ runtime is found.
   21–24, and every command warns while a running daemon still uses a Java runtime that a package
   upgrade has since replaced (restart it with `unidrive -p <profile> daemon stop`).
 - `~/.local/bin` on your `$PATH`.
+- For Internxt profiles: `libsecret-tools` (`sudo apt install libsecret-tools` on Debian/Ubuntu) and an unlocked Secret Service collection available to the user's systemd session. Internxt authentication and sync fail closed when it is missing or locked; credentials are not written in plaintext.
 - For the systemd unit: a systemd-user instance (standard on Ubuntu, Fedora,
   Arch, Debian; absent on minimal containers).
 
