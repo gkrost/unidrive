@@ -5,12 +5,16 @@ import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaCursorExpiredException
 import org.krost.unidrive.ProviderException
+import org.krost.unidrive.sync.ConflictLog
 import org.krost.unidrive.sync.Reconciler
+import org.krost.unidrive.sync.TrashManager
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.time.Instant
+import java.util.UUID
 
 /**
  * Orchestrator for the tracking-set engine.
@@ -243,7 +247,19 @@ class TrackingEngine(
         trackingSet.upsert(pending)
 
         Files.createDirectories(dest.parent ?: syncRoot)
-        provider.download(path, dest)
+        val staged = dest.resolveSibling(".${dest.fileName}.unidrive-download-${UUID.randomUUID()}")
+        try {
+            provider.download(path, staged)
+            val current = observeLocal(path)
+            if (!matchesTrackedLocalSnapshot(existing, current)) {
+                preserveConflict(path, dest, "remote download would overwrite local changes")
+                if (existing == null) trackingSet.remove(path) else trackingSet.upsert(existing)
+                return AppliedAction(action, ApplyOutcome.SKIPPED, "local changed after scan; preserved conflict copy")
+            }
+            Files.move(staged, dest, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            Files.deleteIfExists(staged)
+        }
 
         val l = observeLocal(path)
         val r = observeRemote(path)
@@ -322,10 +338,24 @@ class TrackingEngine(
     private suspend fun applyPropagateRemoteDelete(action: ReconcileAction.PropagateRemoteDelete): AppliedAction {
         val path = action.path
         val existing = trackingSet.lookup(path) ?: return AppliedAction(action, ApplyOutcome.SKIPPED, "untracked")
+        val local = syncRoot.resolve(stripLeadingSlash(path))
+        val current = observeLocal(path)
+        if (!matchesTrackedLocalSnapshot(existing, current)) {
+            preserveConflict(path, local, "remote deletion would discard local changes")
+            return AppliedAction(action, ApplyOutcome.SKIPPED, "local changed after scan; preserved conflict copy")
+        }
         val pending = existing.copy(state = TrackState.PendingDeleteLocal, lastSynced = Instant.now())
         trackingSet.upsert(pending)
-        val local = syncRoot.resolve(stripLeadingSlash(path))
-        Files.deleteIfExists(local)
+        val trashed = TrashManager(syncRoot).trash(path)
+        if (Files.exists(trashed) && !matchesTrackedLocalSnapshot(existing, makeLocalObs(trashed))) {
+            // The move into trash closes the check/delete race: if bytes
+            // changed between the first check and rename, restore them and
+            // leave the path tracked for the next collision pass.
+            if (!Files.exists(local)) Files.move(trashed, local)
+            preserveConflict(path, if (Files.exists(local)) local else trashed, "remote deletion raced with local edit")
+            trackingSet.upsert(existing)
+            return AppliedAction(action, ApplyOutcome.SKIPPED, "local changed during delete; restored and preserved conflict copy")
+        }
         trackingSet.remove(path)
         return AppliedAction(action, ApplyOutcome.SUCCESS, null)
     }
@@ -489,7 +519,8 @@ class TrackingEngine(
     }
 
     /** True when [path] matches any configured exclude glob (shared default-ignore-list semantics). */
-    private fun isExcluded(path: String): Boolean = excludePatterns.any { Reconciler.matchesGlob(path, it) }
+    private fun isExcluded(path: String): Boolean =
+        path.startsWith("/.unidrive-trash/") || excludePatterns.any { Reconciler.matchesGlob(path, it) }
 
     private fun makeLocalObs(p: Path): LocalObservation {
         val attrs = Files.readAttributes(p, java.nio.file.attribute.BasicFileAttributes::class.java)
@@ -581,13 +612,36 @@ class TrackingEngine(
                 }
                 for (item in page.items) {
                     if (item.isFolder) continue
+                    if (item.deleted) {
+                        // A tombstone describes the remote object's identity.
+                        // Its path is frequently absent or a synthetic parent
+                        // path, so first resolve the id to the tracking row.
+                        val targetPath = trackedPathForRemoteId(item.id) ?: item.path.takeIf { candidate ->
+                            isUsableFilePath(candidate) && trackingSet.lookup(candidate)?.let {
+                                it.providerId == provider.id && (it.remoteFileId == null || it.remoteFileId == item.id)
+                            } != false
+                        }
+                        if (targetPath == null) {
+                            log.warn("Ignoring pathless remote tombstone with untracked id {}", item.id)
+                            continue
+                        }
+                        val priorAtPath = out[targetPath]
+                        if (priorAtPath?.exists == true && priorAtPath.remoteFileId != item.id) {
+                            // A stale tombstone must not mask a newer object
+                            // occupying the same path.
+                            log.warn("Ignoring stale tombstone id={} for live path {}", item.id, targetPath)
+                            continue
+                        }
+                        out[targetPath] = RemoteObservation(false, item.id, null, null, null, null)
+                        continue
+                    }
                     // #401 detector: two live remote items sharing one path cannot both
                     // be represented in the path-keyed tracking set. Marking the pass
                     // incomplete suppresses delete actions for it (no wrong-twin reap
                     // on a name the provider resolves arbitrarily). No migration: the
                     // tracking store is frozen; the standing detector is the guard.
                     val prior = out[item.path]?.takeIf { it.exists }
-                    if (prior != null && !item.deleted && prior.remoteFileId != item.id) {
+                    if (prior != null && prior.remoteFileId != item.id) {
                         log.warn(
                             "#401: two live remote items share the path {} (ids {} and {}); " +
                                 "marking this pass incomplete so deletes stay suppressed. " +
@@ -599,31 +653,7 @@ class TrackingEngine(
                         complete = false
                         continue
                     }
-                    out[item.path] =
-                        if (item.deleted) {
-                            // Explicit deletion signal (OneDrive maps
-                            // @microsoft.graph.removed / deleted facets onto
-                            // CloudItem.deleted). Record absence so a tracked
-                            // path still produces PropagateRemoteDelete. On a
-                            // full pass this is equivalent to omitting it.
-                            RemoteObservation(
-                                exists = false,
-                                remoteFileId = item.id,
-                                etag = null,
-                                size = null,
-                                hash = null,
-                                serverMtime = null,
-                            )
-                        } else {
-                            RemoteObservation(
-                                exists = true,
-                                remoteFileId = item.id,
-                                etag = item.hash,
-                                size = item.size,
-                                hash = item.hash,
-                                serverMtime = item.modified,
-                            )
-                        }
+                    out[item.path] = RemoteObservation(true, item.id, item.hash, item.size, item.hash, item.modified)
                 }
                 nextCursor = page.cursor
             } while (page.hasMore)
@@ -641,6 +671,33 @@ class TrackingEngine(
             trackingSet.saveDeltaCursor(nextCursor)
         }
         return RemoteEnumResult(out, complete, incremental)
+    }
+
+    private fun trackedPathForRemoteId(remoteId: String): String? {
+        val matches =
+            trackingSet.paths().mapNotNull { path ->
+                trackingSet.lookup(path)?.takeIf { it.providerId == provider.id && it.remoteFileId == remoteId }?.path
+            }.distinct()
+        return matches.singleOrNull()
+    }
+
+    private fun isUsableFilePath(path: String): Boolean =
+        path.isNotBlank() && path != "/" && !path.endsWith('/') && !path.split('/').any { it == ".." }
+
+    /** A missing snapshot is not evidence that an extant file is unchanged. */
+    private fun matchesTrackedLocalSnapshot(record: TrackingRecord?, current: LocalObservation): Boolean {
+        if (record == null) return !current.exists
+        if (!current.exists) return record.localHash == null && record.localSize == null
+        return record.localHash != null && record.localSize != null &&
+            record.localHash == current.hash && record.localSize == current.size
+    }
+
+    /** Keep a durable conflict backup while leaving the user's current file in place. */
+    private fun preserveConflict(path: String, local: Path, reason: String) {
+        if (!Files.isRegularFile(local)) return
+        val stateDir = syncRoot.parent.resolve(".unidrive-conflicts")
+        ConflictLog(stateDir.resolve("conflicts.jsonl"), stateDir.resolve("backups"))
+            .record(path, "local-changed", "remote-action-pending", reason, local)
     }
 
     private suspend fun observeRemote(path: String): RemoteObservation =

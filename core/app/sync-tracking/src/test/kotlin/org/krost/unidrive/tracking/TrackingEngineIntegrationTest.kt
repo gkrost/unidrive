@@ -6,10 +6,12 @@ import java.time.Instant
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.krost.unidrive.CloudItem
 
 /**
  * End-to-end integration test for the tracking-set engine.
@@ -606,6 +608,124 @@ class TrackingEngineIntegrationTest {
             )
         } finally {
             tracking2.close()
+        }
+    }
+
+    @Test
+    fun `pathless subfolder tombstone resolves by remote id and cannot delete its placeholder path`() {
+        val deletedPath = "/folder/deep/gone.bin"
+        val unrelatedPath = "/keep.bin"
+        provider.files[deletedPath] = "gone-payload".toByteArray()
+        provider.files[unrelatedPath] = "keep-payload".toByteArray()
+        provider.nextCursor = "cursor-after-full"
+        val first = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = first).syncOnce()
+        } finally {
+            first.close()
+        }
+
+        val second = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val tracked = second.lookup(deletedPath)!!
+            provider.incrementalAware = true
+            provider.extraDeltaItems = listOf(
+                CloudItem(
+                    id = tracked.remoteFileId!!,
+                    name = "",
+                    path = "/folder/deep/",
+                    size = 0,
+                    isFolder = false,
+                    modified = null,
+                    created = null,
+                    hash = null,
+                    mimeType = null,
+                    deleted = true,
+                ),
+            )
+            val report = engine(
+                tracking = second,
+                guard = BatchGuard(maxDeleteRatio = 1.0, maxDeleteAbsolute = Int.MAX_VALUE),
+                dryRun = true,
+            ).syncOnce()
+            assertEquals(
+                listOf(deletedPath),
+                report.plan.filterIsInstance<ReconcileAction.PropagateRemoteDelete>().map { it.path },
+            )
+            assertFalse(report.plan.any { it.path == "/folder/deep/" }, "placeholder parent must never become a delete target")
+            assertFalse(report.plan.any { it.path == unrelatedPath }, "unrelated tracked path must remain untouched")
+        } finally {
+            second.close()
+        }
+    }
+
+    @Test
+    fun `remote deletion preserves a local edit made after scan and records a conflict backup`() {
+        val path = "/folder/file.txt"
+        val original = "synced bytes".toByteArray()
+        provider.files[path] = original
+        provider.nextCursor = "cursor-after-full"
+        val first = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = first).syncOnce()
+        } finally {
+            first.close()
+        }
+
+        val second = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            val tracked = second.lookup(path)!!
+            provider.incrementalAware = true
+            provider.files.remove(path)
+            provider.extraDeltaItems = listOf(
+                CloudItem(tracked.remoteFileId!!, "", "/", 0, false, null, null, null, null, deleted = true),
+            )
+            val local = syncRoot.resolve("folder/file.txt")
+            val edited = "user edit during delta".toByteArray()
+            provider.afterDelta = { Files.write(local, edited) }
+
+            val report = engine(
+                tracking = second,
+                guard = BatchGuard(maxDeleteRatio = 1.0, maxDeleteAbsolute = Int.MAX_VALUE),
+            ).syncOnce()
+            assertContentEquals(edited, Files.readAllBytes(local))
+            assertEquals(TrackState.TrackedSynced, second.lookup(path)?.state, "skipped delete must leave tracking row available for collision review")
+            assertTrue(report.applied.any { it.outcome == ApplyOutcome.SKIPPED && it.note?.contains("preserved conflict copy") == true })
+            val backupDir = syncRoot.parent.resolve(".unidrive-conflicts/backups")
+            assertTrue(Files.isDirectory(backupDir) && Files.list(backupDir).use { it.findAny().isPresent }, "divergent bytes must be backed up")
+        } finally {
+            second.close()
+        }
+    }
+
+    @Test
+    fun `remote download preserves a local edit made during transfer`() {
+        val path = "/file.txt"
+        val original = "synced bytes".toByteArray()
+        provider.files[path] = original
+        provider.nextCursor = "cursor-after-full"
+        val first = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            engine(tracking = first).syncOnce()
+        } finally {
+            first.close()
+        }
+
+        val second = SqliteTrackingSet(dbPath).also { it.initialize() }
+        try {
+            provider.incrementalAware = true
+            provider.incrementalChanges[path] = "remote update".toByteArray()
+            val local = syncRoot.resolve("file.txt")
+            val edited = "user edit during transfer".toByteArray()
+            provider.beforeDownload = { Files.write(local, edited) }
+
+            val report = engine(tracking = second).syncOnce()
+            assertContentEquals(edited, Files.readAllBytes(local))
+            assertTrue(report.applied.any { it.outcome == ApplyOutcome.SKIPPED && it.note?.contains("preserved conflict copy") == true })
+            val backupDir = syncRoot.parent.resolve(".unidrive-conflicts/backups")
+            assertTrue(Files.isDirectory(backupDir) && Files.list(backupDir).use { it.findAny().isPresent })
+        } finally {
+            second.close()
         }
     }
 
