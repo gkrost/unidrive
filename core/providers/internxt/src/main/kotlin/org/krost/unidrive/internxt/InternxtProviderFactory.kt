@@ -55,6 +55,20 @@ class InternxtProviderFactory : ProviderFactory {
         profileDir: Path,
     ): Boolean = Files.exists(profileDir.resolve("credentials.json"))
 
+    override fun describeConnection(
+        properties: Map<String, String?>,
+        profileDir: Path,
+    ): String {
+        val credentialFile = profileDir.resolve("credentials.json")
+        if (!Files.exists(credentialFile)) return "internxt (no credentials)"
+        return try {
+            val credentials = json.decodeFromString<InternxtCredentials>(Files.readString(credentialFile))
+            "internxt (${credentials.email})"
+        } catch (_: Exception) {
+            "internxt (credentials unreadable)"
+        }
+    }
+
     override fun checkCredentialHealth(
         properties: Map<String, String?>,
         profileDir: Path,

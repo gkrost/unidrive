@@ -4,9 +4,11 @@ import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.io.OwnerOnly
 import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.PosixFilePermissions
 
 /**
  * UD-344: shared credential-file load / save / delete with the
@@ -88,6 +90,7 @@ public class CredentialStore<T>(
     public fun save(value: T) {
         Files.createDirectories(dir)
         OwnerOnly.requireDirectory(dir)
+        createOwnerOnlyTempFile()
         Files.writeString(tmpFile, json.encodeToString(serializer, value))
         try {
             Files.move(
@@ -101,6 +104,21 @@ public class CredentialStore<T>(
             Files.move(tmpFile, file, StandardCopyOption.REPLACE_EXISTING)
         }
         OwnerOnly.requireFile(file)
+    }
+
+    private fun createOwnerOnlyTempFile() {
+        Files.deleteIfExists(tmpFile)
+        if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+            Files.createFile(
+                tmpFile,
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")),
+            )
+        } else {
+            // The containing directory is owner-only and its Windows ACL is
+            // inheritable; explicitly restrict the new file before writing.
+            Files.createFile(tmpFile)
+            OwnerOnly.requireFile(tmpFile)
+        }
     }
 
     /** Delete the credential file if it exists. No-op otherwise. */

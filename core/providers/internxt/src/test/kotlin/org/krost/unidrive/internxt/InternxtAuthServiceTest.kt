@@ -6,6 +6,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonPrimitive
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import java.nio.file.Files
 import java.nio.file.Path
@@ -517,6 +518,48 @@ class InternxtAuthServiceTest {
     }
 
     private val tempDirs = mutableListOf<Path>()
+
+    @Test
+    fun `char array authentication uses char based crypto and sends only the derived hash`() = runBlocking {
+        val tempDir = Files.createTempDirectory("internxt-auth-char-password-").also { tempDirs.add(it) }
+        val crypto =
+            object : InternxtCrypto() {
+                override fun hashPassword(password: CharArray, sKey: String, cryptoKey: String): String {
+                    assertEquals("pw", String(password))
+                    return "derived-hash"
+                }
+
+                override fun decryptMnemonic(encryptedMnemonicHex: String, password: CharArray): String {
+                    assertEquals("pw", String(password))
+                    return "mnemonic"
+                }
+
+                override fun hashPassword(password: String, sKey: String, cryptoKey: String): String =
+                    error("char array authentication must not call the String KDF overload")
+
+                override fun decryptMnemonic(encryptedMnemonicHex: String, password: String): String =
+                    error("char array authentication must not call the String decrypt overload")
+            }
+        var accessBody: kotlinx.serialization.json.JsonObject? = null
+        val service =
+            object : AuthService(InternxtConfig(tokenPath = tempDir), crypto) {
+                override suspend fun postLoginChallenge(email: String): String =
+                    """{"sKey":"deadbeef","tfa":false}"""
+
+                override suspend fun postLoginAccess(body: kotlinx.serialization.json.JsonObject): String {
+                    accessBody = body
+                    return """{"newToken":"jwt","user":{"mnemonic":"encrypted","rootFolderId":"root"}}"""
+                }
+            }
+        val password = charArrayOf('p', 'w')
+
+        val credentials = service.authenticate("person@example.com", password)
+
+        assertEquals("mnemonic", credentials.mnemonic)
+        assertEquals("pw", String(password), "the overload borrows but does not clear the caller's buffer")
+        assertEquals("derived-hash", accessBody?.get("password")?.jsonPrimitive?.content)
+        assertFalse(accessBody?.toString()?.contains("pw") == true)
+    }
 
     @org.junit.After
     fun cleanupTempDirs() {

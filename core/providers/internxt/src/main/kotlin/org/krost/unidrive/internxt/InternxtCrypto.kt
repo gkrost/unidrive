@@ -1,5 +1,7 @@
 package org.krost.unidrive.internxt
 
+import java.nio.CharBuffer
+import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -188,6 +190,33 @@ open class InternxtCrypto {
     fun cryptoJsDecrypt(
         base64Ciphertext: String,
         passphrase: String,
+    ): String = passphrase.toCharArray().let { chars ->
+        try {
+            cryptoJsDecrypt(base64Ciphertext, chars)
+        } finally {
+            chars.fill('\u0000')
+        }
+    }
+
+    /**
+     * Decrypt using caller-owned password characters without creating a password String. The
+     * plaintext result is still a String because the callers consume textual API data.
+     */
+    fun cryptoJsDecrypt(
+        base64Ciphertext: String,
+        passphrase: CharArray,
+    ): String {
+        val passphraseBytes = encodeUtf8(passphrase)
+        try {
+            return cryptoJsDecrypt(base64Ciphertext, passphraseBytes)
+        } finally {
+            passphraseBytes.fill(0)
+        }
+    }
+
+    private fun cryptoJsDecrypt(
+        base64Ciphertext: String,
+        passphraseBytes: ByteArray,
     ): String {
         val data = Base64.getDecoder().decode(base64Ciphertext)
         // Check "Salted__" prefix
@@ -196,10 +225,20 @@ open class InternxtCrypto {
         val salt = data.copyOfRange(8, 16)
         val ciphertext = data.copyOfRange(16, data.size)
 
-        val (key, iv) = evpBytesToKey(passphrase.toByteArray(Charsets.UTF_8), salt)
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-        return String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+        val (key, iv) = evpBytesToKey(passphraseBytes, salt)
+        try {
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+            val plaintext = cipher.doFinal(ciphertext)
+            try {
+                return String(plaintext, Charsets.UTF_8)
+            } finally {
+                plaintext.fill(0)
+            }
+        } finally {
+            key.fill(0)
+            iv.fill(0)
+        }
     }
 
     /**
@@ -256,6 +295,19 @@ open class InternxtCrypto {
         password: String,
         sKey: String,
         cryptoKey: String,
+    ): String = password.toCharArray().let { chars ->
+        try {
+            hashPassword(chars, sKey, cryptoKey)
+        } finally {
+            chars.fill('\u0000')
+        }
+    }
+
+    /** Hash a password held in a mutable character buffer; the String result is the API hash. */
+    open fun hashPassword(
+        password: CharArray,
+        sKey: String,
+        cryptoKey: String,
     ): String {
         // sKey is hex → decode to bytes → base64 string → decrypt with cryptoKey
         val sKeyBytes = hexToBytes(sKey)
@@ -264,9 +316,15 @@ open class InternxtCrypto {
 
         // Parse salt hex → bytes, PBKDF2
         val salt = hexToBytes(saltHex)
-        val spec = PBEKeySpec(password.toCharArray(), salt, 10000, 256)
-        val hashedBytes = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1").generateSecret(spec).encoded
+        val spec = PBEKeySpec(password, salt, 10000, 256)
+        val hashedBytes =
+            try {
+                SecretKeyFactory.getInstance("PBKDF2WithHmacSHA1").generateSecret(spec).encoded
+            } finally {
+                spec.clearPassword()
+            }
         val hashedHex = bytesToHex(hashedBytes)
+        hashedBytes.fill(0)
 
         // Encrypt the hash with cryptoKey → base64 → hex
         val encryptedBase64 = cryptoJsEncrypt(hashedHex, cryptoKey)
@@ -281,10 +339,32 @@ open class InternxtCrypto {
     open fun decryptMnemonic(
         encryptedMnemonicHex: String,
         password: String,
+    ): String = password.toCharArray().let { chars ->
+        try {
+            decryptMnemonic(encryptedMnemonicHex, chars)
+        } finally {
+            chars.fill('\u0000')
+        }
+    }
+
+    /**
+     * Decrypt the mnemonic using caller-owned password characters. The mnemonic result is a
+     * String because [org.krost.unidrive.internxt.model.InternxtCredentials] stores textual data.
+     */
+    open fun decryptMnemonic(
+        encryptedMnemonicHex: String,
+        password: CharArray,
     ): String {
         val bytes = hexToBytes(encryptedMnemonicHex)
         val base64 = Base64.getEncoder().encodeToString(bytes)
         return cryptoJsDecrypt(base64, password)
+    }
+
+    private fun encodeUtf8(chars: CharArray): ByteArray {
+        val encoded = StandardCharsets.UTF_8.newEncoder().encode(CharBuffer.wrap(chars))
+        val bytes = ByteArray(encoded.remaining())
+        encoded.get(bytes)
+        return bytes
     }
 
     // --- Hex utilities ---

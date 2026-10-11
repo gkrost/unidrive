@@ -1,6 +1,10 @@
 package org.krost.unidrive.auth
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.serializer
 import org.junit.Assume.assumeTrue
 import org.krost.unidrive.io.WindowsAclProbe
@@ -138,6 +142,34 @@ class CredentialStoreTest {
             "rw-------",
             PosixFilePermissions.toString(Files.getPosixFilePermissions(dir.resolve("creds.json"))),
         )
+    }
+
+    @Test
+    fun `temporary file is owner-only before credential serialization`() {
+        assumeTrue(
+            "POSIX file attributes only",
+            FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+        )
+        val delegate = Sample.serializer()
+        var temporaryFilePermissions: String? = null
+        val checkingSerializer =
+            object : KSerializer<Sample> {
+                override val descriptor: SerialDescriptor = delegate.descriptor
+
+                override fun serialize(encoder: Encoder, value: Sample) {
+                    temporaryFilePermissions =
+                        PosixFilePermissions.toString(
+                            Files.getPosixFilePermissions(dir.resolve("creds.json.tmp")),
+                        )
+                    delegate.serialize(encoder, value)
+                }
+
+                override fun deserialize(decoder: Decoder): Sample = delegate.deserialize(decoder)
+            }
+
+        CredentialStore(dir, "creds.json", checkingSerializer).save(Sample("secret", 1L))
+
+        assertEquals("rw-------", temporaryFilePermissions)
     }
 
     @Test
