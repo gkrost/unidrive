@@ -13,6 +13,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
+import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.RemoteIncompleteDownloadException
@@ -896,6 +897,7 @@ class InternxtApiService(
         cipher: javax.crypto.Cipher,
         destination: Path,
         expectedSize: Long? = null,
+        expectedCiphertextSha256: String? = null,
     ): Long {
         bridgeBudget.awaitSlot()
         try {
@@ -923,6 +925,7 @@ class InternxtApiService(
                     }
                     val channel: ByteReadChannel = response.body()
                     var written = 0L
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
                     withContext(Dispatchers.IO) {
                         Files.createDirectories(destination.parent)
                         // #529: a name near the 255-byte component limit cannot take the suffix — stage short.
@@ -935,10 +938,26 @@ class InternxtApiService(
                                 while (!channel.isClosedForRead) {
                                     val n = channel.readAvailable(buf)
                                     if (n <= 0) break
+                                    digest.update(buf, 0, n)
                                     val decrypted = cipher.update(buf, 0, n)
                                     if (decrypted != null) {
                                         out.write(decrypted)
                                         written += decrypted.size
+                                    }
+                                }
+                                expectedCiphertextSha256?.let { expectedHash ->
+                                    val expectedBytes = expectedHash.lowercase().toByteArray(Charsets.US_ASCII)
+                                    val actualHash = digest.digest().joinToString("") { "%02x".format(it) }
+                                    if (expectedBytes.size != 64 ||
+                                        !expectedHash.matches(Regex("[0-9a-fA-F]{64}")) ||
+                                        !java.security.MessageDigest.isEqual(
+                                            expectedBytes,
+                                            actualHash.toByteArray(Charsets.US_ASCII),
+                                        )
+                                    ) {
+                                        throw PermanentDownloadFailureException(
+                                            "Internxt shard SHA-256 mismatch for ${destination.fileName}; refusing unverified content",
+                                        )
                                     }
                                 }
                                 val finalBlock = cipher.doFinal()

@@ -21,7 +21,7 @@ class InternxtProviderFactory : ProviderFactory {
             displayName = "Internxt Drive",
             description = "Privacy-first cloud storage with client-side AES-256 encryption",
             authType = "Email + password",
-            encryption = "Client-side AES-256 (file content CTR, names GCM; zero-knowledge)",
+            encryption = "Client-side AES-256 (file content CTR with SHA-256 integrity check, names GCM)",
             jurisdiction = "EU (Spain)",
             gdprCompliant = true,
             cloudActExposure = false,
