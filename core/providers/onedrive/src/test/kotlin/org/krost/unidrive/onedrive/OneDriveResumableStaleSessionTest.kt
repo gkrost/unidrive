@@ -7,6 +7,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import java.nio.file.Files
 import java.nio.file.Path
@@ -15,6 +16,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -167,6 +169,45 @@ class OneDriveResumableStaleSessionTest {
             svc.uploadLargeFile(local, "/big.bin", conflictBehavior = "replace")
 
             assertEquals(0, createSessionCount, "a matching local file must reuse the stored session, not rebuild it")
+            svc.close()
+            Files.deleteIfExists(local)
+        }
+
+    @Test
+    fun `cancelled chunk upload retains the stored session for a later resume`() =
+        runTest {
+            val size = 5 * 1024 * 1024
+            val local = writeLocalFile(size, 7)
+            val mtime = Files.getLastModifiedTime(local).toMillis()
+            UploadSessionStore(tokenDir).put(
+                "/big.bin",
+                storedUrl,
+                Instant.now().plusSeconds(3600),
+                localSize = size.toLong(),
+                localMtimeMillis = mtime,
+            )
+
+            val engine =
+                MockEngine { request ->
+                    when {
+                        request.method == HttpMethod.Get && request.url.toString().startsWith(storedUrl) ->
+                            respond(
+                                """{"nextExpectedRanges":["0-"],"expirationDateTime":"2030-01-01T00:00:00Z"}""",
+                                HttpStatusCode.OK,
+                                jsonHeaders(),
+                            )
+                        request.method == HttpMethod.Put && request.url.toString().startsWith(storedUrl) ->
+                            throw CancellationException("daemon stopping")
+                        else -> respond("{}", HttpStatusCode.OK, jsonHeaders())
+                    }
+                }
+            val svc = graphWith(engine)
+
+            assertFailsWith<CancellationException> {
+                svc.uploadLargeFile(local, "/big.bin", conflictBehavior = "replace")
+            }
+
+            assertEquals(storedUrl, UploadSessionStore(tokenDir).get("/big.bin"))
             svc.close()
             Files.deleteIfExists(local)
         }
