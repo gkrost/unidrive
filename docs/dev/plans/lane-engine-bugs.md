@@ -1,5 +1,7 @@
 # Lane: engine bugs (gkrost/unidrive) — for a Sonnet-class agent
 
+> **Superseded (2026-10-11)** by `docs/dev/plans/lane-bugs-quickwins.md`; kept for its history. Do not pick items from here.
+
 Prepared 2026-10-05 against `main` `0d239bf`. Every item was verified against the code (file:line below) by a read-only triage. Work them
 **in order**; the order resolves shared files. Data safety first.
 
