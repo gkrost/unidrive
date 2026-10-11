@@ -251,8 +251,8 @@ class InternxtProvider(
     override suspend fun listChildren(path: String): List<CloudItem> {
         val folderUuid = resolveFolder(path)
         val content = api.getFolderContents(folderUuid)
-        return content.children.map { it.toCloudItem(path) } +
-            content.files.map { it.toCloudItem(path) }
+        val liveContent = filterLiveContent(content)
+        return liveContent.children.map { it.toCloudItem(path) } + liveContent.files.map { it.toCloudItem(path) }
     }
 
     override suspend fun getMetadata(path: String): CloudItem {
@@ -270,7 +270,7 @@ class InternxtProvider(
         // #402: fail closed on ambiguity — with two live same-named matches, `find` picks
         // whichever the listing emitted first, and a delete/move resolved through here can
         // hit the wrong twin. Throw instead; only a single exact match resolves.
-        val folders = content.children.filter { sanitizeName(it.plainName ?: it.name ?: "") == name }
+        val folders = content.children.filter { it.isLive() && sanitizeName(it.plainName ?: it.name ?: "") == name }
         if (folders.size > 1) throwAmbiguous(folders.size, name, parentPath)
         val folder = folders.firstOrNull()
         if (folder != null) return folder.toCloudItem(parentPath)
@@ -282,12 +282,12 @@ class InternxtProvider(
         // path-based consumers (deleteRemote, download, move) then hit the
         // wrong file. The baseName fallback only fires when NO exact match
         // exists in the whole listing.
-        val exactFiles = content.files.filter { file -> fileMatchesFullName(file, name) }
+        val exactFiles = content.files.filter { file -> file.isLive() && fileMatchesFullName(file, name) }
         if (exactFiles.size > 1) throwAmbiguous(exactFiles.size, name, parentPath)
         val exactFile = exactFiles.firstOrNull()
         if (exactFile != null) return exactFile.toCloudItem(parentPath)
 
-        val baseNameFiles = content.files.filter { file -> sanitizeName(file.plainName ?: file.name ?: "") == name }
+        val baseNameFiles = content.files.filter { file -> file.isLive() && sanitizeName(file.plainName ?: file.name ?: "") == name }
         if (baseNameFiles.size > 1) throwAmbiguous(baseNameFiles.size, name, parentPath)
         val baseNameFile = baseNameFiles.firstOrNull()
         if (baseNameFile != null) {
@@ -2801,6 +2801,16 @@ class InternxtProvider(
 
         internal fun internxtVersionToken(file: InternxtFile): String =
             "${file.uuid}|${file.modificationTime.orEmpty()}|${file.size}"
+
+        internal fun InternxtFile.isLive(): Boolean = status == "EXISTS" && !isTombstoned()
+
+        internal fun InternxtFolder.isLive(): Boolean = status == "EXISTS" && !isTombstoned()
+
+        internal fun filterLiveContent(content: FolderContentResponse): FolderContentResponse =
+            FolderContentResponse(
+                children = content.children.filter { it.isLive() },
+                files = content.files.filter { it.isLive() },
+            )
 
         private fun InternxtFile.isTombstoned(): Boolean =
             status == "TRASHED" || status == "DELETED" || removed || deleted
