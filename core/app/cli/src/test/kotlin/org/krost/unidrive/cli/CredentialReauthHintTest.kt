@@ -26,7 +26,7 @@ class CredentialReauthHintTest {
                 dir.resolve("credentials.json"),
                 """{"jwt":"e30.$payload.sig","mnemonic":"m","rootFolderId":"r","email":"e"}""",
             )
-            val factory = InternxtProviderFactory()
+            val factory = InternxtProviderFactory(credentialProtector = null)
             assertTrue(factory.isAuthenticated(emptyMap(), dir), "precondition: file-existence check says authenticated")
             assertTrue(
                 credentialNeedsReauth(factory.checkCredentialHealth(emptyMap(), dir)),

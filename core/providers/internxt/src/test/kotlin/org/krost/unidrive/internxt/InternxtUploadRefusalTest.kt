@@ -49,7 +49,7 @@ class InternxtUploadRefusalTest {
         onFinish: () -> Unit = {},
         reconcileListing: String = """{"children":[],"files":[]}""",
     ): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tmp))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)

@@ -37,7 +37,7 @@ class InternxtGetRetryTest {
         connectOutageBudgetMs: Long = InternxtApiService.CONNECT_OUTAGE_BUDGET_MS,
     ) =
         InternxtApiService(
-            InternxtConfig(),
+            InternxtConfig(credentialProtector = null, ),
             credentialsProvider = { _ ->
                 InternxtCredentials(
                     jwt = "test-jwt",

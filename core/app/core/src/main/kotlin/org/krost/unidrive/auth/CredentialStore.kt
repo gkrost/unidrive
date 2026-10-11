@@ -35,6 +35,7 @@ public class CredentialStore<T>(
     private val fileName: String,
     private val serializer: KSerializer<T>,
     private val validate: (T) -> Boolean = { true },
+    private val protector: CredentialProtector? = null,
 ) {
     private val log = org.slf4j.LoggerFactory.getLogger(CredentialStore::class.java)
     private val json = Json { ignoreUnknownKeys = true }
@@ -55,7 +56,15 @@ public class CredentialStore<T>(
         if (!Files.exists(file)) return null
 
         return try {
-            val parsed = json.decodeFromString(serializer, Files.readString(file))
+            val raw = Files.readString(file)
+            val id = file.toAbsolutePath().normalize().toString()
+            val decoded = protector?.decode(id, raw)
+            if (decoded != null && !decoded.protected) {
+                // Protect even malformed legacy content before parsing it. This removes any
+                // plaintext tokens from disk without making migration depend on valid JSON.
+                saveSerialized { raw }
+            }
+            val parsed = json.decodeFromString(serializer, decoded?.plaintext ?: raw)
             if (!validate(parsed)) {
                 log.warn(
                     "Credential file at {} failed the validate() guard — discarding so caller refreshes",
@@ -64,6 +73,8 @@ public class CredentialStore<T>(
                 return null
             }
             parsed
+        } catch (e: CredentialProtectionException) {
+            throw e
         } catch (e: Exception) {
             log.warn("Failed to load credentials from {}: {}", file, e.message)
             null
@@ -88,22 +99,48 @@ public class CredentialStore<T>(
      * that fails; the directory is checked before the file is written.
      */
     public fun save(value: T) {
+        saveSerialized { json.encodeToString(serializer, value) }
+    }
+
+    private fun saveSerialized(serialize: () -> String) {
         Files.createDirectories(dir)
         OwnerOnly.requireDirectory(dir)
+        val previousReference = if (Files.exists(file)) Files.readString(file) else null
         createOwnerOnlyTempFile()
-        Files.writeString(tmpFile, json.encodeToString(serializer, value))
+        val id = file.toAbsolutePath().normalize().toString()
+        val backend = protector
+        var onDisk: String? = null
+        var committed = false
         try {
-            Files.move(
-                tmpFile,
-                file,
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (_: AtomicMoveNotSupportedException) {
-            log.warn("Filesystem rejected ATOMIC_MOVE at {} — falling back to non-atomic replace", file)
-            Files.move(tmpFile, file, StandardCopyOption.REPLACE_EXISTING)
+            val serialized = serialize()
+            onDisk = protector?.protect(id, serialized) ?: serialized
+            Files.writeString(tmpFile, onDisk)
+            try {
+                Files.move(
+                    tmpFile,
+                    file,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                log.warn("Filesystem rejected ATOMIC_MOVE at {} — falling back to non-atomic replace", file)
+                Files.move(tmpFile, file, StandardCopyOption.REPLACE_EXISTING)
+            }
+            committed = true
+            OwnerOnly.requireFile(file)
+            if (backend != null && previousReference != null) {
+                runCatching { backend.discard(id, previousReference) }
+                    .onFailure { log.warn("Could not remove the prior protected credential version for {}", file) }
+            }
+        } finally {
+            if (!committed) {
+                Files.deleteIfExists(tmpFile)
+                if (backend != null && onDisk != null) {
+                    val reference = onDisk
+                    runCatching { backend.discard(id, reference) }
+                }
+            }
         }
-        OwnerOnly.requireFile(file)
     }
 
     private fun createOwnerOnlyTempFile() {
@@ -123,6 +160,7 @@ public class CredentialStore<T>(
 
     /** Delete the credential file if it exists. No-op otherwise. */
     public fun delete() {
+        protector?.delete(file.toAbsolutePath().normalize().toString())
         Files.deleteIfExists(file)
     }
 }

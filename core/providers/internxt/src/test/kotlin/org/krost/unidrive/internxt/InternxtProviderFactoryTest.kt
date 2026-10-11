@@ -10,7 +10,7 @@ import kotlin.test.assertEquals
 
 class InternxtProviderFactoryTest {
     private val profileDir = Files.createTempDirectory("internxt-factory-test")
-    private val factory = InternxtProviderFactory()
+    private val factory = InternxtProviderFactory(credentialProtector = null)
 
     @AfterTest
     fun tearDown() {

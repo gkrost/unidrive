@@ -26,7 +26,7 @@ import kotlin.test.assertTrue
 class InternxtFastBootstrapTest {
     private fun provider(): InternxtProvider {
         val tmpToken = Files.createTempDirectory("unidrive-internxt-fastboot-test-")
-        return InternxtProvider(InternxtConfig(tokenPath = tmpToken))
+        return InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmpToken))
     }
 
     @Test

@@ -1157,7 +1157,7 @@ class InternxtCursorListingTest {
 
     private fun serviceOn(engine: MockEngine) =
         InternxtApiService(
-            InternxtConfig(),
+            InternxtConfig(credentialProtector = null, ),
             credentialsProvider = { _ ->
                 InternxtCredentials(jwt = "test-jwt", mnemonic = "test-mnemonic", rootFolderId = "root", email = "test@example.invalid")
             },

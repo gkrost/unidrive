@@ -120,7 +120,7 @@ class InternxtSeedCacheTest {
     }
 
     private fun newProvider(): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tmp))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp))
         setCredentials(provider, credentials(mnemonic))
         val cryptoField = InternxtProvider::class.java.getDeclaredField("crypto")
         cryptoField.isAccessible = true

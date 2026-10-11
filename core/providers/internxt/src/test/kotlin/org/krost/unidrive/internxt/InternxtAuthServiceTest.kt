@@ -81,7 +81,7 @@ class InternxtAuthServiceTest {
             val tmp = Files.createTempDirectory("internxt-auth-race-")
             try {
                 seedCredentials(tmp)
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 // Fan out N concurrent refreshToken() calls.
@@ -110,7 +110,7 @@ class InternxtAuthServiceTest {
             val tmp = Files.createTempDirectory("internxt-auth-consistency-")
             try {
                 seedCredentials(tmp)
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 val n = 20
@@ -158,7 +158,7 @@ class InternxtAuthServiceTest {
                 // Seed with an expired JWT (exp = 1 second after epoch).
                 val expiredJwt = makeJwtWithExp(1L)
                 seedCredentials(tmp, jwt = expiredJwt)
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 // Sanity: the seam classifies this JWT as expired.
@@ -192,7 +192,7 @@ class InternxtAuthServiceTest {
                 val futureExp = System.currentTimeMillis() / 1000 + 10L * 24 * 3600
                 val freshJwt = makeJwtWithExp(futureExp)
                 seedCredentials(tmp, jwt = freshJwt)
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 assertFalse(auth.isJwtExpired(), "Test setup: seeded JWT should not be expired")
@@ -221,7 +221,7 @@ class InternxtAuthServiceTest {
             val tmp = Files.createTempDirectory("internxt-auth-empty-")
             try {
                 // No seedCredentials() call — store is empty.
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 assertFailsWith<org.krost.unidrive.AuthenticationException> {
@@ -263,7 +263,7 @@ class InternxtAuthServiceTest {
                 val nowSec = System.currentTimeMillis() / 1000
                 // 12 h lifetime, issued now: margin clamps to 3 h → 9 h of clean runway.
                 seedCredentials(tmp, jwt = makeJwtWithExpAndIat(nowSec + 12L * 3600, nowSec))
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 val creds = auth.getValidCredentials()
@@ -291,7 +291,7 @@ class InternxtAuthServiceTest {
                     tmp,
                     jwt = makeJwtWithExpAndIat(nowSec + 2L * 3600, nowSec - 10L * 3600),
                 )
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 auth.getValidCredentials()
@@ -318,7 +318,7 @@ class InternxtAuthServiceTest {
                     tmp,
                     jwt = makeJwtWithExpAndIat(nowSec + 30L * 24 * 3600, nowSec),
                 )
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 auth.getValidCredentials()
@@ -339,7 +339,7 @@ class InternxtAuthServiceTest {
                 // applies → the token IS within the margin and refreshes (today's
                 // behaviour, unchanged).
                 seedCredentials(tmp, jwt = makeJwtWithExp(nowSec + 12L * 3600))
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 auth.getValidCredentials()
@@ -374,7 +374,7 @@ class InternxtAuthServiceTest {
                 val futureExp = System.currentTimeMillis() / 1000 + 10L * 24 * 3600
                 val freshJwt = makeJwtWithExp(futureExp)
                 seedCredentials(tmp, jwt = freshJwt)
-                val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                 auth.initialize()
 
                 assertFalse(
@@ -440,7 +440,7 @@ class InternxtAuthServiceTest {
                     val jwt = "$header.$payloadB64.fake-signature"
 
                     seedCredentials(tmp, jwt = jwt)
-                    val auth = CountingAuthService(InternxtConfig(tokenPath = tmp))
+                    val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
                     auth.initialize()
 
                     assertFalse(
@@ -542,7 +542,7 @@ class InternxtAuthServiceTest {
             }
         var accessBody: kotlinx.serialization.json.JsonObject? = null
         val service =
-            object : AuthService(InternxtConfig(tokenPath = tempDir), crypto) {
+            object : AuthService(InternxtConfig(credentialProtector = null, tokenPath = tempDir), crypto) {
                 override suspend fun postLoginChallenge(email: String): String =
                     """{"sKey":"deadbeef","tfa":false}"""
 
@@ -579,7 +579,7 @@ class InternxtAuthServiceTest {
         decryptedMnemonic: String,
     ): AuthService {
         val tempDir = kotlin.io.path.createTempDirectory("auth-test").also { tempDirs.add(it) }
-        val config = InternxtConfig(tokenPath = tempDir)
+        val config = InternxtConfig(credentialProtector = null, tokenPath = tempDir)
         return object : AuthService(
             config = config,
             crypto = object : InternxtCrypto() {
@@ -645,7 +645,7 @@ class InternxtAuthServiceTest {
         var capturedBody: kotlinx.serialization.json.JsonObject? = null
         val tempDir = kotlin.io.path.createTempDirectory("auth-test").also { tempDirs.add(it) }
         val service = object : AuthService(
-            config = InternxtConfig(tokenPath = tempDir),
+            config = InternxtConfig(credentialProtector = null, tokenPath = tempDir),
             crypto = object : InternxtCrypto() {
                 override fun decryptMnemonic(encryptedMnemonicHex: String, password: String): String = "m"
                 override fun hashPassword(password: String, sKey: String, cryptoKey: String): String = "h"
@@ -673,7 +673,7 @@ class InternxtAuthServiceTest {
         var capturedBody: kotlinx.serialization.json.JsonObject? = null
         val tempDir = kotlin.io.path.createTempDirectory("auth-test").also { tempDirs.add(it) }
         val service = object : AuthService(
-            config = InternxtConfig(tokenPath = tempDir),
+            config = InternxtConfig(credentialProtector = null, tokenPath = tempDir),
             crypto = object : InternxtCrypto() {
                 override fun decryptMnemonic(encryptedMnemonicHex: String, password: String): String = "m"
                 override fun hashPassword(password: String, sKey: String, cryptoKey: String): String = "h"
@@ -703,7 +703,7 @@ class InternxtAuthServiceTest {
     @Test
     fun `authenticateInternxt persists credentials and returns them`(): Unit = runBlocking {
         val tempDir = kotlin.io.path.createTempDirectory("auth-api-test").also { tempDirs.add(it) }
-        val config = InternxtConfig(tokenPath = tempDir)
+        val config = InternxtConfig(credentialProtector = null, tokenPath = tempDir)
 
         // This test uses real AuthService internals but stubs the HTTP via
         // a system property the seams check; for simplicity here, assert that

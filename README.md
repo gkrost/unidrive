@@ -24,7 +24,7 @@ Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Intern
 
 ## Build
 
-JDK 21+, Linux with `systemd --user`. The Gradle wrapper lives in `core/`.
+JDK 21+, Linux with `systemd --user`, and (for Internxt profiles) an unlocked Secret Service plus `secret-tool` (`libsecret-tools`). The Gradle wrapper lives in `core/`.
 
 ```bash
 cd core && ./gradlew :app:cli:shadowJar    # build fat JAR → core/app/cli/build/libs/unidrive-*.jar
@@ -62,6 +62,8 @@ update, with the LTS marks as the long-haul targets.
 cd dist/
 ./install.sh
 ```
+
+Internxt credentials are stored in the Linux Secret Service. Install `libsecret-tools` (Debian/Ubuntu: `sudo apt install libsecret-tools`) and ensure the user keyring is unlocked and reachable from the systemd user session before authenticating or starting Internxt sync. UniDrive fails closed when the Secret Service is missing or locked; it does not fall back to plaintext.
 
 Installs to:
 - `~/.local/bin/unidrive`

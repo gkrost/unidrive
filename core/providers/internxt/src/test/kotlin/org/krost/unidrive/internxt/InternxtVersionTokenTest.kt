@@ -39,7 +39,7 @@ class InternxtVersionTokenTest {
         startCalls: AtomicInteger,
         metaCalls: AtomicInteger,
     ): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = java.nio.file.Files.createTempDirectory("ud-token-")))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = java.nio.file.Files.createTempDirectory("ud-token-")))
         val authService = InternxtProvider::class.java.getDeclaredField("authService").also { it.isAccessible = true }.get(provider)
         val creds = authService.javaClass.getDeclaredField("credentials").also { it.isAccessible = true }
         val payload = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("""{"exp":9999999999}""".toByteArray())

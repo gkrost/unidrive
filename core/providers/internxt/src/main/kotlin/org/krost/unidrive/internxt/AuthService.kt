@@ -517,14 +517,15 @@ open class AuthService(
     // race-window fix only existed in OneDrive's copy. Lifting closes the gap
     // for Internxt without copy-pasting the logic.
     //
-    // This provider credential file is plaintext, restricted to the current
-    // user by CredentialStore. `unidrive vault encrypt` covers config.toml
-    // credentials only; it does not encrypt credentials.json.
+    // The shipped Linux factory injects Secret Service protection. The
+    // credential store migrates legacy plaintext only after keyring storage
+    // succeeds and replaces it atomically.
     private val credentialStore: CredentialStore<InternxtCredentials> =
         CredentialStore(
             dir = config.tokenPath,
             fileName = CREDENTIALS_FILE,
             serializer = InternxtCredentials.serializer(),
+            protector = config.credentialProtector,
         )
 
     private fun loadCredentials(): InternxtCredentials? = credentialStore.load()

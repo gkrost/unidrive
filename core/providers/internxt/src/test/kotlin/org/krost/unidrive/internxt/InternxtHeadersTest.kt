@@ -34,28 +34,28 @@ class InternxtHeadersTest {
     @Test
     fun `desktop header is not sent by default`() =
         runTest {
-            val headers = sentHeaders(InternxtConfig())
+            val headers = sentHeaders(InternxtConfig(credentialProtector = null, ))
             assertNull(headers["x-internxt-desktop-header"])
         }
 
     @Test
     fun `desktop header is not sent when configured blank`() =
         runTest {
-            val headers = sentHeaders(InternxtConfig(desktopHeader = ""))
+            val headers = sentHeaders(InternxtConfig(credentialProtector = null, desktopHeader = ""))
             assertNull(headers["x-internxt-desktop-header"])
         }
 
     @Test
     fun `desktop header is sent when explicitly configured`() =
         runTest {
-            val headers = sentHeaders(InternxtConfig(desktopHeader = "test-token"))
+            val headers = sentHeaders(InternxtConfig(credentialProtector = null, desktopHeader = "test-token"))
             assertEquals("test-token", headers["x-internxt-desktop-header"])
         }
 
     @Test
     fun `client name and version are always sent`() =
         runTest {
-            val headers = sentHeaders(InternxtConfig())
+            val headers = sentHeaders(InternxtConfig(credentialProtector = null, ))
             assertEquals(InternxtConfig.CLIENT_NAME, headers["internxt-client"])
             assertEquals(InternxtConfig.CLIENT_VERSION, headers["internxt-version"])
             assertEquals("application/json", headers[HttpHeaders.Accept])

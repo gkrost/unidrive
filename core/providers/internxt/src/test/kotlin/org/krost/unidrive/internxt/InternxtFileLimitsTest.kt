@@ -39,7 +39,7 @@ class InternxtFileLimitsTest {
 
     private fun newService(): InternxtApiService =
         InternxtApiService(
-            InternxtConfig(),
+            InternxtConfig(credentialProtector = null, ),
             credentialsProvider = { _ ->
                 InternxtCredentials(
                     jwt = "test-jwt",

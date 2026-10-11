@@ -1,6 +1,7 @@
 package org.krost.unidrive.internxt
 
 import org.krost.unidrive.io.defaultTokenPath
+import org.krost.unidrive.auth.CredentialProtector
 import java.nio.file.Path
 
 data class InternxtConfig(
@@ -15,6 +16,8 @@ data class InternxtConfig(
     // INTERNXT_NOTIFICATIONS=off (also 0 / false) skips the socket.io wake-signal client;
     // sync then relies on the adaptive poll alone. Anything else, or unset, keeps it on.
     val notificationsEnabled: Boolean = parseNotificationsEnabled(System.getenv("INTERNXT_NOTIFICATIONS")),
+    /** Native Linux Secret Service is the secure default for every auth entrypoint. */
+    val credentialProtector: CredentialProtector? = LinuxSecretServiceCredentialProtector(),
 ) {
     companion object {
         internal fun parseNotificationsEnabled(raw: String?): Boolean = raw?.trim()?.lowercase() !in setOf("off", "0", "false")

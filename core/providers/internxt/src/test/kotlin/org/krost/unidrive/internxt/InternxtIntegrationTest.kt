@@ -14,7 +14,7 @@ class InternxtIntegrationTest {
 
         private fun checkEnabled(): Boolean {
             if (!shouldRun) return false
-            val config = InternxtConfig()
+            val config = InternxtConfig(credentialProtector = null, )
             val credFile = config.tokenPath.resolve("credentials.json")
             return Files.exists(credFile)
         }

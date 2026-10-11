@@ -52,6 +52,28 @@ class CredentialStoreTest {
     private fun store(validate: (Sample) -> Boolean = { true }): CredentialStore<Sample> =
         CredentialStore(dir, "creds.json", serializer<Sample>(), validate)
 
+    private class FakeProtector : CredentialProtector {
+        private val values = mutableMapOf<String, String>()
+
+        override fun protect(id: String, plaintext: String): String {
+            values[id] = plaintext
+            return "protected-test-value"
+        }
+
+        override fun decode(id: String, stored: String): CredentialData =
+            if (stored == "protected-test-value") {
+                CredentialData(values.getValue(id), true)
+            } else {
+                CredentialData(stored, false)
+            }
+
+        override fun delete(id: String) {
+            values.remove(id)
+        }
+
+        fun storedValue(id: String): String? = values[id]
+    }
+
     @Test
     fun `load returns null when no file exists`() {
         assertNull(store().load())
@@ -65,6 +87,64 @@ class CredentialStoreTest {
         val loaded = s.load()
         assertNotNull(loaded)
         assertEquals(saved, loaded)
+    }
+
+    @Test
+    fun `save stores a protected reference and load resolves it`() {
+        val protector = FakeProtector()
+        val s = CredentialStore(dir, "creds.json", serializer<Sample>(), protector = protector)
+        val sample = Sample("secret-token", 123L)
+
+        s.save(sample)
+
+        assertEquals("protected-test-value", Files.readString(dir.resolve("creds.json")))
+        assertEquals(sample, s.load())
+    }
+
+    @Test
+    fun `legacy plaintext is migrated on load`() {
+        val protector = FakeProtector()
+        val path = dir.resolve("creds.json")
+        val legacy = """{"accessToken":"legacy-secret","expiresAt":9}"""
+        Files.writeString(path, legacy)
+        val s = CredentialStore(dir, "creds.json", serializer<Sample>(), protector = protector)
+
+        assertEquals(Sample("legacy-secret", 9L), s.load())
+        assertEquals("protected-test-value", Files.readString(path))
+        assertFalse(Files.readString(path).contains("legacy-secret"))
+    }
+
+    @Test
+    fun `protector failure leaves legacy plaintext and is not treated as missing`() {
+        val path = dir.resolve("creds.json")
+        val legacy = """{"accessToken":"legacy-secret","expiresAt":9}"""
+        Files.writeString(path, legacy)
+        val failing =
+            object : CredentialProtector {
+                override fun protect(id: String, plaintext: String): String =
+                    throw CredentialProtectionException("keyring locked")
+
+                override fun decode(id: String, stored: String): CredentialData = CredentialData(stored, false)
+
+                override fun delete(id: String) = Unit
+            }
+        val s = CredentialStore(dir, "creds.json", serializer<Sample>(), protector = failing)
+
+        kotlin.test.assertFailsWith<CredentialProtectionException> { s.load() }
+        assertEquals(legacy, Files.readString(path))
+    }
+
+    @Test
+    fun `malformed legacy plaintext is protected before load rejects it`() {
+        val protector = FakeProtector()
+        val path = dir.resolve("creds.json")
+        val legacy = "truncated credential data containing secret-token"
+        Files.writeString(path, legacy)
+        val s = CredentialStore(dir, "creds.json", serializer<Sample>(), protector = protector)
+
+        assertNull(s.load())
+        assertEquals("protected-test-value", Files.readString(path))
+        assertEquals(legacy, protector.storedValue(path.toAbsolutePath().normalize().toString()))
     }
 
     @Test
