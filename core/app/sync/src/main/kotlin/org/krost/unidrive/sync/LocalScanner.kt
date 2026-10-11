@@ -166,12 +166,15 @@ class LocalScanner(
                         // upserts the same path, promoting the row to a fully-synced
                         // state once the byte transfer succeeds.
                         //
-                        // UD-209b: don't claim isHydrated=true for a sparse leftover
-                        // (interrupted-sync placeholder physically present but with no
-                        // real bytes). Without this guard, the engine adopts the file
-                        // as fully synced and never re-downloads — UD-222 invariant
-                        // silently regressed by UD-901 otherwise.
-                        val sparseLeftover = isSparseLeftover(file, attrs.size())
+                        // #739: the row is hydrated whatever the bytes are. A path with no
+                        // row cannot be an engine placeholder: the engine's placeholders
+                        // are 0-byte files (UD-222), and a freed or interrupted one keeps
+                        // its row. The UD-209b sparse probe used to run here and recorded a
+                        // real all-zero file (a preallocated database, a disk image) as not
+                        // hydrated, so it was not a pending upload and a failed first upload
+                        // was never retried. Stubs with a row are still probed where the row
+                        // is acted on (looksLikePlaceholder, PlaceholderManager.isSparse),
+                        // and a same-size remote file is still compared by applyCreatePlaceholder.
                         db.upsertEntry(
                             SyncEntry(
                                 path = relativePath,
@@ -183,7 +186,7 @@ class LocalScanner(
                                 localSize = attrs.size(),
                                 isFolder = false,
                                 isPinned = false,
-                                isHydrated = !sparseLeftover,
+                                isHydrated = true,
                                 lastSynced = Instant.EPOCH,
                             ),
                         )
@@ -338,12 +341,4 @@ class LocalScanner(
             }
         }
     }
-
-    // UD-209b: detect sparse-file leftovers (interrupted-sync placeholders) so they
-    // don't get classified as fully-hydrated. In-process content probe, same on every
-    // platform; files of one filesystem page or less are never flagged.
-    private fun isSparseLeftover(
-        path: Path,
-        size: Long,
-    ): Boolean = SparseProbe.isStub(path, size)
 }
