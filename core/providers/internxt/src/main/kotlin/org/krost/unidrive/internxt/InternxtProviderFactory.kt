@@ -13,7 +13,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class InternxtProviderFactory(
-    private val credentialProtector: CredentialProtector? = LinuxSecretServiceCredentialProtector(),
+    private val credentialProtector: CredentialProtector? = InternxtCredentialProtectors.forCurrentPlatform(),
 ) : ProviderFactory {
     override val id = "internxt"
 

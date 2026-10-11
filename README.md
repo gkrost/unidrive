@@ -24,7 +24,7 @@ Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Intern
 
 ## Build
 
-JDK 21+, Linux with `systemd --user`, and (for Internxt profiles) an unlocked Secret Service plus `secret-tool` (`libsecret-tools`). The Gradle wrapper lives in `core/`.
+JDK 21+ and Linux with `systemd --user` for the packaged daemon. Internxt uses the host's native credential store: Linux requires an unlocked Secret Service and `secret-tool` (`libsecret-tools`), Windows uses user-scoped DPAPI, and macOS uses the user's login Keychain. Unsupported platforms and unavailable or locked stores fail closed without writing plaintext credentials. The Gradle wrapper lives in `core/`.
 
 ```bash
 cd core && ./gradlew :app:cli:shadowJar    # build fat JAR → core/app/cli/build/libs/unidrive-*.jar
@@ -63,7 +63,7 @@ cd dist/
 ./install.sh
 ```
 
-Internxt credentials are stored in the Linux Secret Service. Install `libsecret-tools` (Debian/Ubuntu: `sudo apt install libsecret-tools`) and ensure the user keyring is unlocked and reachable from the systemd user session before authenticating or starting Internxt sync. UniDrive fails closed when the Secret Service is missing or locked; it does not fall back to plaintext.
+The Linux distribution stores Internxt credentials in the Linux Secret Service. Install `libsecret-tools` (Debian/Ubuntu: `sudo apt install libsecret-tools`) and ensure the user keyring is unlocked and reachable from the systemd user session before authenticating or starting Internxt sync. UniDrive fails closed when the Secret Service is missing or locked; it does not fall back to plaintext. On Windows the supported backend is current-user DPAPI; on macOS it is the user's unlocked login Keychain. Both fail closed if their native protection service cannot be used. Other platforms are unsupported for Internxt credential storage.
 
 Installs to:
 - `~/.local/bin/unidrive`
