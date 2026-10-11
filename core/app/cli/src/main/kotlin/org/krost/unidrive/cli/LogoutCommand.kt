@@ -52,7 +52,7 @@ internal fun logoutAndDeleteLocalFiles(
     }
 
     val deleted = mutableListOf<String>()
-    for (name in listOf("token.json", "credentials.json")) {
+    for (name in StoragePermissions.CREDENTIAL_FILES) {
         val file = profileDir.resolve(name)
         if (Files.deleteIfExists(file)) deleted.add(file.toString())
     }
