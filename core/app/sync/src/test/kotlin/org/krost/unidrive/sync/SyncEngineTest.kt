@@ -875,6 +875,159 @@ class SyncEngineTest {
             assertEquals(42, movedFile.remoteSize)
         }
 
+    /**
+     * #424: a remote folder rename (ids kept) used to plan a MoveLocal for the folder AND one per
+     * descendant. The folder move carried the files; each descendant move then found its source gone and
+     * recreated an empty placeholder over the moved file: hydrated bytes became 0 bytes (re-downloaded on
+     * the next pass) and a local edit not yet uploaded was destroyed for good.
+     */
+    @Test
+    fun `remote folder rename keeps hydrated descendants and an unsynced local edit`() =
+        runTest {
+            val stamp = Instant.parse("2026-03-28T12:00:00Z")
+            fun item(
+                path: String,
+                id: String,
+                size: Long = 0,
+                isFolder: Boolean = false,
+            ) = CloudItem(
+                id = id,
+                name = path.substringAfterLast("/"),
+                path = path,
+                size = size,
+                isFolder = isFolder,
+                modified = stamp,
+                created = stamp,
+                hash = if (isFolder) null else "hash-$id",
+                mimeType = if (isFolder) null else "application/octet-stream",
+            )
+            provider.files["/d/a.txt"] = "AAAA".toByteArray()
+            provider.files["/d/sub/b.txt"] = "BBBBBB".toByteArray()
+            provider.files["/d/edit.txt"] = "EDIT0".toByteArray()
+            provider.deltaItems =
+                listOf(
+                    item("/d", "id-d", isFolder = true),
+                    item("/d/sub", "id-sub", isFolder = true),
+                    item("/d/a.txt", "id-a", 4),
+                    item("/d/sub/b.txt", "id-b", 6),
+                    item("/d/edit.txt", "id-edit", 5),
+                )
+            engine.syncOnce()
+            assertEquals("AAAA", Files.readString(syncRoot.resolve("d/a.txt")), "precondition: hydrated")
+            assertEquals(true, db.getEntry("/d/a.txt")?.isHydrated, "precondition: the row says hydrated")
+
+            // A local edit that has not been uploaded yet.
+            val edited = syncRoot.resolve("d/edit.txt")
+            Files.writeString(edited, "MY-UNSYNCED-EDIT")
+            Files.setLastModifiedTime(edited, java.nio.file.attribute.FileTime.from(Instant.now().plusSeconds(60)))
+
+            // The remote renames /d to /e; every id stays the same.
+            for (p in listOf("/d/a.txt", "/d/sub/b.txt", "/d/edit.txt")) {
+                provider.files["/e" + p.removePrefix("/d")] = provider.files.remove(p)!!
+            }
+            provider.deltaItems =
+                listOf(
+                    item("/e", "id-d", isFolder = true),
+                    item("/e/sub", "id-sub", isFolder = true),
+                    item("/e/a.txt", "id-a", 4),
+                    item("/e/sub/b.txt", "id-b", 6),
+                    item("/e/edit.txt", "id-edit", 5),
+                )
+            provider.deltaCursor = "cursor-2"
+            val renameRun = RecordingReporter()
+            engineWithReporter(renameRun).syncOnce()
+
+            assertFalse(Files.exists(syncRoot.resolve("d")), "the old folder is gone")
+            assertEquals("AAAA", Files.readString(syncRoot.resolve("e/a.txt")), "hydrated bytes survive the rename")
+            assertEquals("BBBBBB", Files.readString(syncRoot.resolve("e/sub/b.txt")), "nested hydrated bytes survive")
+            assertEquals(
+                "MY-UNSYNCED-EDIT",
+                Files.readString(syncRoot.resolve("e/edit.txt")),
+                "the unsynced local edit survives the rename",
+            )
+            assertEquals(true, db.getEntry("/e/a.txt")?.isHydrated, "the moved row stays hydrated")
+            assertEquals(true, db.getEntry("/e/sub/b.txt")?.isHydrated, "the nested moved row stays hydrated")
+            assertNull(db.getEntry("/d/a.txt"), "no row is left at the old path")
+            assertEquals(
+                listOf("/e"),
+                renameRun.actions.filter { it.label.contains("move", ignoreCase = true) }.map { it.path.substringAfterLast(" ") },
+                "one move for the folder, none for its descendants; got ${renameRun.actions}",
+            )
+
+            // The next pass only uploads the edit at its new path; it downloads nothing.
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-3"
+            provider.downloadByIdCalls.clear()
+            provider.downloadByPathCalls.clear()
+            val next = RecordingReporter()
+            engineWithReporter(next).syncOnce()
+            assertTrue(
+                provider.downloadByIdCalls.isEmpty() && provider.downloadByPathCalls.isEmpty(),
+                "nothing is downloaded again; byId=${provider.downloadByIdCalls} byPath=${provider.downloadByPathCalls}",
+            )
+            assertEquals("MY-UNSYNCED-EDIT", provider.files["/e/edit.txt"]?.let { String(it) }, "the edit reaches the cloud")
+            assertEquals("AAAA", Files.readString(syncRoot.resolve("e/a.txt")))
+
+            // And after that the tree is settled: a further pass plans nothing.
+            val settled = RecordingReporter()
+            engineWithReporter(settled).syncOnce()
+            assertEquals(emptyList(), settled.actions, "a settled tree plans nothing")
+        }
+
+    /** #424: a file renamed inside a folder the remote renamed in the same delta keeps its bytes too. */
+    @Test
+    fun `remote folder rename with a file renamed inside it keeps the file's bytes`() =
+        runTest {
+            val stamp = Instant.parse("2026-03-28T12:00:00Z")
+            fun item(
+                path: String,
+                id: String,
+                size: Long = 0,
+                isFolder: Boolean = false,
+            ) = CloudItem(
+                id = id,
+                name = path.substringAfterLast("/"),
+                path = path,
+                size = size,
+                isFolder = isFolder,
+                modified = stamp,
+                created = stamp,
+                hash = if (isFolder) null else "hash-$id",
+                mimeType = if (isFolder) null else "application/octet-stream",
+            )
+            provider.files["/d/sub/c.txt"] = "CCC".toByteArray()
+            provider.deltaItems =
+                listOf(
+                    item("/d", "id-d", isFolder = true),
+                    item("/d/sub", "id-sub", isFolder = true),
+                    item("/d/sub/c.txt", "id-c", 3),
+                )
+            engine.syncOnce()
+            assertEquals("CCC", Files.readString(syncRoot.resolve("d/sub/c.txt")), "precondition: hydrated")
+
+            provider.files["/e/sub/renamed.txt"] = provider.files.remove("/d/sub/c.txt")!!
+            provider.deltaItems =
+                listOf(
+                    item("/e", "id-d", isFolder = true),
+                    item("/e/sub", "id-sub", isFolder = true),
+                    item("/e/sub/renamed.txt", "id-c", 3),
+                )
+            provider.deltaCursor = "cursor-2"
+            engine.syncOnce()
+
+            assertEquals("CCC", Files.readString(syncRoot.resolve("e/sub/renamed.txt")), "the renamed file keeps its bytes")
+            assertFalse(Files.exists(syncRoot.resolve("e/sub/c.txt")), "no copy is left under the old name")
+            assertEquals(true, db.getEntry("/e/sub/renamed.txt")?.isHydrated, "the row stays hydrated")
+
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-3"
+            provider.downloadByIdCalls.clear()
+            provider.downloadByPathCalls.clear()
+            val next = RecordingReporter()
+            engineWithReporter(next).syncOnce()
+            assertEquals(emptyList(), next.actions, "the next pass plans nothing")
+        }
+
     // UD-297 — empty-local + populated-DB sanity check
 
     private class RecordingReporter : ProgressReporter {

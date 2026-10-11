@@ -2612,19 +2612,34 @@ open class SyncEngine(
     private fun applyMoveLocal(action: SyncAction.MoveLocal) {
         val oldLocal = placeholder.resolveLocal(action.fromPath)
         val newLocal = placeholder.resolveLocal(action.path)
-        val oldEntry = db.getEntry(action.fromPath)
+        // #424: updateRemoteEntries re-keys a renamed item's row to its new path (by remote id) before
+        // Pass 1 runs, so the row is usually no longer at fromPath. Look it up by id too, or its
+        // hydration and local baseline are lost and the moved file reads as an unhydrated stub.
+        val oldEntry = db.getEntry(action.fromPath) ?: db.getEntryByRemoteId(action.remoteItem.id)
         val isFolder = action.remoteItem.isFolder
+        var createdStub = false
 
-        // Suppress both old and new paths to avoid echo events from the move
-        withEchoSuppression(action.fromPath) {
-            withEchoSuppression(action.path) {
-                Files.createDirectories(newLocal.parent)
-                if (Files.exists(oldLocal)) {
-                    Files.move(oldLocal, newLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-                } else if (!isFolder) {
-                    placeholder.createPlaceholder(action.path, action.remoteItem.size, action.remoteItem.modified)
-                } else {
-                    Files.createDirectories(newLocal)
+        if (!Files.exists(oldLocal, java.nio.file.LinkOption.NOFOLLOW_LINKS) &&
+            Files.exists(newLocal, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        ) {
+            // #424: the source is gone and the destination is already there: the item was moved already
+            // (by its folder's move, or by hand). Its bytes (hydrated content, or a local edit not yet
+            // uploaded) are the user's: never recreate a placeholder over them. Update the rows only.
+            log.info("Move of {} -> {}: already at the destination, rows updated only", action.fromPath, action.path)
+        } else {
+            // Suppress both old and new paths to avoid echo events from the move
+            withEchoSuppression(action.fromPath) {
+                withEchoSuppression(action.path) {
+                    Files.createDirectories(newLocal.parent)
+                    if (Files.exists(oldLocal)) {
+                        Files.move(oldLocal, newLocal, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    } else if (!isFolder) {
+                        // Neither end exists: there are no local bytes a placeholder could overwrite.
+                        placeholder.createPlaceholder(action.path, action.remoteItem.size, action.remoteItem.modified)
+                        createdStub = true
+                    } else {
+                        Files.createDirectories(newLocal)
+                    }
                 }
             }
         }
@@ -2635,12 +2650,43 @@ open class SyncEngine(
         // renamePrefix's UD-901c cleanup deletes the destination root row
         // it doesn't know was meant to be canonical.
         if (isFolder) {
-            db.renamePrefix(action.fromPath, action.path)
+            renameFolderRowsKeepingMerged(action.fromPath, action.path)
         }
+        val fromCloud = entryFromCloudItem(action.remoteItem, action.path, !createdStub && oldEntry?.isHydrated == true)
         db.upsertEntry(
-            entryFromCloudItem(action.remoteItem, action.path, oldEntry?.isHydrated ?: false)
-                .copy(localHash = oldEntry?.localHash),
+            if (oldEntry == null || createdStub) {
+                // A fresh stub (or no earlier row): the baseline is what is on disk now, unhydrated for a stub.
+                fromCloud
+            } else {
+                // #424: keep the local baseline the row had. The bytes moved unchanged, and a local edit
+                // that has not been uploaded yet must still read as modified on the next scan; taking the
+                // baseline from disk here would mark that edit as synced and it would never go up.
+                fromCloud.copy(
+                    localMtime = oldEntry.localMtime,
+                    localSize = oldEntry.localSize,
+                    localHash = oldEntry.localHash,
+                )
+            },
         )
+    }
+
+    /**
+     * #424: [StateDatabase.renamePrefix] first deletes every row at and under the destination (its
+     * UD-901c clean-up of pending rows a local scan left there). In a remote folder rename those rows
+     * are the descendants updateRemoteEntries has already re-keyed to the new path, with their
+     * hydration and local baselines. The rows that track a remote item are put back; only rows without
+     * a remote id (pending uploads) stay the clean-up's business. A row the rename itself moved to the
+     * same path wins.
+     */
+    private fun renameFolderRowsKeepingMerged(
+        fromPath: String,
+        toPath: String,
+    ) {
+        val merged = db.getEntriesByPrefix(toPath.trimEnd('/') + "/").filter { it.remoteId != null }
+        db.renamePrefix(fromPath, toPath)
+        for (row in merged) {
+            if (db.getEntry(row.path) == null) db.upsertEntry(row)
+        }
     }
 
     private fun applyDeleteLocal(action: SyncAction.DeleteLocal) {
