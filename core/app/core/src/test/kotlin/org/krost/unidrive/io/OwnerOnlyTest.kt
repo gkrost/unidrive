@@ -140,11 +140,14 @@ class OwnerOnlyTest {
     fun `restrictDirectory reaches files beyond the classic Windows path limit`() {
         assumeWindows()
         val dir = Files.createDirectory(parent.resolve("long-path"))
+        val fileName = "long-cache-file.pdf"
         var nested = dir
-        while (nested.toString().length < 240) {
+        // Grow until the FINAL file path is past MAX_PATH. Stopping on the directory length alone could land the file
+        // on exactly 260 characters, which is not beyond the limit.
+        while (nested.resolve(fileName).toString().length <= 260) {
             nested = createLongPathDirectory(nested.resolve("segment-${"x".repeat(70)}"))
         }
-        val file = nested.resolve("long-cache-file.pdf")
+        val file = nested.resolve(fileName)
         createLongPathFile(file)
         assertTrue(file.toString().length > 260, "test path must exceed MAX_PATH: ${file.toString().length}")
         WindowsAclProbe.grantRead(file, WindowsAclProbe.USERS_SID)
