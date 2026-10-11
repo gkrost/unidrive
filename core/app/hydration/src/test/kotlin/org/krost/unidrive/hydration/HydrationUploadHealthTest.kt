@@ -236,6 +236,7 @@ class HydrationUploadHealthTest {
     @Test
     fun `a measurement request fills in the size off the caller's thread`() = runTest {
         val env = HydrationTestEnv(recoveryUploadScope = this, cacheMaxBytes = 1_000_000L)
+        env.stateDb.insertUploadedRow("/c/a.bin", mtime = 1_000L, size = 42L)
         writeCache(env, "/c/a.bin", "x".repeat(42))
         assertNull(env.hydration.cacheHealth().bytes)
 
@@ -254,5 +255,17 @@ class HydrationUploadHealthTest {
             }
         }
         assertEquals(42L, bytes)
+        assertEquals(1, env.hydration.cacheWalkCount.get())
+
+        repeat(10) { env.hydration.requestCacheMeasurement() }
+        assertEquals(1, env.hydration.cacheWalkCount.get(), "status polls reuse the running cache total")
+
+        val opened = assertIs<OpenResult.Ok>(env.hydration.openWriteBegin("conn", "/c/a.bin", "h1"))
+        Files.writeString(opened.cachePath, "y".repeat(13))
+        env.hydration.closeHandle("conn", "h1")
+        assertEquals(13L, env.hydration.cacheHealth().bytes, "a client write updates the total without a walk")
+        assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/c/a.bin"))
+        assertEquals(0L, env.hydration.cacheHealth().bytes, "an eviction updates the total without a walk")
+        assertEquals(1, env.hydration.cacheWalkCount.get())
     }
 }

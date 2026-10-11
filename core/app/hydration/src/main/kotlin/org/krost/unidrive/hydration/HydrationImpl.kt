@@ -209,10 +209,9 @@ class HydrationImpl(
     // their path's turn, the daemon-wide budget, or a retry backoff).
     private val uploadsInFlight = AtomicInteger(0)
 
-    // #658: the last measured size of the cache directory (epoch ms of the measurement), null = never
-    // measured. Written by every pass that walks the cache; read by [cacheHealth].
+    // #658: null until the first cache walk has seeded [cacheBytes]. Thereafter the health view reads
+    // the running total and walks reconcile it periodically.
     @Volatile private var cacheMeasuredBytes: Long? = null
-    @Volatile private var cacheMeasuredAtMs: Long = 0L
     private val cacheMeasuring = AtomicBoolean(false)
 
     // Waiting-slot budget for the upload queue. Acquired by the submitting
@@ -293,9 +292,6 @@ class HydrationImpl(
 
         /** #728: cache files one `alive_entries` query classifies in an eviction pass. */
         const val EVICTION_DISPOSITION_BATCH: Int = 128
-
-        /** #658: a status request re-walks the cache directory when the last measurement is older than this. */
-        const val CACHE_MEASUREMENT_TTL_MS: Long = 10_000
 
         /** #658: a status request re-reads the upload queue from state.db when the last reading is older than this. */
         const val UPLOAD_SNAPSHOT_TTL_MS: Long = 1_000
@@ -1384,24 +1380,29 @@ class HydrationImpl(
     )
 
     /** What is known now, without touching the file system. See [requestCacheMeasurement]. */
-    fun cacheHealth(): CacheHealth = CacheHealth(cacheMeasuredBytes, cacheMaxBytes.takeIf { it > 0 })
+    fun cacheHealth(): CacheHealth = CacheHealth(cacheMeasuredBytes?.let { cacheBytes.get() }, cacheMaxBytes.takeIf { it > 0 })
 
     private fun recordCacheSize(bytes: Long) {
         cacheMeasuredBytes = bytes
-        cacheMeasuredAtMs = System.currentTimeMillis()
     }
 
     /**
-     * Walks the cache directory off the caller's thread to refresh [cacheHealth], unless a walk is
-     * already running or the last measurement is younger than [staleAfterMs]. Fire and forget: a
-     * status request calls this and answers with what it has, so a large cache never delays a reply.
+     * Seeds cache accounting with one off-thread walk. Later cache changes update the running total,
+     * and eviction passes reconcile it periodically. Fire and forget: status answers with what it
+     * has, so a large cache never delays a reply.
      */
-    fun requestCacheMeasurement(staleAfterMs: Long = CACHE_MEASUREMENT_TTL_MS) {
-        if (System.currentTimeMillis() - cacheMeasuredAtMs < staleAfterMs) return
+    fun requestCacheMeasurement() {
+        if (cacheMeasuredBytes != null) return
         if (!cacheMeasuring.compareAndSet(false, true)) return
         recoveryUploadScope.launch {
             try {
-                recordCacheSize(withContext(Dispatchers.IO) { listCacheFiles().sumOf { it.size } })
+                evictionMutex.withLock {
+                    if (cacheMeasuredBytes != null) return@withLock
+                    val files = withContext(Dispatchers.IO) { listCacheFiles() }
+                    recordCacheSize(files.sumOf { it.size })
+                    reconcileAccounting(files, emptySet())
+                    lastWalkAtMs.set(System.currentTimeMillis())
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
