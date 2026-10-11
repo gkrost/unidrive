@@ -18,9 +18,10 @@ class LogoutCommandTest {
     @Test
     fun `logout removes pending device flow file`() {
         val root = Files.createDirectory(configDir.resolve("root"))
+        val rootPathForToml = root.toString().replace('\\', '/')
         Files.writeString(
             configDir.resolve("config.toml"),
-            "[providers.work]\ntype = \"localfs\"\nroot_path = \"$root\"\n",
+            "[providers.work]\ntype = \"localfs\"\nroot_path = \"$rootPathForToml\"\n",
         )
         val profileDir = Files.createDirectory(configDir.resolve("work"))
         val pendingFlow = Files.writeString(profileDir.resolve("device-flow.json"), "pending")
