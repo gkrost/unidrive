@@ -35,6 +35,7 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.regex.PatternSyntaxException
 
+@Suppress("LongParameterList") // The clock is a constructor-injected test seam; grouping the existing engine options is a separate refactor.
 open class SyncEngine(
     private val provider: CloudProvider,
     private val db: StateDatabase,
@@ -3627,7 +3628,7 @@ open class SyncEngine(
                 val candidate = "$dir$stem.conflict-local-$stamp$counter$dotExt"
                 if (!isTaken(candidate)) return candidate
             }
-            throw IllegalStateException("no free keep-both copy name for $path after $KEEP_BOTH_MAX_NAME_ATTEMPTS attempts")
+            error("no free keep-both copy name for $path after $KEEP_BOTH_MAX_NAME_ATTEMPTS attempts")
         }
 
         // #560 U2b: the enumeration's and the gather's constants live in
