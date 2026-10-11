@@ -84,15 +84,14 @@ class WindowsDpapiCredentialProtector : CredentialProtector {
         val inputBlob = blob(arena, input)
         val entropyBlob = blob(arena, entropy)
         val outputBlob = arena.allocate(DATA_BLOB)
-        if (invokeCrypt(arena, inputBlob, entropyBlob, outputBlob, protect) == 0) {
+        if (invokeCrypt(inputBlob, entropyBlob, outputBlob, protect) == 0) {
             throw CredentialProtectionException("Windows DPAPI failed; check the current user profile and retry")
         }
         copyAndFreeOutput(outputBlob)
     }
 
-    private fun invokeCrypt(arena: Arena, input: MemorySegment, entropy: MemorySegment, output: MemorySegment, protect: Boolean): Int =
+    private fun invokeCrypt(input: MemorySegment, entropy: MemorySegment, output: MemorySegment, protect: Boolean): Int =
         (if (protect) cryptProtect else cryptUnprotect).invoke(
-            arena,
             input,
             MemorySegment.NULL,
             entropy,
@@ -109,7 +108,9 @@ class WindowsDpapiCredentialProtector : CredentialProtector {
             if (output == MemorySegment.NULL || size < 0) {
                 throw CredentialProtectionException("Windows DPAPI returned invalid credential data")
             }
-            return ByteArray(size).also { MemorySegment.copy(output, 0, MemorySegment.ofArray(it), 0, size.toLong()) }
+            return ByteArray(size).also {
+                MemorySegment.copy(output.reinterpret(size.toLong()), 0, MemorySegment.ofArray(it), 0, size.toLong())
+            }
         } finally {
             if (output != MemorySegment.NULL) localFree.invoke(output)
         }

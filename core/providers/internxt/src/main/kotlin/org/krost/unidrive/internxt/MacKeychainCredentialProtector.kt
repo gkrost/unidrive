@@ -103,7 +103,14 @@ private class MacKeychain {
             val bytes = ByteArray(length.toInt())
             if (bytes.isNotEmpty()) {
                 val source = cfDataGetBytePtr.invokeWithArguments(item) as MemorySegment
-                MemorySegment.copy(source, ValueLayout.JAVA_BYTE, 0, bytes, 0, bytes.size)
+                MemorySegment.copy(
+                    source.reinterpret(bytes.size.toLong()),
+                    ValueLayout.JAVA_BYTE,
+                    0,
+                    bytes,
+                    0,
+                    bytes.size,
+                )
             }
             try {
                 String(bytes, StandardCharsets.UTF_8)
@@ -191,7 +198,7 @@ private class MacKeychain {
     }
 
     private fun constant(library: SymbolLookup, name: String): MemorySegment =
-        symbol(library, name).get(ValueLayout.ADDRESS, 0)
+        symbol(library, name).reinterpret(ValueLayout.ADDRESS.byteSize()).get(ValueLayout.ADDRESS, 0)
 
     private fun symbol(library: SymbolLookup, name: String): MemorySegment =
         library.find(name).orElseThrow { IllegalStateException("macOS system symbol $name is unavailable") }
