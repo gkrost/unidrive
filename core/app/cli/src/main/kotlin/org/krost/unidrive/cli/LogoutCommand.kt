@@ -2,6 +2,7 @@ package org.krost.unidrive.cli
 
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.auth.CredentialProtectionException
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
@@ -22,29 +23,7 @@ class LogoutCommand : Runnable {
             val provider = parent.createProvider()
             val profileDir = parent.providerConfigDir()
 
-            // Call provider.logout() to revoke tokens if supported
-            try {
-                runBlocking { provider.logout() }
-            } catch (_: AuthenticationException) {
-                // Already not authenticated — proceed with local cleanup
-            } catch (_: Exception) {
-                // Token revocation failed (network error etc.) — still clean up locally
-            }
-
-            // Clean up local files
-            val deleted = mutableListOf<String>()
-
-            for (name in StoragePermissions.CREDENTIAL_FILES) {
-                val credentialFile = profileDir.resolve(name)
-                if (Files.deleteIfExists(credentialFile)) deleted.add(credentialFile.toString())
-            }
-
-            if (!keepState) {
-                val stateDb = profileDir.resolve("state.db")
-                val failures = profileDir.resolve("failures.jsonl")
-                if (Files.deleteIfExists(stateDb)) deleted.add(stateDb.toString())
-                if (Files.deleteIfExists(failures)) deleted.add(failures.toString())
-            }
+            val deleted = logoutAndDeleteLocalFiles(profileDir, keepState) { provider.logout() }
 
             val profileLabel = if (profile.name != profile.type) "${provider.displayName} (${profile.name})" else provider.displayName
             println("Logged out of $profileLabel.")
@@ -54,4 +33,34 @@ class LogoutCommand : Runnable {
             lock.unlock()
         }
     }
+}
+
+internal fun logoutAndDeleteLocalFiles(
+    profileDir: java.nio.file.Path,
+    keepState: Boolean,
+    logout: suspend () -> Unit,
+): List<String> {
+    try {
+        runBlocking { logout() }
+    } catch (_: AuthenticationException) {
+        // Already not authenticated — proceed with local cleanup.
+    } catch (e: CredentialProtectionException) {
+        // Preserve the marker file if its Secret Service item could not be removed.
+        throw e
+    } catch (_: Exception) {
+        // Token revocation failed (network error etc.) — still clean up locally.
+    }
+
+    val deleted = mutableListOf<String>()
+    for (name in StoragePermissions.CREDENTIAL_FILES) {
+        val file = profileDir.resolve(name)
+        if (Files.deleteIfExists(file)) deleted.add(file.toString())
+    }
+    if (!keepState) {
+        for (name in listOf("state.db", "failures.jsonl")) {
+            val file = profileDir.resolve(name)
+            if (Files.deleteIfExists(file)) deleted.add(file.toString())
+        }
+    }
+    return deleted
 }

@@ -2,8 +2,7 @@
 # pre-push — run gitleaks against the current working tree before a push.
 #
 # Scope: the working tree only, not history. Pre-push is about what is
-# about to leave this machine. No CI job runs gitleaks; this hook is the
-# only secret scan, so it fails closed.
+# about to leave this machine; the advisory full-history scan also runs in CI.
 #
 # Enable it once per clone:
 #   git config core.hooksPath scripts/hooks

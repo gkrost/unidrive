@@ -24,6 +24,7 @@ it so you can restart it. It also warns when no Java 21+ runtime is found.
   21–24, and every command warns while a running daemon still uses a Java runtime that a package
   upgrade has since replaced (restart it with `unidrive -p <profile> daemon stop`).
 - `~/.local/bin` on your `$PATH`.
+- For Internxt profiles: `libsecret-tools` (`sudo apt install libsecret-tools` on Debian/Ubuntu) and an unlocked Secret Service collection available to the user's systemd session. Internxt authentication and sync fail closed when it is missing or locked; credentials are not written in plaintext.
 - For the systemd unit: a systemd-user instance (standard on Ubuntu, Fedora,
   Arch, Debian; absent on minimal containers).
 
@@ -68,8 +69,19 @@ or modeless profile, or no `unidrive-mount` binary installed); the units count b
 restarting. `fusermount3` is expected at `/usr/bin/fusermount3` (FUSE 3); a system with only FUSE 2's
 `fusermount` needs the unit edited.
 
-If the profile's credential vault needs a passphrase, put `UNIDRIVE_VAULT_PASS=...` in
-`~/.config/unidrive/vault-env` (read by the sync units if it exists) and keep that file mode `0600`.
+For a systemd sync unit whose credential vault needs a passphrase, create the user credential store
+and save an encrypted credential there:
+
+```bash
+mkdir -p ~/.config/credstore.encrypted
+systemd-ask-password 'Vault passphrase:' | \
+  systemd-creds --user encrypt --name=unidrive-vault-pass - ~/.config/credstore.encrypted/unidrive-vault-pass
+```
+
+`systemd-ask-password` prompts without echoing the passphrase. The unit exposes it only through its credential directory.
+Interactive CLI use still prompts for the passphrase, and `UNIDRIVE_VAULT_PASS` remains available for
+other non-interactive launchers. If no passphrase is available in headless mode, UniDrive exits with
+status 78 so the shipped units stop cleanly instead of retrying provider authentication.
 
 The sync units run with `NoNewPrivileges`, a seccomp-based restriction set, and the address families the
 daemon needs (Unix sockets, IPv4/IPv6, netlink). They deliberately leave the filesystem unrestricted: the

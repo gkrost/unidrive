@@ -60,7 +60,7 @@ class InternxtStaleModifiedAfterWriteTest {
     }
 
     private fun newProviderRooted(tokenPath: java.nio.file.Path): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tokenPath))
         // No real sleeping between the bounded re-reads of a lagging meta read.
         provider.modifiedRereadDelaysMs = listOf(0L, 0L, 0L)
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
@@ -538,7 +538,7 @@ class InternxtStaleModifiedAfterWriteTest {
     @Test
     fun `the default re-read delays cap the extra wait at about two seconds`() {
         val tmp = java.nio.file.Files.createTempDirectory("ud-417-delays-")
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tmp))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp))
         try {
             val delays = provider.modifiedRereadDelaysMs
             assertEquals(3, delays.size)

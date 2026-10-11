@@ -70,7 +70,7 @@ class TrackingEngineInternxtLiveTest {
                 "If credentials are vault-stored, the no-arg InternxtProvider() " +
                 "may not pick them up — `unidrive -p internxt auth` writes " +
                 "credentials.json at the default path which the no-arg constructor reads. " +
-                "Default path: ${InternxtConfig().tokenPath.resolve("credentials.json")}"
+                "Default path: ${InternxtConfig(credentialProtector = null, ).tokenPath.resolve("credentials.json")}"
             println("TrackingEngineInternxtLiveTest: SKIPPED — $reason")
             assumeTrue("Live Internxt test skipped: $reason", false)
             return

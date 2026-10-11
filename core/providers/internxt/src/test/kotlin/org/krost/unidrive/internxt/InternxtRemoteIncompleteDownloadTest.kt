@@ -43,7 +43,7 @@ class InternxtRemoteIncompleteDownloadTest {
 
     private fun newProvider(): InternxtProvider {
         destination = Files.createTempDirectory("ud-shard-dl").resolve("out.bin")
-        val provider = InternxtProvider(InternxtConfig(tokenPath = Files.createTempFile("ud-shard-token", ".tmp")))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = Files.createTempFile("ud-shard-token", ".tmp")))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)
@@ -83,7 +83,12 @@ class InternxtRemoteIncompleteDownloadTest {
     private fun bridgeInfoJsonWith(shardUrls: List<String>): String =
         buildString {
             append("""{"bucket":"$bucket","id":"$fileId","index":"$index64","shards":[""")
-            append(shardUrls.joinToString(",") { url -> """{"index":0,"hash":"h","url":"$url"}""" })
+            val hash =
+                java.security.MessageDigest
+                    .getInstance("SHA-256")
+                    .digest(shardBody)
+                    .joinToString("") { "%02x".format(it) }
+            append(shardUrls.joinToString(",") { url -> """{"index":0,"hash":"$hash","url":"$url"}""" })
             append("]}")
         }
 

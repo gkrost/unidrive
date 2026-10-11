@@ -248,18 +248,23 @@ open class Main : Runnable {
             return _vaultData!!
         }
         val envPass = System.getenv("UNIDRIVE_VAULT_PASS")
+        val systemdCredentialPath =
+            System.getenv("CREDENTIALS_DIRECTORY")?.let { Path.of(it).resolve("unidrive-vault-pass") }
         val passphrase =
             if (envPass != null) {
                 envPass.toCharArray()
+            } else if (systemdCredentialPath != null && Files.isRegularFile(systemdCredentialPath)) {
+                Files.readString(systemdCredentialPath).trimEnd('\r', '\n').toCharArray()
             } else {
                 val console = System.console()
                 if (console == null) {
-                    // Headless mode (systemd daemon, piped input): skip vault, use config as-is
-                    System.err.println("Warning: vault.enc exists but no interactive terminal.")
-                    System.err.println("Credentials from vault will not be available.")
-                    System.err.println("Set UNIDRIVE_VAULT_PASS env var for non-interactive vault access.")
-                    _vaultData = emptyMap()
-                    return _vaultData!!
+                    // A daemon must not silently continue without vaulted credentials: that turns
+                    // an operator configuration error into provider auth failures and restart loops.
+                    // Exit 78 is already treated as a clean stop by the shipped systemd units.
+                    System.err.println("Error: vault.enc exists but no passphrase is available.")
+                    System.err.println("Configure UNIDRIVE_VAULT_PASS or a systemd credential named unidrive-vault-pass.")
+                    System.exit(MODE_REFUSAL_EXIT)
+                    throw IllegalStateException("unreachable")
                 }
                 console.readPassword("Vault passphrase: ") ?: run {
                     System.err.println("Error: could not read passphrase.")

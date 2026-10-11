@@ -57,7 +57,7 @@ class InternxtAuthRefreshClassificationTest {
         engine: MockEngine,
     ): AuthService {
         seedCredentials(dir)
-        return AuthService(InternxtConfig(tokenPath = dir), httpClient = HttpClient(engine)).also { it.initialize() }
+        return AuthService(InternxtConfig(credentialProtector = null, tokenPath = dir), httpClient = HttpClient(engine)).also { it.initialize() }
     }
 
     private fun engineAnswering(

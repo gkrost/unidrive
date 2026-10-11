@@ -35,7 +35,7 @@ class InternxtCreateCollisionLiveTest {
     @Test
     fun `create collision preserves the pre-existing remote and keeps both`() {
         if (!enabled()) return
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tokenPath))
         runBlocking {
             provider.authenticate()
             val stamp = System.currentTimeMillis()

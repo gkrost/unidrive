@@ -28,7 +28,7 @@ class InternxtGetMetadataExactMatchTest {
             "folderUuid":"$folderUuid","status":"EXISTS"}"""
 
     private fun newProviderRooted(tokenPath: java.nio.file.Path): InternxtProvider {
-        val provider = InternxtProvider(InternxtConfig(tokenPath = tokenPath))
+        val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tokenPath))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
         authField.isAccessible = true
         val authService = authField.get(provider)
