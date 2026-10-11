@@ -702,27 +702,33 @@ class DaemonRuntimeTest {
             // forever and the test JVM never exits even on assertion failure.
             channel.configureBlocking(false)
             // Subscribe first
+            // Every wait below is a ceiling on the shared budget (IPC_STEP_BUDGET_MS), not a pace: it returns
+            // the moment the line arrives, and a stall names its step and the time spent.
             channel.write(ByteBuffer.wrap(("""{"verb":"sync.subscribe"}""" + "\n").toByteArray()))
-            val subReply = readUntil(channel, "\"ok\":true", timeoutMs = 5_000)
+            val subReply = awaitIpcLine(channel, "sync.subscribe reply") { !it.contains("\"event\"") }
             assertTrue(subReply.contains("\"ok\":true"), "subscribe must succeed; got: $subReply")
 
             // Issue refresh.run
             channel.write(ByteBuffer.wrap(("""{"verb":"refresh.run"}""" + "\n").toByteArray()))
 
-            // Read until we see the terminal event "refresh.done"
-            val collected = readUntil(channel, "refresh.done", timeoutMs = 10_000)
-            assertTrue(
-                collected.contains("\"event\":\"refresh.done\""),
-                "expected refresh.done terminal event within 10s; got: $collected",
-            )
-            assertTrue(
-                collected.contains("\"ok\":true"),
-                "expected ok:true on terminal event; got: $collected",
-            )
+            // Read until we see both the run's reply and the terminal event "refresh.done". A run on an empty
+            // remote can finish before the reply line is written, so the two may arrive in either order. The
+            // event is judged on its own line: the reply also says ok:true, which once made this check vacuous.
+            val (runReply, terminal) =
+                awaitIpcLines(
+                    channel,
+                    "refresh.run reply and refresh.done terminal event",
+                    IPC_STEP_BUDGET_MS,
+                    { !it.contains("\"event\"") },
+                    { it.contains("\"event\":\"refresh.done\"") },
+                )
+            assertTrue(runReply.contains("\"ok\":true"), "refresh.run must be accepted; got: $runReply")
+            assertTrue(terminal.contains("\"ok\":true"), "expected ok:true on the refresh.done event; got: $terminal")
 
-            // Issue refresh.run again - must NOT be 'busy' since first one completed.
+            // Issue refresh.run again - must NOT be 'busy' since first one completed. The reply is the next line
+            // that is not an event (a pushed enumerate.done carries a job_id too).
             channel.write(ByteBuffer.wrap(("""{"verb":"refresh.run"}""" + "\n").toByteArray()))
-            val secondReply = readUntil(channel, "\"job_id\"", timeoutMs = 5_000)
+            val secondReply = awaitIpcLine(channel, "second refresh.run reply") { !it.contains("\"event\"") }
             assertTrue(
                 secondReply.contains("\"ok\":true"),
                 "second refresh.run must succeed (not busy); got: $secondReply",
