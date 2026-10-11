@@ -35,7 +35,6 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.regex.PatternSyntaxException
 
-@Suppress("LongParameterList") // The clock is a constructor-injected test seam; grouping the existing engine options is a separate refactor.
 open class SyncEngine(
     private val provider: CloudProvider,
     private val db: StateDatabase,
