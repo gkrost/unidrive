@@ -117,41 +117,66 @@ open class AuthService(
     }
 
     private fun readPassword(prompt: String): CharArray {
-        System.console()?.let { console ->
-            return console.readPassword(prompt)
-        }
+        val console = System.console() ?: return readPasswordFromStdin(prompt)
+        return console.readPassword(prompt) ?: throw AuthenticationException("No input provided")
+    }
+
+    private fun readPasswordFromStdin(prompt: String): CharArray {
         // Fallback: no console (e.g. Gradle run) — warn that terminal echo
         // cannot be disabled, but avoid materializing the input as a String.
         System.err.println("Warning: no console available — password will be echoed")
         print(prompt)
         System.out.flush()
+        return trimWhitespace(readPasswordCharacters())
+    }
+
+    private fun readPasswordCharacters(): CharArray {
         var buffer = CharArray(128)
         var length = 0
         try {
             while (true) {
-                val next = stdinReader.read()
-                if (next < 0) {
-                    if (length == 0) throw AuthenticationException("No input provided")
-                    break
-                }
-                if (next == '\n'.code) break
-                if (next != '\r'.code) {
-                    if (length == buffer.size) {
-                        val expanded = buffer.copyOf(buffer.size * 2)
-                        buffer.fill('\u0000')
-                        buffer = expanded
+                when (val next = stdinReader.read()) {
+                    -1 -> return charsAtEndOfInput(buffer, length)
+                    '\n'.code -> return buffer.copyOf(length)
+                    '\r'.code -> Unit
+                    else -> {
+                        buffer = appendCharacter(buffer, length, next)
+                        length++
                     }
-                    buffer[length++] = next.toChar()
                 }
             }
-            var start = 0
-            var end = length
-            while (start < end && buffer[start].isWhitespace()) start++
-            while (end > start && buffer[end - 1].isWhitespace()) end--
-            return buffer.copyOfRange(start, end)
         } finally {
             buffer.fill('\u0000')
         }
+    }
+
+    private fun charsAtEndOfInput(
+        buffer: CharArray,
+        length: Int,
+    ): CharArray {
+        if (length == 0) throw AuthenticationException("No input provided")
+        return buffer.copyOf(length)
+    }
+
+    private fun appendCharacter(
+        buffer: CharArray,
+        length: Int,
+        character: Int,
+    ): CharArray {
+        val target = if (length == buffer.size) growAndClear(buffer) else buffer
+        target[length] = character.toChar()
+        return target
+    }
+
+    private fun growAndClear(buffer: CharArray): CharArray =
+        buffer.copyOf(buffer.size * 2).also { buffer.fill('\u0000') }
+
+    private fun trimWhitespace(chars: CharArray): CharArray {
+        var start = 0
+        var end = chars.size
+        while (start < end && chars[start].isWhitespace()) start++
+        while (end > start && chars[end - 1].isWhitespace()) end--
+        return chars.copyOfRange(start, end).also { chars.fill('\u0000') }
     }
 
     /**
@@ -220,17 +245,7 @@ open class AuthService(
         hashPassword: (CharArray, String, String) -> String,
         decryptMnemonic: (String, CharArray) -> String,
     ): InternxtCredentials {
-        // Step 1: challenge.
-        val challengeText = postLoginChallenge(email)
-        val challenge = json.decodeFromString<LoginChallengeResponse>(challengeText)
-
-        // Step 2: TFA gate.
-        if (challenge.tfa && tfaCode == null) {
-            throw TfaRequiredException()
-        }
-
-        // Step 3: password hash.
-        val sKey = challenge.sKey ?: throw AuthenticationException("No sKey in login challenge")
+        val sKey = loginChallengeKey(email, tfaCode)
         val hashedPassword = hashPassword(password, sKey, InternxtConfig.CRYPTO_KEY)
 
         // Step 4: access POST (omit `tfa` field when not provided).
@@ -242,9 +257,7 @@ open class AuthService(
         val accessText = postLoginAccess(accessBody)
         val loginResult = json.decodeFromString<LoginAccessResponse>(accessText)
 
-        val rootFolderId = loginResult.user.rootFolderId
-            ?: loginResult.user.rootFolderIdNum?.toString()
-            ?: throw AuthenticationException("No root folder ID in login response")
+        val rootFolderId = loginResult.rootFolderId()
 
         // Step 5: decrypt mnemonic with the password characters.
         val mnemonic = decryptMnemonic(loginResult.user.mnemonic, password)
@@ -262,6 +275,21 @@ open class AuthService(
         credentials = creds
         return creds
     }
+
+    private suspend fun loginChallengeKey(
+        email: String,
+        tfaCode: String?,
+    ): String {
+        val challengeText = postLoginChallenge(email)
+        val challenge = json.decodeFromString<LoginChallengeResponse>(challengeText)
+        if (challenge.tfa && tfaCode == null) throw TfaRequiredException()
+        return challenge.sKey ?: throw AuthenticationException("No sKey in login challenge")
+    }
+
+    private fun LoginAccessResponse.rootFolderId(): String =
+        user.rootFolderId
+            ?: user.rootFolderIdNum?.toString()
+            ?: throw AuthenticationException("No root folder ID in login response")
 
     /**
      * HTTP seam: POST `/auth/login` with the given email; return the response body.
