@@ -13,9 +13,9 @@ verified every anchor below on `main`. Line numbers drift, so trust the symbol. 
   stacked.
 - **Test-first:** show the new test failing on `main`, then passing; both go in the PR body. Confirm your filter really ran
   (`build/test-results/**/*.xml`). A flake fix shows the race (a forced interleaving or a stress loop), not just one green run.
-- **Gate:** `cd core && ./gradlew check` green before a PR leaves draft (6–15 min). Known flakes under parallel load are the Tier 2 items
-  below: re-run the class once in isolation before investigating, and serialize gradle runs across worktrees. Do not wait on another
-  session's gradle run; if the daemon is busy, use `--no-daemon`.
+- **Gate:** CI's `./gradlew check` green on the PR before it leaves draft (`gh pr checks`). **Locally run only the touched test classes**
+  (`--tests`), never a full `./gradlew check` unless the owner asks (AGENTS.md). Known flakes are the Tier 2 items below: re-run the
+  failed job once before investigating. Do not wait on another session's gradle run; if the daemon is busy, use `--no-daemon`.
 - **Data-safety items (Tier 1)** get a test that writes real bytes and checks they survive, not just that a row changed.
 - **Hands off:**
   - **The desktop-UI lane** (`docs/dev/plans/lane-desktop-ui.md`, epics #650/#651): #652–#660, #656 PR c and the #607 (c) restructure
