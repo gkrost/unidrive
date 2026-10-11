@@ -1,8 +1,10 @@
 package org.krost.unidrive.internxt
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.RemoteObjectAuditRecord
 import org.krost.unidrive.RemoteObjectAuditReport
@@ -32,18 +34,34 @@ internal class InternxtRemoteObjectAuditor(
 
     private suspend fun auditOne(item: CloudItem): RemoteObjectAuditRecord {
         val metadata =
-            try {
-                getFileMeta(item.id)
-            } catch (e: InternxtApiException) {
-                return if (e.statusCode == 404) {
-                    record(item, RemoteObjectStatus.MISSING, detail = "drive metadata disappeared during audit")
-                } else {
-                    record(item, RemoteObjectStatus.UNVERIFIED, detail = "drive metadata request failed (${e.statusCode})")
-                }
-            } catch (_: Exception) {
-                return record(item, RemoteObjectStatus.UNVERIFIED, detail = "drive metadata request failed")
+            when (val result = lookup { getFileMeta(item.id) }) {
+                is Lookup.Found -> result.value
+                // A 404 here means the drive file was removed after the listing was taken: that is not
+                // a stored object gone missing, so it must not be reported as one.
+                is Lookup.Failed ->
+                    return record(
+                        item,
+                        RemoteObjectStatus.UNVERIFIED,
+                        detail =
+                            if (result.statusCode == 404) {
+                                "drive file no longer exists (removed since the listing)"
+                            } else {
+                                "drive metadata request failed" + statusSuffix(result.statusCode)
+                            },
+                    )
             }
-        val driveSize = metadata.size.toLongOrNull() ?: item.size
+        // The metadata size defaults to "0" when the field is absent; trusting that would report a file
+        // without any bridge reference as an empty (healthy) one. The listing carries the same field, so
+        // the two must agree, otherwise the size is unknown and so is the verdict.
+        val driveSize = metadata.size.toLongOrNull()
+        if (driveSize == null || driveSize < 0L || driveSize != item.size) {
+            return record(
+                item,
+                RemoteObjectStatus.UNVERIFIED,
+                driveSize?.takeIf { it >= 0L } ?: item.size,
+                "drive size is unreadable or differs from the listing",
+            )
+        }
         val bucket = metadata.bucket
         val fileId = metadata.fileId
         if (bucket.isNullOrBlank() || fileId.isNullOrBlank()) {
@@ -54,16 +72,19 @@ internal class InternxtRemoteObjectAuditor(
 
         delay(MIN_REQUEST_SPACING_MS)
         val bridgeInfo =
-            try {
-                getBridgeFileInfo(bucket, fileId)
-            } catch (e: InternxtApiException) {
-                return if (e.statusCode == 404) {
-                    record(item, RemoteObjectStatus.MISSING, driveSize, "bridge object metadata is missing")
-                } else {
-                    record(item, RemoteObjectStatus.UNVERIFIED, driveSize, "bridge object metadata request failed (${e.statusCode})")
-                }
-            } catch (_: Exception) {
-                return record(item, RemoteObjectStatus.UNVERIFIED, driveSize, "bridge object metadata request failed")
+            when (val result = lookup { getBridgeFileInfo(bucket, fileId) }) {
+                is Lookup.Found -> result.value
+                is Lookup.Failed ->
+                    return if (result.statusCode == 404) {
+                        record(item, RemoteObjectStatus.MISSING, driveSize, "bridge object metadata is missing")
+                    } else {
+                        record(
+                            item,
+                            RemoteObjectStatus.UNVERIFIED,
+                            driveSize,
+                            "bridge object metadata request failed" + statusSuffix(result.statusCode),
+                        )
+                    }
             }
 
         if (bridgeInfo.bucket != bucket || bridgeInfo.id != fileId) {
@@ -76,24 +97,35 @@ internal class InternxtRemoteObjectAuditor(
             )
         }
 
+        // One mirror query returns at most BRIDGE_MIRROR_LIMIT shard pointers. A shard that was not asked for
+        // is not a shard that is gone, so an object with more shards than that cannot be judged.
+        val shardCount = bridgeInfo.shards.filter { it.url.isNotBlank() }.map { it.index }.toSet().size
+        if (shardCount > InternxtApiService.BRIDGE_MIRROR_LIMIT) {
+            return record(
+                item,
+                RemoteObjectStatus.UNVERIFIED,
+                driveSize,
+                "object has $shardCount shards, more than one availability query covers (${InternxtApiService.BRIDGE_MIRROR_LIMIT})",
+                bridgeInfo,
+            )
+        }
+
         delay(MIN_REQUEST_SPACING_MS)
         val mirrors =
-            try {
-                getBridgeMirrors(bucket, fileId)
-            } catch (e: InternxtApiException) {
-                return if (e.statusCode == 404) {
-                    record(
-                        item,
-                        RemoteObjectStatus.MISSING,
-                        driveSize,
-                        "bridge object has no availability records",
-                        bridgeInfo,
-                    )
-                } else {
-                    record(item, RemoteObjectStatus.UNVERIFIED, driveSize, "bridge availability request failed (${e.statusCode})", bridgeInfo)
-                }
-            } catch (_: Exception) {
-                return record(item, RemoteObjectStatus.UNVERIFIED, driveSize, "bridge availability request failed", bridgeInfo)
+            when (val result = lookup { getBridgeMirrors(bucket, fileId) }) {
+                is Lookup.Found -> result.value
+                is Lookup.Failed ->
+                    return if (result.statusCode == 404) {
+                        record(item, RemoteObjectStatus.MISSING, driveSize, "bridge object has no availability records", bridgeInfo)
+                    } else {
+                        record(
+                            item,
+                            RemoteObjectStatus.UNVERIFIED,
+                            driveSize,
+                            "bridge availability request failed" + statusSuffix(result.statusCode),
+                            bridgeInfo,
+                        )
+                    }
             }
 
         return classify(item, driveSize, bridgeInfo, mirrors)
@@ -158,6 +190,37 @@ internal class InternxtRemoteObjectAuditor(
             shardCount = bridgeInfo?.shards?.size,
             detail = detail,
         )
+
+    private sealed interface Lookup<out T> {
+        class Found<T>(
+            val value: T,
+        ) : Lookup<T>
+
+        /** The request failed; [statusCode] is the HTTP status when the failure was an API answer. */
+        class Failed(
+            val statusCode: Int?,
+        ) : Lookup<Nothing>
+    }
+
+    /**
+     * Runs one lookup. Cancellation and a dead session end the whole audit: recording them as one object's
+     * UNVERIFIED would swallow the cancellation, and with a rejected token would walk the remaining drive at
+     * one request per 500 ms, marking every file unverified. Any other failure is that object's unknown.
+     */
+    private suspend fun <T> lookup(call: suspend () -> T): Lookup<T> =
+        try {
+            Lookup.Found(call())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: AuthenticationException) {
+            throw e
+        } catch (e: InternxtApiException) {
+            Lookup.Failed(e.statusCode)
+        } catch (_: Exception) {
+            Lookup.Failed(null)
+        }
+
+    private fun statusSuffix(statusCode: Int?): String = if (statusCode != null && statusCode > 0) " ($statusCode)" else ""
 
     private companion object {
         const val MIN_REQUEST_SPACING_MS = 500L

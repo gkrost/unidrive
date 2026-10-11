@@ -88,6 +88,9 @@ class InternxtApiService(
         private const val OUTAGE_FIRST_DELAY_MS: Long = 2_000L
         private const val OUTAGE_MAX_DELAY_MS: Long = 30_000L
 
+        /** How many shard pointers one [getBridgeMirrors] query asks for; an object with more shards cannot be judged from it. */
+        internal const val BRIDGE_MIRROR_LIMIT: Int = 3
+
         /** Safety bound of one paged per-folder stream (10,000 pages are 10M items at the cursor page size of 1000). */
         internal const val MAX_LISTING_PAGES: Int = 10_000
 
@@ -1050,7 +1053,7 @@ class InternxtApiService(
         bucket: String,
         fileId: String,
     ): List<Mirror> {
-        val body = bridgeGet("/buckets/$bucket/files/$fileId", mapOf("limit" to "3"))
+        val body = bridgeGet("/buckets/$bucket/files/$fileId", mapOf("limit" to BRIDGE_MIRROR_LIMIT.toString()))
         return json.decodeFromString<List<Mirror>>(body)
     }
 

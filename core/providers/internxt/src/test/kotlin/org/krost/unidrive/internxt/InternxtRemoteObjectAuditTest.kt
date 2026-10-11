@@ -130,6 +130,10 @@ class InternxtRemoteObjectAuditTest {
                 assertEquals(100L, report.objects.first().shardBytes)
                 assertEquals(40L, report.objects.last().shardBytes)
                 assertEquals(1, maxActiveRequests.get(), "audit requests must remain sequential")
+                assertTrue(
+                    testScheduler.currentTime >= 500L * (requestLog.size - 1),
+                    "audit requests must be spaced by at least 500 ms: ${requestLog.size} requests in ${testScheduler.currentTime} ms",
+                )
                 assertFalse(requestLog.any { it.contains("shard.invalid") }, "audit must never fetch shard bodies")
                 assertTrue(requestLog.all { it.startsWith("GET ") })
             } finally {
