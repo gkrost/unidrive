@@ -109,7 +109,10 @@ class SparseProbeTest {
     }
 
     @Test
-    fun `the scanner records a new stub as not hydrated and a new real file as hydrated`() {
+    fun `the scanner records a new all-zero file and a new real file as hydrated`() {
+        // #739: a path with no row cannot be an engine placeholder (those are 0-byte and keep their
+        // row), so the scanner no longer probes new files: an all-zero one is real content to upload.
+        // This test used to assert the opposite for stub.bin, which is the bug #739 fixes.
         val root = Files.createTempDirectory("unidrive-sparse-scan")
         FileChannel.open(root.resolve("stub.bin"), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).use {
             it.position(99_999)
@@ -117,7 +120,8 @@ class SparseProbeTest {
         }
         Files.write(root.resolve("real.bin"), ByteArray(100_000) { 5 })
         LocalScanner(root, db).scan()
-        assertEquals(false, db.getEntry("/stub.bin")?.isHydrated)
+        assertEquals(true, db.getEntry("/stub.bin")?.isHydrated)
+        assertTrue(SparseProbe.isStub(root.resolve("stub.bin"), 100_000), "the probe itself still reports the zeros as a stub")
         assertEquals(true, db.getEntry("/real.bin")?.isHydrated)
     }
 
