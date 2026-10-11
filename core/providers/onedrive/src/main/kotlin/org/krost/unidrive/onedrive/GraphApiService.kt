@@ -1198,11 +1198,12 @@ class GraphApiService(
         var nextUrl: String? = "$baseUrl/me/drive/sharedWithMe"
         var pageIndex = 0
         // Same walk as listChildren, through the same throttled request path. A server that repeats a
-        // nextLink would otherwise loop forever, so a link already requested ends the walk.
+        // nextLink would otherwise loop forever. The caller takes this list as the complete shared set
+        // (an item missing from it reads as removed), so a walk that cannot finish fails instead of
+        // returning the pages it got.
         while (nextUrl != null) {
             if (!seenUrls.add(nextUrl)) {
-                log.warn("sharedWithMe nextLink repeated, stopping after {} pages", pageIndex)
-                break
+                throw ProviderException("sharedWithMe repeated a nextLink after $pageIndex pages; the shared listing is incomplete")
             }
             val response = authenticatedRequest(nextUrl)
             val body = response.bodyAsText()

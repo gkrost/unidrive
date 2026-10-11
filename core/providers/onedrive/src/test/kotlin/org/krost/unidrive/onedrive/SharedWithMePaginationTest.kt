@@ -8,8 +8,10 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.CapabilityResult
+import org.krost.unidrive.ProviderException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -82,7 +84,7 @@ class SharedWithMePaginationTest {
         }
 
     @Test
-    fun `listSharedWithMe stops when the server repeats a nextLink`() =
+    fun `listSharedWithMe fails instead of returning a partial list when the server repeats a nextLink`() =
         runTest {
             val loop = "https://graph.microsoft.com/v1.0/me/drive/sharedWithMe?\$skiptoken=LOOP"
             var calls = 0
@@ -94,11 +96,11 @@ class SharedWithMePaginationTest {
                 }
             val service = serviceWith(engine)
 
-            val items = service.listSharedWithMe()
+            // A partial list would read as "everything after the cut was unshared": the walk must fail, not return it.
+            assertFailsWith<ProviderException> { service.listSharedWithMe() }
 
             // First request (no skiptoken) returns LOOP; the second request returns LOOP again and ends the walk.
             assertEquals(2, calls)
-            assertEquals(2, items.size)
             service.close()
         }
 
