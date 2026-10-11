@@ -96,6 +96,32 @@ class IpcServerConnectionLimitsTest {
             assertEquals(listOf(TOO_MANY_CLIENTS), readUntilEof(refused))
         }
 
+    // The refused client's request can land at any moment: before the server has drained, after it has
+    // looked once, or after it would have closed. Closing a socket with unread input can reset the
+    // connection, and a reset can discard the reason the client has not read yet (seen on Windows).
+    // The client below reads late, after the reset would have landed, so a reset shows as a lost line.
+    @Test
+    fun `a refused client still reads the reason whenever its request arrives`() =
+        runBlocking(Dispatchers.IO) {
+            val srv = newServer(idleTimeoutMs = 0)
+            srv.start(serverScope)
+            fillToTheLimit(srv, SMALL_CAP)
+
+            val lost = mutableListOf<String>()
+            for (round in 1..3) {
+                for (sendAfterMs in listOf(0L, 1L, 2L, 3L, 5L, 8L, 12L, 20L, 35L, 60L, 100L)) {
+                    val refused = connect()
+                    delay(sendAfterMs)
+                    runCatching { send(refused, """{"verb":"ping"}""") } // the server may already be gone
+                    delay(40) // a reset from an early close lands in this gap
+                    val read = try { readLines(refused, 1) } catch (e: java.io.IOException) { listOf("read failed: ${e.message}") }
+                    if (read != listOf(TOO_MANY_CLIENTS)) lost += "round $round, request after $sendAfterMs ms: $read"
+                    refused.close()
+                }
+            }
+            assertEquals(emptyList(), lost, "refused clients that did not read the reason")
+        }
+
     @Test
     fun `a slot freed by a closing client is available again`() =
         runBlocking(Dispatchers.IO) {

@@ -114,6 +114,9 @@ class IpcServer(
     // listener registered externally by SyncCommand (§3.3 of the spec).
     private val syncSubscribers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    // Refused connections currently waiting for their peer to finish sending (see refuse).
+    private val lingeringRefusals = java.util.concurrent.atomic.AtomicInteger(0)
+
     // One-shot per-connection slot for an action that runs AFTER the current
     // request's reply is written to the socket. See scheduleAfterReply()
     // and the post-reply hook in dispatchRequest. Single in-flight request
@@ -310,7 +313,7 @@ class IpcServer(
                         val sc = server.accept()
                         if (clients.size >= maxClients) {
                             log.warn("IPC: max clients ({}) reached, refusing connection", maxClients)
-                            refuse(sc)
+                            refuse(sc, scope, transport)
                             continue
                         }
                         sc.configureBlocking(false)
@@ -656,10 +659,18 @@ class IpcServer(
 
     // A connection over maxClients: best effort, one line that says why, then close. A fresh
     // connection's send buffer is empty, so the line goes out at once; the short deadline only
-    // bounds a peer that reads nothing. What the client already sent is read and dropped first:
-    // closing with unread input can reset the connection, and a reset can discard the line.
-    private fun refuse(sc: SocketChannel) {
-        runCatching {
+    // bounds a peer that reads nothing. Closing a socket that still has unread input can reset the
+    // connection, and a reset discards a reason the client has not read yet (Windows does it for any
+    // request that arrives after the close, however soon). So the write side is shut down, and the
+    // read side is kept open and drained until the peer's end of stream or REFUSAL_LINGER_MS, whichever
+    // comes first. That wait runs on a coroutine of its own: the accept loop never sleeps for it.
+    // At most MAX_LINGERING_REFUSALS wait at once; past that a refusal drains what has arrived and closes.
+    private fun refuse(
+        sc: SocketChannel,
+        scope: CoroutineScope,
+        transport: CoroutineDispatcher,
+    ) {
+        try {
             sc.configureBlocking(false)
             val line = ByteBuffer.wrap(TOO_MANY_CLIENTS_LINE.toByteArray(Charsets.UTF_8))
             val deadline = System.nanoTime() + REFUSAL_WRITE_TIMEOUT_NS
@@ -667,16 +678,59 @@ class IpcServer(
                 if (sc.write(line) == 0) Thread.sleep(5)
             }
             sc.shutdownOutput()
-            val sink = ByteBuffer.allocate(4096)
-            var drained = 0
-            while (drained < MAX_REQUEST_BYTES) {
-                sink.clear()
-                val n = sc.read(sink)
-                if (n <= 0) break
-                drained += n
+        } catch (_: Exception) {
+            runCatching { sc.close() }
+            return
+        }
+        if (lingeringRefusals.incrementAndGet() <= MAX_LINGERING_REFUSALS) {
+            try {
+                val job = scope.launch(transport) { drainUntilEofOrDeadline(sc, REFUSAL_LINGER_MS) }
+                // Runs on every end of the job, including a cancellation before it started (server stop).
+                job.invokeOnCompletion {
+                    lingeringRefusals.decrementAndGet()
+                    runCatching { sc.close() }
+                }
+                return
+            } catch (_: Exception) {
+                // Could not schedule: fall through to the immediate close.
             }
         }
+        lingeringRefusals.decrementAndGet()
+        runCatching { drainAvailable(sc) }
         runCatching { sc.close() }
+    }
+
+    // Reads and drops what the refused peer sends until it closes (end of stream), a reset, the cap on
+    // what is worth reading (MAX_REQUEST_BYTES) or [lingerMs]. A read that finds nothing yields the thread.
+    private suspend fun drainUntilEofOrDeadline(
+        sc: SocketChannel,
+        lingerMs: Long,
+    ) {
+        val deadline = System.nanoTime() + lingerMs * 1_000_000L
+        val sink = ByteBuffer.allocate(4096)
+        var drained = 0
+        try {
+            while (drained < MAX_REQUEST_BYTES && System.nanoTime() < deadline) {
+                sink.clear()
+                val n = sc.read(sink)
+                if (n < 0) return
+                if (n == 0) delay(REFUSAL_LINGER_POLL_MS) else drained += n
+            }
+        } catch (_: IOException) {
+            // A reset ends the wait like an end of stream does.
+        }
+    }
+
+    // What has already arrived, without waiting (the fallback when too many refusals are lingering).
+    private fun drainAvailable(sc: SocketChannel) {
+        val sink = ByteBuffer.allocate(4096)
+        var drained = 0
+        while (drained < MAX_REQUEST_BYTES) {
+            sink.clear()
+            val n = sc.read(sink)
+            if (n <= 0) break
+            drained += n
+        }
     }
 
     private fun writeNonBlocking(
@@ -714,6 +768,12 @@ class IpcServer(
         // ipc-contract/connection/too_many_clients.ndjson).
         private const val TOO_MANY_CLIENTS_LINE = "{\"ok\":false,\"error\":\"too_many_clients\"}\n"
         private const val REFUSAL_WRITE_TIMEOUT_NS = 200_000_000L
+
+        // How long a refused connection is kept open, reading and dropping its input, for the peer's end of
+        // stream (see refuse), and how many may wait at once.
+        internal const val REFUSAL_LINGER_MS = 200L
+        private const val REFUSAL_LINGER_POLL_MS = 10L
+        private const val MAX_LINGERING_REFUSALS = 64
 
         // Idle timeout (UNIDRIVE_IPC_IDLE_TIMEOUT_MS, docs/env-vars.md): 30 min by default, 0 = off,
         // other values clamped to 1 min..24 h.
