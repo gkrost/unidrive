@@ -1193,11 +1193,26 @@ class GraphApiService(
     }
 
     suspend fun listSharedWithMe(): List<DriveItem> {
-        val url = "$baseUrl/me/drive/sharedWithMe"
-        val response = authenticatedRequest(url)
-        val body = response.bodyAsText()
-        val collection = json.decodeFromString<DriveItemCollectionResponse>(body)
-        return collection.value
+        val accumulated = mutableListOf<DriveItem>()
+        val seenUrls = mutableSetOf<String>()
+        var nextUrl: String? = "$baseUrl/me/drive/sharedWithMe"
+        var pageIndex = 0
+        // Same walk as listChildren, through the same throttled request path. A server that repeats a
+        // nextLink would otherwise loop forever, so a link already requested ends the walk.
+        while (nextUrl != null) {
+            if (!seenUrls.add(nextUrl)) {
+                log.warn("sharedWithMe nextLink repeated, stopping after {} pages", pageIndex)
+                break
+            }
+            val response = authenticatedRequest(nextUrl)
+            val body = response.bodyAsText()
+            val collection = json.decodeFromString<DriveItemCollectionResponse>(body)
+            accumulated.addAll(collection.value)
+            log.debug("listSharedWithMe page {}: {} items, hasMore={}", pageIndex, collection.value.size, collection.nextLink != null)
+            nextUrl = collection.nextLink
+            pageIndex++
+        }
+        return accumulated
     }
 
     suspend fun createSubscription(
