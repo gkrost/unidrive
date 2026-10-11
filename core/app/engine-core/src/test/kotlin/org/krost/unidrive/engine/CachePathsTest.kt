@@ -126,6 +126,56 @@ class CachePathsTest {
         assertEquals(link, CachePaths.resolveInside(dir, "/alias.txt"))
     }
 
+    // ---- Pass: one containment memo for a pass over many rows (#729) ----
+
+    @Test
+    fun `a pass answers what isInside answers, for paths that exist and paths that do not`() {
+        val file = write(dir.resolve("a").resolve("b.txt"))
+        val sibling = write(dir.resolveSibling("profile-other").resolve("b.txt"))
+        val elsewhere = write(base.resolve("elsewhere.txt"))
+        val missing = base.resolve("not-yet")
+        val pass = CachePaths.Pass(dir)
+        val rootless = CachePaths.Pass(missing)
+
+        val candidates =
+            listOf(
+                file,
+                dir.resolve("a"),
+                dir.resolve("a").resolve(".").resolve("b.txt"),
+                dir.resolve("x").resolve("..").resolve("a").resolve("b.txt"),
+                dir.resolve("new").resolve("c.txt"),
+                dir,
+                sibling,
+                elsewhere,
+                dir.resolve("..").resolve("profile-other").resolve("b.txt"),
+                dir.resolve("..").resolve("..").resolve("elsewhere.txt"),
+            )
+        for (candidate in candidates) {
+            assertEquals(CachePaths.isInside(dir, candidate), pass.isInside(candidate), "for $candidate")
+        }
+        assertTrue(rootless.isInside(missing.resolve("a.txt")))
+        assertFalse(rootless.isInside(missing.resolve("..").resolve("a.txt")))
+        assertFalse(rootless.isInside(base.resolve("elsewhere.txt")))
+    }
+
+    @Test
+    fun `a pass answers from the probes it made, not from a tree that changed under it`() {
+        val outDir = Files.createDirectories(base.resolve("outdir"))
+        write(outDir.resolve("b.txt"))
+        val link = dir.resolve("linked")
+        val pass = CachePaths.Pass(dir)
+
+        assertTrue(pass.isInside(link.resolve("new.txt")), "nothing is there yet: the spelling decides")
+        try {
+            Files.createSymbolicLink(link, outDir)
+        } catch (e: Exception) {
+            Assume.assumeTrue("symbolic links are not available here: ${e.message}", false)
+        }
+
+        assertFalse(CachePaths.isInside(dir, link.resolve("other.txt")), "a fresh answer follows the link out")
+        assertTrue(pass.isInside(link.resolve("other.txt")), "the pass answers from the absent ancestor it probed")
+    }
+
     // ---- forRow: passes over rows skip a path that does not resolve inside ----
 
     @Test

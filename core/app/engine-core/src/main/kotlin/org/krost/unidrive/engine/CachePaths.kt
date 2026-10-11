@@ -30,65 +30,150 @@ object CachePaths {
     fun resolveInside(
         cacheDir: Path,
         logicalPath: String,
-    ): Path {
-        val resolved = cacheDir.resolve(logicalPath.trimStart('/')).normalize()
-        val root = cacheDir.toAbsolutePath().normalize()
-        val inside =
-            try {
-                val absolute = resolved.toAbsolutePath().normalize()
-                absolute.startsWith(root) && (absolute == root || isInside(cacheDir, resolved))
-            } catch (_: java.io.IOError) {
-                // A drive-relative name ("x:name" on Windows) of a drive that does not exist.
-                false
-            }
-        if (!inside) throw SecurityException("path does not resolve inside the hydration cache: '${forLog(logicalPath)}'")
-        return resolved
-    }
+    ): Path = Pass(cacheDir).resolveInside(logicalPath)
 
     /**
-     * Whether [candidate] (a cache path a client hands back) names a file strictly inside [cacheDir]. Compared on
-     * normalised absolute paths and, as far as the path exists, on real paths: a link inside the folder that leads
-     * out of it does not count, another spelling of a file inside does (letter case on Windows, a short name, a
-     * redundant `.`). When [cacheDir] does not exist yet, nothing below it can either, and the spelling decides.
+     * Whether [candidate] (a cache path a client hands back) names a file strictly inside [cacheDir]. A spelling
+     * that does not lead into the folder on normalised absolute paths does not count, however the tree resolves —
+     * the same first check [resolveInside] makes. Inside it, the path is compared as far as it exists on real
+     * paths: a link that leads out of the folder does not count, another spelling of a file inside does (letter
+     * case on Windows, a redundant `.`). When [cacheDir] does not exist yet, nothing below it can either, and the
+     * spelling decides.
      */
     fun isInside(
         cacheDir: Path,
         candidate: Path,
-    ): Boolean {
-        val root = cacheDir.toAbsolutePath().normalize()
-        val path =
-            try {
-                candidate.toAbsolutePath()
-            } catch (_: java.io.IOError) {
-                return false
-            }
-        val realRoot =
-            try {
-                root.toRealPath()
-            } catch (_: NoSuchFileException) {
-                val normalised = path.normalize()
-                return normalised != root && normalised.startsWith(root)
-            } catch (_: IOException) {
-                return false
-            }
-        // The deepest part of [path] that exists (the file itself when it does), through its real path, and the
-        // names below it as given.
-        var existing: Path = path
-        val rest = ArrayList<Path>()
-        while (!Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
-            val name = existing.fileName ?: return false
-            rest.add(name)
-            existing = existing.parent ?: return false
+    ): Boolean = Pass(cacheDir).isInside(candidate)
+
+    /**
+     * The containment answers of one pass over the cache folder: the rules and the results of [isInside] and
+     * [resolveInside], asked per row and remembered, instead of re-walked per candidate path.
+     *
+     * [isInside] answers every question from scratch: it walks a candidate up to its deepest existing prefix, and
+     * on Windows every absent component it steps over is an internally thrown exception (a pair with the JDK's
+     * translation of it). A pass over rows repeats that walk for every row, and repeats the probes of every
+     * ancestor the rows share — the replay (#729) walked 137,534 rows that way for 341,451 recorded exceptions and
+     * 13–17 minutes per start. This object remembers instead: the folder's real path is taken once, and every path
+     * the pass probes is kept, present (through the real path it resolved to) or absent, so a second row below an
+     * ancestor already probed costs a lookup. Absent answers are kept for the same reason: the row whose cache
+     * copy is gone is the common case the walk used to pay for.
+     *
+     * The answers are those of the moment the pass probed a path, and of the folder's state at that moment. A pass
+     * must not outlive the tree it examines (the replay walks the cache once, before the daemon serves writes), so
+     * a path created or relinked while the pass runs is still answered as the pass found it.
+     */
+    class Pass(
+        cacheDir: Path,
+    ) {
+        private val root: Path = cacheDir.toAbsolutePath().normalize()
+
+        // The folder's own state, resolved the first time a caller's containment is actually evaluated: its real
+        // path, or (when the folder is absent) the answer that the spelling decides.
+        private var folderProbed = false
+        private var realFolder: Path? = null
+        private var folderMissing = false
+
+        // Probed paths, through the real path they resolved to, and paths probed and found absent.
+        private val present = HashMap<Path, Path>()
+        private val absent = HashSet<Path>()
+
+        /**
+         * The cache file of [logicalPath] below the folder, normalised; the rules and the [SecurityException] of
+         * [CachePaths.resolveInside], answered through this pass.
+         */
+        fun resolveInside(logicalPath: String): Path {
+            val resolved = root.resolve(logicalPath.trimStart('/')).normalize()
+            val inside =
+                try {
+                    val absolute = resolved.toAbsolutePath().normalize()
+                    absolute.startsWith(root) && (absolute == root || isInside(resolved))
+                } catch (_: java.io.IOError) {
+                    // A drive-relative name ("x:name" on Windows) of a drive that does not exist.
+                    false
+                }
+            if (!inside) throw SecurityException("path does not resolve inside the hydration cache: '${CachePaths.forLog(logicalPath)}'")
+            return resolved
         }
-        var real =
-            try {
-                existing.toRealPath()
-            } catch (_: IOException) {
-                return false
+
+        /** Whether [candidate] names a file strictly inside the folder — [CachePaths.isInside] through this pass. */
+        fun isInside(candidate: Path): Boolean {
+            val path =
+                try {
+                    candidate.toAbsolutePath()
+                } catch (_: java.io.IOError) {
+                    return false
+                }
+            val normalised = path.normalize()
+            // Before any filesystem access, as [CachePaths.resolveInside] does: a spelling that does not lead into
+            // the folder does not count, however the tree resolves, so a miss costs a comparison.
+            if (normalised == root || !normalised.startsWith(root)) return false
+            val realFolder = folderReal() ?: return folderMissing // absent folder: the spelling decides
+            // The deepest part of [path] that exists (the file itself when it does), through its real path, and the
+            // names below it as given. Probing is what this pass spares its callers: a path it has already looked
+            // at is answered from [present] or [absent], without touching the filesystem again.
+            val below = ArrayList<Path>()
+            var real: Path
+            var current: Path = path
+            while (true) {
+                val found = probe(current)
+                if (found == Probe.UNRESOLVED) return false
+                if (found == Probe.EXISTS) {
+                    real = present.getValue(current)
+                    break
+                }
+                val name = current.fileName ?: return false
+                below.add(name)
+                current = current.parent ?: return false
             }
-        for (name in rest.asReversed()) real = real.resolve(name)
-        real = real.normalize()
-        return real != realRoot && real.startsWith(realRoot)
+            for (name in below.asReversed()) real = real.resolve(name)
+            real = real.normalize()
+            return real != realFolder && real.startsWith(realFolder)
+        }
+
+        /** What the pass found when it probed a path. */
+        private enum class Probe { EXISTS, ABSENT, UNRESOLVED }
+
+        /**
+         * What the pass finds at [path], remembered so a second caller does not touch the filesystem again:
+         * [Probe.EXISTS] (the real path is in [present]), [Probe.ABSENT], or [Probe.UNRESOLVED] for a path that is
+         * there but cannot be resolved — what the walk gives up on, as [CachePaths.isInside] does.
+         */
+        private fun probe(path: Path): Probe {
+            present[path]?.let { return Probe.EXISTS }
+            if (path in absent) return Probe.ABSENT
+            if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                absent.add(path)
+                return Probe.ABSENT
+            }
+            val real =
+                try {
+                    path.toRealPath()
+                } catch (_: IOException) {
+                    return Probe.UNRESOLVED
+                }
+            present[path] = real
+            return Probe.EXISTS
+        }
+
+        // The folder's real path, or null when it is absent ([folderMissing] decides the lexical answer) or cannot
+        // be read at all (no path below it can be checked, as in [CachePaths.isInside]).
+        private fun folderReal(): Path? {
+            if (!folderProbed) {
+                folderProbed = true
+                var real: Path? = null
+                var missing = false
+                try {
+                    real = root.toRealPath()
+                } catch (_: NoSuchFileException) {
+                    missing = true
+                } catch (_: IOException) {
+                    // Unreadable: nothing below it can be checked either.
+                }
+                realFolder = real
+                folderMissing = missing
+            }
+            return realFolder
+        }
     }
 
     /**
