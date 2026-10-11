@@ -18,9 +18,9 @@ symbol. Work the tiers **in order**; within a tier the items are file-disjoint a
   - every new verb or event gets a fixture in `core/app/cli/src/test/resources/ipc-contract/` **first** (`IpcContractCorpusTest`);
   - a new read verb is added to the READ class in `IpcAuth.VERB_CLASSES`; the corpus test keeps the table complete;
   - **unknown stays unknown:** a missing value is absent or `null`, never `0` or "healthy".
-- **Gate:** `cd core && ./gradlew check` green before a PR leaves draft. Known flakes under parallel load:
-  `DaemonRuntimeTest`, `IpcContractCorpusTest`. Re-run the class once in isolation; serialize gradle runs across
-  worktrees.
+- **Gate:** CI's `./gradlew check` green on the PR before it leaves draft. Locally only the touched test classes, never a
+  full `./gradlew check` unless the owner asks (AGENTS.md). Known flakes: `DaemonRuntimeTest`, `IpcContractCorpusTest`;
+  re-run the failed job once.
 - **Hands off (in flight or owned elsewhere at prep time):**
   - **#607 U8** (bridge and schema-leftover removal, another lane) owns `MountWiring`'s bridges, `SyncRootBridge`,
     the test-scope module dependency and the `state.db` leftovers. Tier 3 waits for it or coordinates on the

@@ -9,11 +9,12 @@ unidrive is a multi-platform cloud-sync core (Linux daemon; engine for Windows/A
 - **Abstractions earn their keep.** Need named justification (platform-surface need or structural-safety property) + one consumer. Don't preemptively factor; don't refuse on principle. Tracking-set is the explicit exception.
 - **No CI policing.** `./gradlew check` is the gate. Exception: security scanning (CodeQL) may run on push/PR/schedule, but stays advisory — it MUST NOT be a required merge check; `./gradlew check` remains the sole gate.
 - **Never hot-swap a `.jar` on a running JVM.** Stop daemon first.
+- **No full local CI run unless the owner asks for it.** `./gradlew check` is the gate, and GitHub CI runs it on every PR: read the result with `gh pr checks`. Locally run only the tests the change touches (`./gradlew :module:test --tests '…'`); compiling is fine. The dev machine already carries several parallel Gradle builds, Docker and Hyper-V test VMs: an extra full pass overloads it and makes timing-sensitive tests flake for everyone.
 
 ## How to work
 1. Read github issues
 2. Read three nearby source files before writing.
-3. Make change. Run `./gradlew check`. Iterate.
+3. Make change. Run the touched tests (`--tests`). Push; CI runs `./gradlew check`. Iterate.
 4. One commit, one item.
 
 ## Verification
@@ -30,7 +31,7 @@ Future platforms consume core from outside `core/`.
 
 ## Build and run locally
 ```bash
-cd core && ./gradlew check     # the only gate
+cd core && ./gradlew check     # the only gate; CI runs it, locally only when the owner asks
 cd core && ./gradlew :app:cli:shadowJar
 bash dist/install.sh
 systemctl --user enable --now unidrive.service
