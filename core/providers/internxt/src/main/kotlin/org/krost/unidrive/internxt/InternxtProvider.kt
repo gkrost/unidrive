@@ -42,6 +42,12 @@ class InternxtProvider(
     private var cachedSeed: CachedSeed? = null
 
     private val api = InternxtApiService(config, credentialsProvider = { forceRefresh -> authService.getValidCredentials(forceRefresh) })
+    override val remoteObjectAuditor: RemoteObjectAuditor =
+        InternxtRemoteObjectAuditor(
+            getFileMeta = api::getFileMeta,
+            getBridgeFileInfo = api::getBridgeFileInfo,
+            getBridgeMirrors = api::getBridgeMirrors,
+        )
     private val secureRandom = java.security.SecureRandom()
 
     // Crash-recovery sidecar for in-flight uploads. Located alongside the

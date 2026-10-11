@@ -6,6 +6,9 @@ interface CloudProvider {
     val id: String
     val displayName: String
 
+    /** Optional read-only stored-object audit surface; null when this provider cannot verify objects without downloading. */
+    val remoteObjectAuditor: RemoteObjectAuditor? get() = null
+
     /**
      * UD-007: writable so the default [logout] implementation can flip it.
      * Providers that own external resources (token files, network sessions,
