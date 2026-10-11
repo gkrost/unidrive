@@ -3,6 +3,7 @@ package org.krost.unidrive.hydration
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.RemoteIncompleteDownloadException
+import org.krost.unidrive.RemoteObjectMissingDownloadException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -81,6 +82,23 @@ class HydrationOpenReadNotFoundTest {
             result.error.message != "not_found",
             "a non-not-found failure must NOT be tagged not_found (it maps to EIO): ${result.error.message}",
         )
+    }
+
+    @Test
+    fun `open_for_read_of_a_listed_item_with_missing_cloud_object_surfaces_its_own_status`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertUnhydratedEntry("/missing-object.bin", remoteSize = 5)
+        env.syncEngine.makeNextDownloadThrow(
+            RemoteObjectMissingDownloadException(
+                "remote_object_missing: Internxt still lists this file, but its encrypted bridge object is absent.",
+            ),
+        )
+
+        val result = env.hydration.openForRead("conn1", "h1", "/missing-object.bin")
+
+        assertTrue(result is OpenResult.Failed)
+        assertEquals(HydrationError.RemoteObjectMissing.message, result.error.message)
+        assertTrue(result.error.message != HydrationError.NotFound.message)
     }
 
     @Test

@@ -107,6 +107,11 @@ sealed interface HydrationError {
         override val message: String = "$REMOTE_INCOMPLETE_TOKEN: got $storedBytes of $declaredBytes bytes"
     }
 
+    /** The drive lists this item but its stored cloud object is missing. */
+    data object RemoteObjectMissing : HydrationError {
+        override val message: String = "$REMOTE_OBJECT_MISSING_TOKEN: drive item exists, but its stored cloud object is missing"
+    }
+
     /**
      * A client-supplied path the engine does not accept, refused before anything is changed. Which paths: the
      * wire-format notes of [HydrationIpcHandler] and §7 of docs/dev/specs/ipc-write-protocol.md. Its [message] is
@@ -122,6 +127,9 @@ sealed interface HydrationError {
 
         /** Wire token prefix for [RemoteIncomplete]; the numbers follow after ": got ". */
         const val REMOTE_INCOMPLETE_TOKEN = "remote_incomplete"
+
+        /** Wire token for a listed drive item whose stored object is absent. */
+        const val REMOTE_OBJECT_MISSING_TOKEN = "remote_object_missing"
 
         /** Wire token for [UnknownPath]; shared verbatim with the mount crate. */
         const val UNKNOWN_PATH_TOKEN = "unknown_path"
