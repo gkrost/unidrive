@@ -35,6 +35,15 @@ class HydrationErrorTest {
     }
 
     @Test
+    fun `missing remote object carries a stable token and useful status`() {
+        assertEquals(
+            "remote_object_missing: drive item exists, but its stored cloud object is missing",
+            HydrationError.RemoteObjectMissing.message,
+        )
+        assertEquals("remote_object_missing", HydrationError.REMOTE_OBJECT_MISSING_TOKEN)
+    }
+
+    @Test
     fun `sealed interface allows future variants without breaking exhaustiveness`() {
         val e: HydrationError = HydrationError.Generic("x")
         val rendered = when (e) {
@@ -46,6 +55,7 @@ class HydrationErrorTest {
             HydrationError.Excluded -> "excluded"
             HydrationError.Cancelled -> "cancelled"
             is HydrationError.RemoteIncomplete -> "remote_incomplete"
+            HydrationError.RemoteObjectMissing -> "remote_object_missing"
             HydrationError.InvalidPath -> "invalid_path"
         }
         assertTrue(rendered.startsWith("generic:"))

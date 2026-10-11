@@ -13,6 +13,7 @@ import io.ktor.http.headersOf
 import java.nio.file.Files
 import java.nio.file.Path
 import org.krost.unidrive.RemoteIncompleteDownloadException
+import org.krost.unidrive.RemoteObjectMissingDownloadException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -38,6 +39,8 @@ class InternxtRemoteIncompleteDownloadTest {
     private var shardBody: ByteArray = "0123456789A".toByteArray()
     private var shardContentLength: String? = null
     private var bridgeInfoJson = ""
+    private var bridgeInfoStatus = HttpStatusCode.OK
+    private var bridgeInfoBody: String? = null
     private val requestLog = mutableListOf<String>()
     private lateinit var destination: Path
 
@@ -101,7 +104,7 @@ class InternxtRemoteIncompleteDownloadTest {
             path == "/drive/files/$fileUuid/meta" && request.method == HttpMethod.Get ->
                 respond(fileMetaJson(), HttpStatusCode.OK, jsonHeaders)
             path == "/buckets/$bucket/files/$fileId/info" && request.method == HttpMethod.Get ->
-                respond(bridgeInfoJson, HttpStatusCode.OK, jsonHeaders)
+                respond(bridgeInfoBody ?: bridgeInfoJson, bridgeInfoStatus, jsonHeaders)
             host == "shard-host.invalid" && request.method == HttpMethod.Get -> {
                 val headers = buildList<Pair<String, List<String>>> {
                     add(HttpHeaders.ContentType to listOf("application/octet-stream"))
@@ -173,5 +176,25 @@ class InternxtRemoteIncompleteDownloadTest {
             Files.notExists(destination.resolveSibling("out.bin.unidrive-tmp")),
             "no temp file either",
         )
+    }
+
+    @Test
+    fun `a missing bridge object is typed permanent and leaves existing local bytes untouched`() {
+        bridgeInfoStatus = HttpStatusCode.NotFound
+        bridgeInfoBody = """{"error":"Bucket entry $fileId not found"}"""
+        val provider = newProvider()
+        Files.writeString(destination, "keep-local-copy")
+
+        val failure = assertFailsWith<RemoteObjectMissingDownloadException> {
+            kotlinx.coroutines.test.runTest {
+                provider.downloadById(fileUuid, "/listed-but-missing.bin", destination)
+            }
+        }
+
+        assertTrue(failure.message!!.startsWith("remote_object_missing:"))
+        assertTrue(org.krost.unidrive.PermanentDownloadFailureException::class.java.isAssignableFrom(failure.javaClass))
+        assertEquals("keep-local-copy", Files.readString(destination))
+        assertEquals(1, requestLog.count { it.contains("/info") }, "a stable 404 must not be retried")
+        assertTrue(requestLog.none { it.contains("shard-host.invalid") }, "no shard exists to download")
     }
 }

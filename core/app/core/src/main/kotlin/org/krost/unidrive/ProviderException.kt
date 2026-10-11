@@ -97,6 +97,18 @@ open class RemoteIncompleteDownloadException(
 ) : PermanentDownloadFailureException(message, cause, requestId)
 
 /**
+ * The drive still lists the file, but its bridge-side encrypted object is missing. This is a
+ * permanent failure for this object ID and is quarantined like other non-retryable downloads, but
+ * it is not the same as a deleted drive file: callers should preserve local bytes and report the
+ * cloud object as missing instead of surfacing `not_found`.
+ */
+open class RemoteObjectMissingDownloadException(
+    message: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : PermanentDownloadFailureException(message, cause, requestId)
+
+/**
  * #493: a permanent upload failure — the provider rejected the request itself (a malformed or refused payload, e.g.
  * Internxt's 400 "fileId must not be provided when size is 0", #485), so another attempt with the same bytes and the same
  * call would be rejected the same way. The hydration upload queue does not run its retry ladder for it: it marks the row
