@@ -168,6 +168,18 @@ open class SyncEngine(
         )
     private val scanner = LocalScanner(syncRoot, db, effectiveExcludePatterns, provider.hashAlgorithm(), syncPaths)
 
+    // #737: the current pass's (unscoped) remote changes, for [CloudCopyProof]: a file this pass
+    // reports deleted, or whose path is now a folder, does not count as being in the cloud.
+    @Volatile
+    private var passRemoteChanges: Map<String, CloudItem> = emptyMap()
+
+    init {
+        // #737: a local file in the way of a remote folder is replaced only with proof that its bytes
+        // are in the cloud. Otherwise PlaceholderManager keeps it as a conflict copy, recorded here.
+        placeholder.fileInTheWayGuard = CloudCopyProof(db, provider.hashAlgorithm()) { passRemoteChanges }
+        placeholder.onFileKeptAside = { path, copy -> recordFileKeptAside(path, copy) }
+    }
+
     // #560 U2: scope, excludes and the transfer budget live in :app:engine-core's
     // RemoteOperationGuard, shared by the sync pass and the mount front-end (MountEngine,
     // through [mountWiring], #560 U3).
@@ -873,6 +885,7 @@ open class SyncEngine(
                 }
         }
 
+        passRemoteChanges = allRemoteChanges
         val remoteChanges =
             if (runScope.isNotEmpty()) {
                 allRemoteChanges.filterKeys { SyncScope.contains(it, runScope) }
@@ -3399,6 +3412,25 @@ open class SyncEngine(
             is SyncAction.MoveLocal -> "${action.fromPath} -> ${action.path}"
             else -> action.path
         }
+
+    // #737: PlaceholderManager kept a local file that was in the way of a remote folder as the
+    // conflict copy [copy]. Surface it like a keep-both conflict. A pending upload's row is dropped:
+    // its bytes now live at [copy], which the next scan finds and uploads under that name.
+    private fun recordFileKeptAside(
+        path: String,
+        copy: String,
+    ) {
+        reporter.onWarning("Conflict: $path was a file where the remote has a folder; its bytes are kept as $copy")
+        val row = db.getEntry(path)
+        if (row != null && row.isPendingUpload) db.deleteEntry(path)
+        conflictLog?.record(
+            path = path,
+            localState = if (row?.remoteId == null) ChangeState.NEW.name else ChangeState.MODIFIED.name,
+            remoteState = ChangeState.NEW.name,
+            policy = "KEEP_BOTH",
+            loserFile = null,
+        )
+    }
 
     private fun restoreToPlaceholder(
         remotePath: String,

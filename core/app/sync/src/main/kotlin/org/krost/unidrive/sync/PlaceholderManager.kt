@@ -139,6 +139,17 @@ internal fun isAllZero(path: Path): Boolean =
 open class PlaceholderManager(
     protected val syncRoot: Path,
 ) {
+    /**
+     * #737: whether a file in the way of a parent folder may go without a copy. The default never
+     * lets one go; the sync engine installs a guard that checks the file's state row.
+     */
+    @Volatile
+    var fileInTheWayGuard: FileInTheWayGuard = FileInTheWayGuard { _, _ -> false }
+
+    /** #737: told about every file kept as a conflict copy: (its path, the copy's path), both sync-root-relative. */
+    @Volatile
+    var onFileKeptAside: ((relativePath: String, copyRelativePath: String) -> Unit)? = null
+
     fun resolveLocal(remotePath: String): Path = safeResolveLocal(syncRoot, remotePath)
 
     // UD-222: placeholders never pre-allocate bytes. A stub is a 0-byte file + isHydrated=false in
@@ -157,13 +168,14 @@ open class PlaceholderManager(
     ) {
         val local = resolveLocal(remotePath)
         // A parent component may exist as a file when a folder and a same-named file share a path
-        // (Internxt allows this since files and folders have separate API namespaces). Replace any
-        // such file component with a directory so createDirectories succeeds.
-        var check = local.parent
-        while (check != syncRoot) {
+        // (Internxt allows this since files and folders have separate API namespaces), or when the
+        // remote turned a file into a folder. That component must become a directory so
+        // createDirectories succeeds. #737: never by deleting the file: see [FileInTheWay.clear].
+        val root = syncRoot.toAbsolutePath().normalize()
+        var check: Path? = local.parent
+        while (check != null && check != root) {
             if (Files.isRegularFile(check)) {
-                Files.deleteIfExists(check)
-                Files.createDirectories(check)
+                FileInTheWay.clear(root, check, fileInTheWayGuard, onFileKeptAside, ::moveAside)
                 break
             }
             check = check.parent
@@ -176,6 +188,17 @@ open class PlaceholderManager(
         if (modified != null) {
             Files.setLastModifiedTime(local, FileTime.from(modified))
         }
+    }
+
+    /**
+     * #737: renames [source] to [target], in the same directory. Never replaces an existing [target]
+     * (a [java.nio.file.FileAlreadyExistsException] instead). Open for tests that need the rename to fail.
+     */
+    protected open fun moveAside(
+        source: Path,
+        target: Path,
+    ) {
+        Files.move(source, target)
     }
 
     fun createFolder(
