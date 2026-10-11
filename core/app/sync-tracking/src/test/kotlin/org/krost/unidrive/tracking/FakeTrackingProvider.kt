@@ -85,6 +85,12 @@ class FakeTrackingProvider : CloudProvider {
      */
     var extraDeltaItems: List<CloudItem> = emptyList()
 
+    /** Inject a user edit after local scan/during remote enumeration. */
+    var afterDelta: (() -> Unit)? = null
+
+    /** Inject an edit during the download request, before staged bytes are written. */
+    var beforeDownload: (() -> Unit)? = null
+
     /**
      * UD-410 test hook: when [delta] is called with a cursor equal to this
      * value, throw [DeltaCursorExpiredException] (the 410-Gone signal). Models
@@ -240,6 +246,7 @@ class FakeTrackingProvider : CloudProvider {
         destination: Path,
     ): Long {
         val bytes = files[remotePath] ?: throw NoSuchElementException("no remote at $remotePath")
+        beforeDownload?.also { beforeDownload = null; it() }
         Files.createDirectories(destination.parent)
         Files.write(destination, bytes)
         return bytes.size.toLong()
@@ -367,6 +374,7 @@ class FakeTrackingProvider : CloudProvider {
             } else {
                 files.entries.map { (path, bytes) -> itemFor(path, bytes) }
             } + extraDeltaItems
+        afterDelta?.also { afterDelta = null; it() }
         return DeltaPage(items = items, cursor = nextCursor, hasMore = false, complete = passComplete)
     }
 
