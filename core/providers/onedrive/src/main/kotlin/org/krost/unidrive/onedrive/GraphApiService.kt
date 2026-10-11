@@ -441,6 +441,7 @@ class GraphApiService(
         log.debug("Upload (simple): {} ({} bytes, conflictBehavior={})", remotePath, content.size, conflictBehavior)
         val cleanPath = remotePath.removePrefix("/")
         val encoded = encodePath(cleanPath)
+        val uploadTimeoutMs = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
 
         // conflictBehavior pins the simple-PUT and upload-session paths to the same overwrite
         // policy so it doesn't shift based on file size crossing the 4-MiB threshold. The
@@ -451,7 +452,8 @@ class GraphApiService(
         val response =
             sendThrottled("$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=$conflictBehavior", HttpMethod.Put) {
                 timeout {
-                    requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(content.size.toLong())
+                    requestTimeoutMillis = uploadTimeoutMs
+                    socketTimeoutMillis = uploadTimeoutMs
                 }
                 contentType(ContentType.Application.OctetStream)
                 // #291: If-Match makes the content PUT conditional on the caller's view of the item
@@ -855,7 +857,9 @@ class GraphApiService(
             val response =
                 httpClient.put(uploadUrl) {
                     timeout {
-                        requestTimeoutMillis = UploadTimeoutPolicy.computeRequestTimeoutMs(currentBytes.size.toLong())
+                        val uploadTimeoutMs = UploadTimeoutPolicy.computeRequestTimeoutMs(currentBytes.size.toLong())
+                        requestTimeoutMillis = uploadTimeoutMs
+                        socketTimeoutMillis = uploadTimeoutMs
                     }
                     contentType(ContentType.Application.OctetStream)
                     header("Content-Range", "bytes $currentOffset-$endByte/$fileSize")
