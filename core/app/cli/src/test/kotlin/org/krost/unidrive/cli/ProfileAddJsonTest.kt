@@ -235,7 +235,11 @@ class ProfileAddJsonTest {
         assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "work", "--mode", "mount", "--option", "root_path=/y", "--json"))
         assertEquals("profile_exists", errorToken())
         assertEquals(before, Files.readString(configFile))
-        assertFalse(Files.exists(dir.resolve("work")), "the refused profile left no folder")
+        assertEquals(
+            1,
+            Files.list(dir).use { paths -> paths.filter { it.fileName.toString().equals("work", ignoreCase = true) }.count() },
+            "the refused profile must not create a second case variant folder",
+        )
 
         assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "wORK", "--mode", "mount", "--option", "root_path=/y"))
         assertEquals("", out.toString())
