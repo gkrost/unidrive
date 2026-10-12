@@ -98,9 +98,12 @@ internal class HistoryWriter(
     fun close(): Boolean {
         if (!accepting.getAndSet(false)) return false
         if (thread.isAlive) {
-            // A bounded wait: closing is not the hot path, and Stop must not be dropped.
-            queue.offer(Op.Stop, JOIN_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            // A bounded wait: closing is not the hot path. A Stop that cannot be queued (a full queue
+            // behind a long write) is delivered as an interrupt instead, so the thread always ends and
+            // the store it writes through is never touched again.
+            if (!queue.offer(Op.Stop, JOIN_TIMEOUT_MS, TimeUnit.MILLISECONDS)) thread.interrupt()
             thread.join(JOIN_TIMEOUT_MS)
+            if (thread.isAlive) thread.interrupt()
         }
         return true
     }

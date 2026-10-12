@@ -5,12 +5,14 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
+import java.sql.SQLException
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.deleteIfExists
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -148,7 +150,23 @@ class TransferHistoryTest {
     }
 
     @Test
-    fun `retention prunes rows older than the age limit and keeps a running one`() {
+    fun `an adopted folder is a success and not a failure`() {
+        val history = open()
+        // The verbs the mirror engine reports for a folder it adopted instead of creating (#116, #531).
+        history.emit("CreateRemoteFolder", "/adopt/a", "adopted", null, null, null)
+        history.emit("CreateRemoteFolder", "/adopt/b", "adopted-existing", null, null, null)
+        history.emit("CreateRemoteFolder", "/adopt/c", "failed:IOException: boom", null, null, null)
+        assertTrue(history.flush())
+
+        val byPath = history.rows().associateBy { it.path }
+        assertEquals(TransferResult.SUCCESS, byPath.getValue("/adopt/a").result)
+        assertEquals(TransferResult.SUCCESS, byPath.getValue("/adopt/b").result)
+        assertNull(byPath.getValue("/adopt/a").errorClass, "an adopted folder is not an error")
+        assertEquals(TransferResult.FAILED, byPath.getValue("/adopt/c").result)
+    }
+
+    @Test
+    fun `retention prunes by age, retires a stale running row and keeps a live one`() {
         val history = open(HistoryConfig(maxAgeDays = 90))
         val day = 24L * 3600 * 1000
         advance(-100 * day)
@@ -167,14 +185,43 @@ class TransferHistoryTest {
             it.started()
             it.finish(TransferResult.SUCCESS)
         }
+        history.begin(TransferDirection.UPLOAD, "/new/still-running.bin").started()
         assertTrue(history.flush())
 
         history.pruneNow()
-        val paths = history.rows().map { it.path }.toSet()
-        assertFalse("/old/done.bin" in paths, "a row past 90 days is pruned")
-        assertTrue("/old/still-running.bin" in paths, "a transfer in flight is never pruned")
-        assertTrue("/mid/done.bin" in paths)
-        assertTrue("/new/done.bin" in paths)
+        val byPath = history.rows().associateBy { it.path }
+        assertFalse("/old/done.bin" in byPath, "a row past 90 days is pruned")
+        // A transfer in flight is never pruned, and never retired: nothing runs for the age limit, so a
+        // running row inside it is a transfer that is really still going.
+        assertEquals(TransferResult.RUNNING, byPath.getValue("/new/still-running.bin").result)
+        // A handle that was never finished cannot be in flight 100 days on. It is retired, not dropped
+        // while it claims to be running, so it stops reading as a transfer in flight.
+        assertEquals(TransferResult.INTERRUPTED, byPath.getValue("/old/still-running.bin").result)
+
+        history.pruneNow() // the retired row is past the age limit now: the next retention drops it
+        val after = history.rows().associateBy { it.path }
+        assertFalse("/old/still-running.bin" in after)
+        assertEquals(TransferResult.RUNNING, after.getValue("/new/still-running.bin").result)
+        assertTrue("/mid/done.bin" in after)
+        assertTrue("/new/done.bin" in after)
+    }
+
+    @Test
+    fun `a running row over the size limit is retired so the size pass can drop it`() {
+        val cap = 256L * 1024
+        val history = open(HistoryConfig(maxBytes = cap, batchSize = 200))
+        val day = 24L * 3600 * 1000
+        val pad = "x".repeat(150)
+        // Handles that are never finished, and nothing else: the file is over the cap with running rows.
+        repeat(6_000) { i -> history.begin(TransferDirection.UPLOAD, "/size/$pad/file-$i.bin").started() }
+        assertTrue(history.flush())
+        assertTrue(history.fileBytes() > cap, "the fixture must exceed the cap first")
+        advance(100 * day) // every row is past the age limit now: none of them can be a transfer in flight
+
+        history.pruneNow()
+
+        assertTrue(history.fileBytes() <= cap, "file is ${history.fileBytes()} bytes, cap $cap")
+        assertTrue(history.rows().none { it.result == TransferResult.RUNNING }, "no row is left reading as in flight")
     }
 
     @Test
@@ -325,6 +372,40 @@ class TransferHistoryTest {
             assertFalse(all.contains(needle), "stored text must not contain '$needle': $all")
         }
         assertTrue(history.rows().any { it.errorMessage?.contains("rejected") == true }, "the message itself is kept")
+    }
+
+    @Test
+    fun `closing stops the writer and a closed store is never reopened`() {
+        val history = open()
+        history.begin(TransferDirection.UPLOAD, "/close/a.bin").also {
+            it.started()
+            it.finish(TransferResult.SUCCESS)
+        }
+        assertTrue(history.flush())
+        history.close()
+
+        assertFalse(history.flush(), "the writer thread is gone")
+        // The next process reads what was written.
+        val store = TelemetryStore.open(db)
+        try {
+            assertEquals(TransferResult.SUCCESS, store.readAll().single().result)
+        } finally {
+            store.close()
+        }
+        // Nothing brings a closed store back to life and writes to a stopped history's file.
+        assertFailsWith<IllegalStateException> { store.readAll() }
+        assertFailsWith<IllegalStateException> { store.meta("incomplete_since") }
+    }
+
+    @Test
+    fun `a database a newer build wrote is an open failure and not a crash`() {
+        open().close() // the file is created with the schema this build writes
+        DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
+            c.createStatement().use { it.execute("PRAGMA user_version = ${TelemetryStore.SCHEMA_VERSION + 1}") }
+        }
+        // A downgrade is an open failure, as documented: the caller runs without a history rather than
+        // dying at start-up on a file it cannot read.
+        assertFailsWith<SQLException> { TelemetryStore.open(db) }
     }
 
     @Test

@@ -149,9 +149,12 @@ class TransferHistory private constructor(
         val now = clock()
         val outcome = result.substringBefore(':').lowercase()
         val detail = result.substringAfter(':', "")
+        // The engine's own vocabulary: "success", "skipped:<why>", "failed:<class>: <message>", and the
+        // two verbs the mirror engine reports for a folder it adopted instead of creating. Anything else
+        // is read as a failure, the shape the engine uses for one; a new success verb belongs in this list.
         val resultKind =
             when (outcome) {
-                "success" -> TransferResult.SUCCESS
+                "success", "adopted", "adopted-existing" -> TransferResult.SUCCESS
                 "skipped" -> TransferResult.SKIPPED
                 else -> TransferResult.FAILED
             }

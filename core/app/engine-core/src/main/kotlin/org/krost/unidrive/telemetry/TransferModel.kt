@@ -31,6 +31,8 @@ enum class TransferDirection(
 /**
  * How a logical transfer ended. [RUNNING] is a row that was started and not finished yet; the next
  * open of the store turns every such row into [INTERRUPTED], so a crash is never read as a success.
+ * A handle that is never finished and outlives the retention age is retired the same way, so it
+ * neither reads as a transfer in flight nor stays out of retention's reach.
  */
 enum class TransferResult(
     val wire: String,

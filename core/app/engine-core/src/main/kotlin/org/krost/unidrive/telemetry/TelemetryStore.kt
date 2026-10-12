@@ -26,10 +26,14 @@ internal class TelemetryStore private constructor(
     private val afterOpen: (Connection) -> Unit,
 ) {
     private var conn: Connection? = null
+    private var closed = false
 
     @Synchronized
     private fun connection(): Connection {
         conn?.let { if (!it.isClosed) return it }
+        // A closed store does not reopen. The writer thread outlives close() when a write or a VACUUM
+        // is still running, and a reopened connection would keep a stopped history writing to disk.
+        check(!closed) { "telemetry.db is closed" }
         val opened = openConnection()
         conn = opened
         return opened
@@ -56,7 +60,11 @@ internal class TelemetryStore private constructor(
 
     private fun createSchema(c: Connection) {
         val version = c.createStatement().use { st -> st.executeQuery("PRAGMA user_version").use { it.next(); it.getInt(1) } }
-        check(version <= SCHEMA_VERSION) { "telemetry.db has schema $version, this build knows $SCHEMA_VERSION" }
+        // An open failure, like an unreadable file: a caller that follows [open]'s contract then runs
+        // without a history instead of dying at start-up on a file a newer build wrote.
+        if (version > SCHEMA_VERSION) {
+            throw SQLException("telemetry.db has schema $version, this build knows $SCHEMA_VERSION")
+        }
         c.createStatement().use { st ->
             st.execute(
                 """
@@ -173,8 +181,10 @@ internal class TelemetryStore private constructor(
         }
 
     /**
-     * Retention: drops finished rows queued before [cutoffMs], then, while the file is over [maxBytes],
-     * the oldest tenth of what is left. A row still running is never dropped. Returns the rows removed.
+     * Retention: drops finished rows queued before [cutoffMs], then, while the live data is over
+     * [maxBytes], the oldest tenth of what is left. A row still running is never dropped while it may
+     * be a transfer in flight; one that outlived the retention age is retired instead (see below).
+     * Returns the rows removed.
      */
     @Synchronized
     fun prune(
@@ -187,6 +197,14 @@ internal class TelemetryStore private constructor(
                 it.setLong(1, cutoffMs)
                 it.executeUpdate()
             }
+        // A row still running long past the cutoff is not a transfer in flight — nothing runs for the
+        // retention age — it is a handle that was never finished. Retired in place, with the verdict a
+        // dead process gets at open, rather than dropped while it claims to be running: it stops reading
+        // as in flight, and the size pass below, or the next retention, can drop it.
+        c.prepareStatement("UPDATE transfers SET result = 'interrupted' WHERE result = 'running' AND queued_at < ?").use {
+            it.setLong(1, cutoffMs)
+            it.executeUpdate()
+        }
         var guard = 0
         while (liveBytes(c) > maxBytes && guard++ < MAX_PRUNE_ROUNDS) {
             val rowCount = c.createStatement().use { st -> st.executeQuery("SELECT COUNT(*) FROM transfers").use { it.next(); it.getInt(1) } }
@@ -227,6 +245,7 @@ internal class TelemetryStore private constructor(
 
     @Synchronized
     fun close() {
+        closed = true
         val c = conn ?: return
         conn = null
         try {
