@@ -184,7 +184,9 @@ class DaemonRuntime(
             val serveScope = kotlinx.coroutines.CoroutineScope(
                 kotlin.coroutines.coroutineContext + serveJob,
             )
-            var hydrationForShutdown: HydrationImpl? = null
+            // The engine's two hooks into the hydration layer (see HydrationLink). Declared outside the
+            // try below: its finally joins the hydration uploads through it.
+            val hydrationLink = HydrationLink()
             // Coroutine-debug probes (gkrost/unidrive#613 ask 1): with UNIDRIVE_COROUTINE_DEBUG=1 the
             // daemon captures suspension stacks at start and dumps every live coroutine when a
             // coroutine-dump.trigger file appears in the profile folder — a hung upload becomes one
@@ -199,21 +201,16 @@ class DaemonRuntime(
                 // co-daemon --cache root (also profile.name), so the FUSE
                 // backing store, eviction, and crash-recovery scanner all
                 // address the same files.
-                // viewInvalidationSink is a late-binding lambda: hydrationIpc is not yet
-                // constructed when engine is built, but the lambda captures the `var` slot
-                // and is only invoked after enumerateRemoteIntoState returns (by which time
-                // hydrationIpc is fully wired). dispatchEvent fans the event to all subscribers
-                // without going through the HydrationImpl flow, which is intentional: the
+                // The engine is built first and the hydration layer over it (MountEngine.over(engine)), so
+                // the engine's hooks into that layer go through hydrationLink, bound right after the layer
+                // is built. #301: the enumerate-reap asks whether an upload of a path is queued or in flight
+                // before it evicts that path's cache file. viewInvalidationSink fans the event to all
+                // subscribers without going through the HydrationImpl flow, which is intentional: the
                 // invalidation event originates outside the per-path hydration lifecycle.
-                var hydrationIpcRef: HydrationIpcHandler? = null
-                // #301: same late-binding shape as hydrationIpcRef — the engine's
-                // enumerate-reap asks the hydration layer whether an upload of a path
-                // is queued or in flight before it evicts that path's cache file.
-                var hydrationRef: HydrationImpl? = null
                 val engine = SyncEngine(
                     provider, db!!, syncRoot = syncRoot, cacheKey = profileName, syncPaths = syncPaths,
                     standingScope = syncPaths, excludePatterns = excludePatterns,
-                    uploadInFlight = { path -> hydrationRef?.hasUploadSlot(path) ?: false },
+                    uploadInFlight = hydrationLink::hasUploadSlot,
                     viewInvalidationSink = { changedPaths, full, moved ->
                         val cap = HydrationEvent.VIEW_INVALIDATED_PATH_CAP
                         val event = if (full || changedPaths.size > cap) {
@@ -226,7 +223,7 @@ class DaemonRuntime(
                                 moved = moved.map { HydrationEvent.ViewInvalidated.Moved(it.from, it.to) },
                             )
                         }
-                        hydrationIpcRef?.dispatchEvent(event)
+                        hydrationLink.dispatchEvent(event)
                     },
                 )
                 // #560 U3: the mount operations (hydration, uploads, remote folder/delete/rename and
@@ -239,28 +236,78 @@ class DaemonRuntime(
                 // #560 U6 (cutover): the hydration runtime exists only on a mount profile. A mirror
                 // daemon constructs no hydration layer and keeps no cache — its local bytes live in
                 // the sync root its reconcile owns, and every hydration verb gets wrong_mode below.
-                var hydration: HydrationImpl? = null
-                var pollerRef: EnumeratePoller? = null
-                if (mountMode) {
-                    // Upload and replay jobs outlive IPC handlers but not this daemon. Keep their
-                    // scope separate so shutdown can cancel/join it without cancelling the serve scope.
-                    val hydrationUploadScope = hydrationUploadScope(profileName)
-                    val hydrationImpl = HydrationImpl(
-                        mount,
+                // Upload and replay jobs outlive IPC handlers but not this daemon: hydrationUploadScope
+                // keeps their scope separate so shutdown can cancel/join it without cancelling the serve scope.
+                val hydration: HydrationImpl? =
+                    if (mountMode) {
+                        HydrationImpl(
+                            mount,
+                            db!!,
+                            recoveryUploadScope = hydrationUploadScope(profileName),
+                            cacheMaxBytes = hydrationCacheMaxBytes,
+                        )
+                    } else {
+                        null
+                    }
+                val hydrationIpc: HydrationIpcHandler? =
+                    hydration?.let { h -> HydrationIpcHandler(h).also { hydrationLink.bind(h, it) } }
+
+                // The construction order from here on is explicit: every handler and the poller exist
+                // before anything is launched on serveScope, so the launches below (the cache sweep, the
+                // event collector, the upload replay, the poller) find what they signal already built.
+
+                // sync.enumerate handler (mount-view-refresh-design.md §4.1): one-way
+                // remote→state.db refresh for mount view consumers. Constructed before the
+                // hydration verbs so the subscribe-triggered enumerate (below) can reuse its
+                // shared in-flight guard.
+                val enumerateHandler = EnumerateRpcHandler(mount, serveScope, server::emit)
+
+                // refresh.run handler (spec §4.2). Pass serveScope so refresh
+                // jobs are cancelled when the daemon shuts down. Pass db so
+                // the F9 `reset` parameter can clear it (keeping the rows that
+                // still await upload) before re-enumeration.
+                // #603 (U4): a mount profile's refresh.run ALWAYS takes the one-way enumerate path —
+                // with or without a connected client. The enumerate is remote→state.db only: a reset
+                // clears the delta cursor (the enumeration state), pending local intent stays, the last
+                // good rows survive a failed or incomplete gather, and nothing is published as a
+                // deletion before an authoritative completion. A mirror profile keeps the legacy
+                // reconcile (its mounted flag stays false; no hydration subscriber exists there).
+                val refreshHandler =
+                    RefreshRpcHandler(
+                        server,
+                        engine,
                         db!!,
-                        recoveryUploadScope = hydrationUploadScope,
-                        cacheMaxBytes = hydrationCacheMaxBytes,
+                        serveScope,
+                        mountClientConnected = { profileMode == ProfileMode.MOUNT },
+                        // A reset keeps the rows of uploads still under way (same hook the enumeration's reap uses).
+                        uploadInFlight = { path -> hydration?.hasUploadSlot(path) ?: false },
                     )
-                    hydration = hydrationImpl
-                    hydrationForShutdown = hydrationImpl
-                    hydrationRef = hydrationImpl
+
+                // The remote poll (#463), mount-only; built here, started below (see there). The backoff
+                // starts escalated when the previous run ended in enumerate failures (#517 R3).
+                val poller: EnumeratePoller? =
+                    if (mountMode) {
+                        EnumeratePoller(
+                            enumerateHandler,
+                            pollIntervalMs,
+                            serveScope,
+                            onNextAttempt = mount.enumerationTracker::nextAttemptAt,
+                            consecutiveFailuresAtStart =
+                                db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
+                            isBusy = { refreshHandler.isInFlight() },
+                        )
+                    } else {
+                        null
+                    }
+
+                if (hydration != null && hydrationIpc != null) {
                     // #450: what a stopped daemon left in the hydration cache (staging temp files, the
                     // copies of synced files read through the mount) is trimmed to the budget at start.
                     serveScope.launch {
                         // #678: blocking walk; off the event loop so it cannot delay a stop.
                         withContext(startupIoDispatcher) {
                             try {
-                                hydrationImpl.sweepCache()
+                                hydration.sweepCache()
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (e: Exception) {
@@ -268,25 +315,17 @@ class DaemonRuntime(
                             }
                         }
                     }
-                    val hydrationIpcHandler = HydrationIpcHandler(hydrationImpl)
-                    hydrationIpcRef = hydrationIpcHandler
 
                     // #463: a hydration or upload that succeeded is (nearly always) a provider round trip
                     // that worked, so it cuts the poller's back-off short. Even when it was not, the poller
-                    // polls at most once per plain interval. Late-bound: the poller is built further down.
+                    // polls at most once per plain interval.
                     serveScope.launch {
-                        hydrationImpl.events.collect {
-                            hydrationIpcHandler.dispatchEvent(it)
-                            if (it is HydrationEvent.Hydrated || (it is HydrationEvent.Completed && it.ok)) pollerRef?.providerReachable()
+                        hydration.events.collect {
+                            hydrationIpc.dispatchEvent(it)
+                            if (it is HydrationEvent.Hydrated || (it is HydrationEvent.Completed && it.ok)) poller?.providerReachable()
                         }
                     }
                 }
-
-                // sync.enumerate handler (mount-view-refresh-design.md §4.1): one-way
-                // remote→state.db refresh for mount view consumers. Constructed before the
-                // hydration verbs so the subscribe-triggered enumerate (below) can reuse its
-                // shared in-flight guard.
-                val enumerateHandler = EnumerateRpcHandler(mount, serveScope, server::emit)
 
                 // Reactive remote-change detection: when the FUSE co-daemon issues
                 // hydration.subscribe on mount, run ONE guarded enumerate after the reply.
@@ -308,7 +347,7 @@ class DaemonRuntime(
                         continue
                     }
                     // The hydration layer is built above whenever mountMode holds.
-                    val ipc = requireNotNull(hydrationIpcRef) { "mount mode without a hydration layer" }
+                    val ipc = requireNotNull(hydrationIpc) { "mount mode without a hydration layer" }
                     server.registerHandler(verb) { connId, json ->
                         val reply = ipc.handle(connectionId = connId, jsonRequest = json)
                         // A READ-scope subscribe (an observer such as a status UI) never starts the enumerate:
@@ -334,9 +373,9 @@ class DaemonRuntime(
                     // A mount client's connections are never closed for being idle: its open handles and
                     // its event subscription live on them, and refresh.run routing counts them.
                     server.registerIdleExemptVerbs(HydrationIpcHandler.VERBS)
-                    hydrationIpcRef?.start(serveScope, server::writeToConnection)
+                    hydrationIpc?.start(serveScope, server::writeToConnection)
                     server.registerConnectionCloseListener { connId ->
-                        hydrationIpcRef?.onSubscriberDisconnect(connId)
+                        hydrationIpc?.onSubscriberDisconnect(connId)
                     }
                 }
 
@@ -383,26 +422,7 @@ class DaemonRuntime(
                     server.unregisterSyncSubscriber(connId)
                 }
 
-                // refresh.run verb (spec §4.2). Pass serveScope so refresh
-                // jobs are cancelled when the daemon shuts down. Pass db so
-                // the F9 `reset` parameter can clear it (keeping the rows that
-                // still await upload) before re-enumeration.
-                // #603 (U4): a mount profile's refresh.run ALWAYS takes the one-way enumerate path —
-                // with or without a connected client. The enumerate is remote→state.db only: a reset
-                // clears the delta cursor (the enumeration state), pending local intent stays, the last
-                // good rows survive a failed or incomplete gather, and nothing is published as a
-                // deletion before an authoritative completion. A mirror profile keeps the legacy
-                // reconcile (its mounted flag stays false; no hydration subscriber exists there).
-                val refreshHandler =
-                    RefreshRpcHandler(
-                        server,
-                        engine,
-                        db!!,
-                        serveScope,
-                        mountClientConnected = { profileMode == ProfileMode.MOUNT },
-                        // A reset keeps the rows of uploads still under way (same hook the enumeration's reap uses).
-                        uploadInFlight = { path -> hydration?.hasUploadSlot(path) ?: false },
-                    )
+                // refresh.run verb (spec §4.2); the handler is constructed above.
                 server.registerHandler("refresh.run") { connId, json ->
                     refreshHandler.handle(connId, json)
                 }
@@ -426,19 +446,8 @@ class DaemonRuntime(
                 // shutdown. The backoff starts escalated when the previous run ended in enumerate
                 // failures (#517 R3): a restart into a known-bad remote doesn't re-run the doomed
                 // cycle at full cadence. Mount-only (#603): a mirror profile's discovery is `sync`'s
-                // reconcile, not the mount-view poll.
-                if (mountMode) {
-                    pollerRef =
-                        EnumeratePoller(
-                            enumerateHandler,
-                            pollIntervalMs,
-                            serveScope,
-                            onNextAttempt = mount.enumerationTracker::nextAttemptAt,
-                            consecutiveFailuresAtStart =
-                                db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
-                            isBusy = { refreshHandler.isInFlight() },
-                        ).also { it.start() }
-                }
+                // reconcile, not the mount-view poll (the poller is constructed above, null on a mirror).
+                poller?.start()
 
                 // daemon.status verb (spec §4.3). protocol_version is the
                 // additive cross-repo handshake field (IPC_PROTOCOL_VERSION):
@@ -553,7 +562,7 @@ class DaemonRuntime(
                 server.close()
                 ipcServer = null
                 serveJob.cancelAndJoin()
-                hydrationForShutdown?.shutdownUploads()
+                hydrationLink.hydration?.shutdownUploads()
             }
         } catch (e: Exception) {
             // An IPC startup refusal is already reported as its one line.
@@ -708,6 +717,40 @@ class DaemonRuntime(
             }
         }
     }
+
+    /**
+     * The one real cycle in the daemon's wiring, made explicit: the [SyncEngine] is built first and the
+     * hydration layer over it ([MountEngine.over]), but two of the engine's hooks call into that layer
+     * (whether an upload of a path is queued or in flight, and the view.invalidated fan-out). The engine
+     * takes them from this link, which is bound once, right after the hydration layer is built.
+     *
+     * Unbound (before that point, and always on a mirror daemon, which builds no hydration layer): no
+     * upload slot is held, and a view invalidation has no subscriber to reach, so it is dropped. No IPC
+     * request sees the unbound state: the socket binds after every handler is registered.
+     */
+    internal class HydrationLink {
+        private class Bound(val hydration: HydrationImpl, val ipc: HydrationIpcHandler)
+
+        @Volatile private var bound: Bound? = null
+
+        /** The bound hydration layer (the one the shutdown joins the uploads of), or null. */
+        val hydration: HydrationImpl? get() = bound?.hydration
+
+        fun bind(
+            hydration: HydrationImpl,
+            ipc: HydrationIpcHandler,
+        ) {
+            check(bound == null) { "the hydration link is bound once" }
+            bound = Bound(hydration, ipc)
+        }
+
+        fun hasUploadSlot(path: String): Boolean = bound?.hydration?.hasUploadSlot(path) ?: false
+
+        fun dispatchEvent(event: HydrationEvent) {
+            bound?.ipc?.dispatchEvent(event)
+        }
+    }
+
     companion object {
         const val SHUTDOWN_DEADLINE_MS: Long = 10_000
 
