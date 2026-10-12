@@ -271,9 +271,9 @@ drive-desktop: `TWO_MINUTES_IN_MILLISECONDS` rewind on checkpoint read (`get-che
 
 See booster #5. The 30s sleep is what makes the background walk polite enough to not interfere with foreground delta. Adopt as part of #5.
 
-### R-6. Loopback-elision on notifications &mdash; we match
+### R-6. Loopback-elision on notifications &mdash; we deliberately do not drop self-originating events
 
-drive-desktop drops self-originating events (`process-web-socket-event.ts:9-12`). We do too (`NotificationsClient.kt:142-148`). Match.
+drive-desktop drops self-originating events (`process-web-socket-event.ts:9-12`). We do not: every unidrive installation sends the same `internxt-client` name, so a matching `clientId` cannot prove the event is ours, and dropping it hides the user's other devices. Our own echoes trigger one debounced delta walk instead.
 
 ### R-7. Targeted notification payloads (FILE_CREATED, FILE_UPDATED, FOLDER_CREATED, FOLDER_UPDATED, ITEMS_TO_TRASH) &mdash; not used by drive-desktop either
 

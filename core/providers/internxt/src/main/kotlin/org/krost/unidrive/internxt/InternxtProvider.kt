@@ -240,7 +240,6 @@ class InternxtProvider(
         val client =
             NotificationsClient(
                 notificationsUrl = config.notificationsUrl,
-                ownClientName = config.clientName,
                 tokenSupplier = { forceRefresh -> authService.getValidCredentials(forceRefresh).jwt },
                 onRemoteChange = { remoteChangeCallback() },
             )

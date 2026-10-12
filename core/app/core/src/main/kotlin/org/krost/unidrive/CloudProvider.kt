@@ -279,8 +279,10 @@ interface CloudProvider {
     /**
      * Register a coarse-grained wake-signal callback. Providers that have a
      * server-pushed change feed (Internxt's socket.io `NOTIFICATIONS_URL`)
-     * invoke [callback] once per observed remote mutation that did NOT
-     * originate from this client. The callback is a "something changed,
+     * invoke [callback] once per observed remote mutation. A provider that
+     * cannot tell its own mutations apart from another installation's on the
+     * same account (Internxt: every unidrive sends the same client name) also
+     * reports its own echoes. The callback is a "something changed,
      * walk the delta" hint — not authoritative payload — so the receiver
      * is expected to debounce and then trigger the normal [delta] walk.
      *

@@ -105,7 +105,6 @@ class NotificationsClientBackoffTest {
         val client =
             NotificationsClient(
                 notificationsUrl = "https://example.invalid",
-                ownClientName = "unidrive",
                 tokenSupplier = { force ->
                     supplierCalls += force
                     refreshFailure?.let { throw it }
