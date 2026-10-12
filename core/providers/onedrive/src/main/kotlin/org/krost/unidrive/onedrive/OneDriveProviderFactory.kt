@@ -104,7 +104,8 @@ open class OneDriveProviderFactory : ProviderFactory {
             val token = json.decodeFromString<Token>(Files.readString(tokenFile))
             when {
                 token.isExpired && token.refreshToken == null ->
-                    CredentialHealth.Warning("Access token expired, no refresh token — re-auth required")
+                    // Nothing can renew it: expired, with zero time left (daemon.status reports `expired`).
+                    CredentialHealth.ExpiresIn(0, "Access token expired, no refresh token — re-auth required", remainingMs = 0)
                 token.isExpired ->
                     CredentialHealth.Ok // expired access token with refresh token is normal; authenticate() will refresh
                 token.refreshToken != null ->
@@ -113,14 +114,14 @@ open class OneDriveProviderFactory : ProviderFactory {
                     // check below flagged every healthy profile ("[!] ...: 0h").
                     CredentialHealth.Ok
                 else -> {
-                    val hoursRemaining =
-                        java.time.Duration
-                            .between(
-                                java.time.Instant.now(),
-                                java.time.Instant.ofEpochMilli(token.expiresAt),
-                            ).toHours()
+                    val remaining =
+                        java.time.Duration.between(
+                            java.time.Instant.now(),
+                            java.time.Instant.ofEpochMilli(token.expiresAt),
+                        )
+                    val hoursRemaining = remaining.toHours()
                     if (hoursRemaining < 24) {
-                        CredentialHealth.ExpiresIn(hoursRemaining, "${hoursRemaining}h")
+                        CredentialHealth.ExpiresIn(hoursRemaining, "${hoursRemaining}h", remainingMs = remaining.toMillis())
                     } else {
                         CredentialHealth.Ok
                     }

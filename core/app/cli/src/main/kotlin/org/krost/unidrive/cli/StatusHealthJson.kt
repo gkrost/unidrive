@@ -85,3 +85,15 @@ internal fun lastProviderContactMs(
         lastTransferReachedAtMs == null -> enumerationLastSuccessAtMs
         else -> maxOf(enumerationLastSuccessAtMs, lastTransferReachedAtMs)
     }
+
+/**
+ * `credential_health` (#586): `state` is one of `ok`, `expiring`, `expired`, `missing`, `unknown`. `expires_in_ms` is the
+ * time left at this reply (0 for `expired`), null when no expiry is known; `checked_at_ms` is when the daemon last
+ * checked, or saw the provider reject the credentials, null while it has not checked yet.
+ */
+internal fun CredentialHealthMonitor.Reading.toJson(nowMs: Long): JsonObject =
+    buildJsonObject {
+        put("state", state.wire)
+        put("expires_in_ms", expiresInMs(nowMs))
+        put("checked_at_ms", checkedAtMs)
+    }

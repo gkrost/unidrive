@@ -589,4 +589,27 @@ class EnumerationTrackerTest {
         failure.get()?.let { throw it }
         assertEquals(ScanProgress.LISTING_TREE, live.snapshot().listing)
     }
+
+    // #586: a rejected credential is told apart from any other failure, and a success does not erase the record
+    // (a reader compares it with the last success).
+    @Test
+    fun `a failure that names a credential rejection stamps authRejectedAtMs and a plain failure does not`() {
+        assertNull(tracker.authRejectedAtMs)
+
+        tracker.begin()
+        tracker.failed("server closed the connection")
+        assertNull(tracker.authRejectedAtMs, "a network failure says nothing about the credentials")
+
+        after(5)
+        tracker.begin()
+        tracker.failed("Authentication expired", authRejected = true)
+        assertEquals(now, tracker.authRejectedAtMs)
+        assertEquals(EnumerationStatus.State.FAILED, tracker.snapshot().state)
+
+        after(5)
+        tracker.begin()
+        tracker.succeeded()
+        assertEquals(now - 5_000, tracker.authRejectedAtMs, "kept: the reader compares it with lastSuccessAtMs")
+        assertEquals(now, tracker.snapshot().lastSuccessAtMs)
+    }
 }

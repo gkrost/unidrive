@@ -1,6 +1,7 @@
 package org.krost.unidrive.engine
 
 import kotlinx.coroutines.CancellationException
+import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.engine.RemoteGather.Companion.applyReverseTop
@@ -117,6 +118,9 @@ class RemoteEnumeration(
     //
     // #517 R3: the failure side of FAILURE_STREAK_KEY — one write per
     // failed gather, read by the daemon's enumerate poller at start.
+    // #586: the provider refused the credentials (raised only after its own token refresh failed).
+    private fun isCredentialRejection(e: Throwable): Boolean = e is AuthenticationException
+
     private fun recordEnumerateFailureStreak() {
         val streak = (db.getSyncState(FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0) + 1
         db.setSyncState(FAILURE_STREAK_KEY, streak.toString())
@@ -131,7 +135,7 @@ class RemoteEnumeration(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            tracker.failed(e.message ?: e.javaClass.simpleName)
+            tracker.failed(e.message ?: e.javaClass.simpleName, authRejected = isCredentialRejection(e))
             throw e
         } finally {
             // A no-op once the attempt succeeded or failed; a cancelled one is neither.
@@ -196,7 +200,7 @@ class RemoteEnumeration(
             try {
                 gather.gather(progress = tracker).filterKeys { gather.isTracked(it) }
             } catch (e: ProviderException) {
-                tracker.failed(e.message ?: e.javaClass.simpleName)
+                tracker.failed(e.message ?: e.javaClass.simpleName, authRejected = isCredentialRejection(e))
                 recordEnumerateFailureStreak()
                 return EnumerateResult(ok = false, error = e.message)
             }

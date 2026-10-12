@@ -5,6 +5,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
+import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.NameRefusedException
@@ -106,6 +107,32 @@ class MountEngine private constructor(
 
     private fun recordProviderContact() {
         lastProviderContactAtMs = System.currentTimeMillis()
+    }
+
+    @Volatile
+    private var transferAuthRejectedAtMs: Long? = null
+
+    /**
+     * #586: epoch ms of the latest time the provider refused this profile's credentials, or null: a transfer or an
+     * enumeration that failed with an [AuthenticationException], which a provider raises only after its own token
+     * refresh has failed. A reader compares it with the last provider contact: a rejection older than a success is
+     * history. `daemon.status` turns a newer one into `credential_health.state = "expired"` without waiting for the
+     * credential check to run again.
+     */
+    val authRejectedAtMs: Long?
+        get() = listOfNotNull(transferAuthRejectedAtMs, wiring.enumeration.tracker.authRejectedAtMs).maxOrNull()
+
+    private fun noteAuthRejection(e: Throwable) {
+        if (e is AuthenticationException) transferAuthRejectedAtMs = System.currentTimeMillis()
+    }
+
+    private inline fun <T> watchingCredentials(block: () -> T): T {
+        try {
+            return block()
+        } catch (e: AuthenticationException) {
+            noteAuthRejection(e)
+            throw e
+        }
     }
 
     /**
@@ -241,7 +268,7 @@ class MountEngine private constructor(
                 pause.track(path) { transfer ->
                     transfer.begin()
                     transfer.measuredBy(entry.remoteSize) { runCatching { Files.size(staged) }.getOrDefault(0L) }
-                    Transfers.downloadByIdOrPath(provider, remoteItem, remotePathOf(path, entry), staged)
+                    watchingCredentials { Transfers.downloadByIdOrPath(provider, remoteItem, remotePathOf(path, entry), staged) }
                 }
             if (options.verifyIntegrity) {
                 val verified = HashVerifier.verify(staged, entry.remoteHash, algorithm = provider.hashAlgorithm())
@@ -507,6 +534,7 @@ class MountEngine private constructor(
                         onProgress?.invoke(transferred, total)
                     }
                 } catch (e: Exception) {
+                    noteAuthRejection(e)
                     auditLog?.emit(
                         action = "Upload",
                         path = path,

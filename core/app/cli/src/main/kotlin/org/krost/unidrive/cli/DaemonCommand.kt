@@ -95,6 +95,9 @@ class DaemonRunCommand : Runnable {
             // probes machine storage — daemon.status carries no quota field for it).
             quotaRefreshMs = config.quotaRefreshMs(),
             providerHasQuota = org.krost.unidrive.ProviderRegistry.getMetadata(profile.type)?.hasQuota ?: true,
+            // #586: credential_health in daemon.status. The offline check reads token files only; the vault is left
+            // out (it may prompt for a passphrase, and a daemon has no one to answer).
+            credentialHealthCheck = { parent.checkCredentialHealth(profile, lockFile.parent, useVault = false) },
             afterProfileLockAcquired = {
                 SyncEngine.migrateLegacyHydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name)
             },
