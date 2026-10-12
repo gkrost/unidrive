@@ -123,6 +123,15 @@ class MountEngine private constructor(
         if (e is AuthenticationException) transferAuthRejectedAtMs = System.currentTimeMillis()
     }
 
+    private inline fun <T> watchingCredentials(block: () -> T): T {
+        try {
+            return block()
+        } catch (e: AuthenticationException) {
+            noteAuthRejection(e)
+            throw e
+        }
+    }
+
     /**
      * #778: the daemon's pause. A download ([ensureHydrated]) starts only while it is clear, and the upload queue
      * ([HydrationImpl]) consults the same gate; `daemon.pause` and `daemon.resume` set it. One per front-end.
@@ -256,12 +265,7 @@ class MountEngine private constructor(
                 pause.track(path) { transfer ->
                     transfer.begin()
                     transfer.measuredBy(entry.remoteSize) { runCatching { Files.size(staged) }.getOrDefault(0L) }
-                    try {
-                        Transfers.downloadByIdOrPath(provider, remoteItem, path, staged)
-                    } catch (e: AuthenticationException) {
-                        noteAuthRejection(e)
-                        throw e
-                    }
+                    watchingCredentials { Transfers.downloadByIdOrPath(provider, remoteItem, path, staged) }
                 }
             if (options.verifyIntegrity) {
                 val verified = HashVerifier.verify(staged, entry.remoteHash, algorithm = provider.hashAlgorithm())
