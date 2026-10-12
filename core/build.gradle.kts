@@ -350,8 +350,8 @@ tasks.register<JacocoReport>("jacocoMergedReport") {
 // #560 (4A.5): module dependency edges between our own modules, main source
 // sets only. A cloud provider implements the SPI in :app:core and must not
 // reach into the sync engine, the mount, or the CLI; :app:sync-tracking
-// implements the CLI extension SPI (:app:cli-spi) and must not depend on the
-// CLI that loads it. :app:engine-core holds the primitives the mirror engine
+// is a pure engine (the `ts` commands live in :app:cli) and must not depend on
+// the CLI. :app:engine-core holds the primitives the mirror engine
 // and the mount share (#560 U2) and depends only on :app:core, so neither
 // orchestration can leak into it. Wired into every module's `check`. Run
 // with --info to print the graph.
@@ -398,7 +398,7 @@ tasks.register("checkModuleEdges") {
                 (to - ":app:core").forEach { violations += "$from -> $it (a provider may depend only on :app:core)" }
             }
             if (from == ":app:sync-tracking" && ":app:cli" in to) {
-                violations += "$from -> :app:cli (the extension depends on :app:cli-spi, the CLI loads it at runtime)"
+                violations += "$from -> :app:cli (the tracking engine is CLI-free; the CLI owns the `ts` commands)"
             }
             if (from == ":app:engine-core") {
                 (to - ":app:core").forEach {

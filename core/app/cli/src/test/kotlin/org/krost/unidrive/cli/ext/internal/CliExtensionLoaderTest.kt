@@ -78,4 +78,16 @@ class CliExtensionLoaderTest {
         // root unchanged (no subcommand was registered by the throwing ext)
         assertTrue(!root.subcommands.containsKey("boom"))
     }
+
+    @Test
+    fun `registers the tracking-set commands from this module's own service file`() {
+        val root = CommandLine(Root())
+        CliExtensionLoader.loadInto(root, fakeServices)
+        val ts = root.subcommands["ts"]
+        assertTrue(ts != null, "ts is not registered: the CliExtension service file is missing from :app:cli")
+        assertTrue(
+            ts.subcommands.keys.containsAll(listOf("sync", "claim", "unclaim", "status")),
+            "ts subcommands: ${ts.subcommands.keys}",
+        )
+    }
 }
