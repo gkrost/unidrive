@@ -1346,6 +1346,20 @@ class DaemonRuntimeTest {
     }
 
     /**
+     * The engine is built before the hydration layer (which is built over it), so the engine's two hooks into
+     * that layer go through [DaemonRuntime.HydrationLink]. Until it is bound (and forever on a mirror daemon)
+     * no upload slot is held and a view invalidation has no subscriber to reach: it is dropped, never an error.
+     */
+    @Test
+    fun `an unbound hydration link holds no upload slot and drops a view invalidation`() {
+        val link = DaemonRuntime.HydrationLink()
+        assertNull(link.hydration, "nothing to shut down before the hydration layer exists")
+        assertFalse(link.hasUploadSlot("/a.txt"), "no upload can be in flight without a hydration layer")
+        link.dispatchEvent(org.krost.unidrive.hydration.HydrationEvent.ViewInvalidated(paths = listOf("/a.txt")))
+        link.dispatchEvent(org.krost.unidrive.hydration.HydrationEvent.ViewInvalidated(paths = emptyList(), full = true))
+    }
+
+    /**
      * Minimal CloudProvider stub. Only authenticateAndLog() (via authenticate())
      * is exercised by T1's happy-path lifecycle; the rest must compile but never
      * runs in this test.
