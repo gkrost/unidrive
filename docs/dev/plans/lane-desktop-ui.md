@@ -150,3 +150,85 @@ B: U2 a ─▶ b ─▶ c      (ProfileCommand / AuthCommand)
 C: U3 ─▶ #660          (new ignore package)
 D: [#607 merged] ─▶ U5 ─▶ U6, U7   (MountWiring / HydrationImpl / telemetry.db)
 ```
+
+## Status and the next wave
+
+The tiers above are the original brief. This section is the current state; an agent picking an item starts here.
+
+### Done
+| Item | PR |
+|---|---|
+| U1 #657 observer-safe subscribe | #699 |
+| U2 #656 PR a (`profile list --json`, `profile set`, `label`) and PR b (non-interactive `profile add`, `auth begin` / `complete` / `login --password-stdin`) | #724, #725 |
+| U3 #659 ignore matcher with the git oracle (clean-room; 0 differences on 1444 verdicts) | #710. The issue is still open: close it, #660 carries the rest |
+| U4 #658 upload, cache and provider health in `daemon.status` | #722 |
+| #607 U8 (a), (b)+(d), (e) | #701, #703, #705 |
+
+Re-checked on `main`: `DaemonRuntime.run` still has its late-bound references (`hydrationForShutdown`, `hydrationIpcRef`,
+`hydrationRef`, `hydration`, `pollerRef`). `ProfileRemoveCommand` still asks on the console and has no daemon check. No
+`telemetry.db`, no history or pause verb exists. The new `sync.ignore.IgnoreMatcher` has no call site yet; every exclude still goes through
+`Reconciler.matchesGlob` (`DoctorCommand`, `LegacyInventory`, `StatusCommand`, `VerifyCommand`, `RemoteOperationGuard`).
+
+### Next, in this order
+The rules at the top apply unchanged: claim on the issue, one branch and one draft PR per item, test-first, CI as the gate, no full local
+`./gradlew check`.
+
+**N1: #607 (c), the late-bound references in `DaemonRuntime.run`.**
+- **Do:** turn the nullable `var … = null` references that are filled further down into an explicit construction order, or into an explicit
+  event dependency where a cycle is real (the poller comment says "Late-bound: the poller is built further down").
+- **No behaviour change:** the IPC replies, the shutdown order and the log lines stay the same.
+- **Tests:** the existing `DaemonRuntimeTest` stays green. A request that arrives before the hydration exists gets an error reply,
+  never a `NullPointerException`. Pin today's reply in a test first; if there is no defined reply today, define one and say so in the PR.
+- **Owns `DaemonRuntime.kt`** while it runs: no other PR of this lane edits that file.
+- **Size:** M. It gates N3's wiring and #586.
+
+**N2: #656 PR c, a safe `profile remove`.**
+- **Do:**
+  - refuse while a daemon holds the profile, with the machine-readable error token `daemon_running`;
+  - detect that read-only (the profile's process lock and a socket that answers); never autospawn;
+  - `--stop` asks the running daemon to stop over IPC first, and waits a bounded time;
+  - `--yes --json` for front-ends, so no console is needed;
+  - remove the IPC token files and the socket with the profile;
+  - the JSON result says what was removed and what was kept: the config section, the state folder, the credentials, and **never** the
+    local sync root or mount root.
+- **Tests:** no console (CI style); the refusal while a fake daemon holds the lock; no secret in the output.
+- **Size:** S–M. It unblocks the client's account removal (gkrost/unidrive-windows#264).
+
+**N3: U5 #652, the history store, in two PRs.**
+- The "claimed" comment of 2026-10-08 on #652 is stale: no branch and no session behind it. Say so when you claim.
+- **PR 1 (now, in parallel with N1):** the store only, in its own package, with no edit to `DaemonRuntime` or `HydrationImpl`:
+  - a per-profile `telemetry.db` with a bounded writer queue and owner-only permissions;
+  - retention of 90 days or 200 MB, whichever comes first, configurable (the owner's decision on #652);
+  - an explicit disk-full behaviour. Proposed: drop history rows and never block a transfer. Confirm it on the issue before building;
+  - an `AuditSink` implementation with `queued_at`, `started_at` and `finished_at`;
+  - an `interrupted` row after a crash, never a success.
+  
+  Tests: retention, crash recovery, and the 50k-row burst number.
+- **PR 2 (after N1 merges):** the daemon passes the sink. Rows are written at the `Completed` points in `HydrationImpl`, including the
+  start-up replay and identical-bytes skips.
+- **Size:** M + S.
+
+**N4: #660, discovery, layering and the call sites.**
+- The two questions the tier-4 note asked to settle are **answered by the owner's D3** (recorded on #651):
+  - ignore stops uploads only, and the cloud item stays visible;
+  - `.git` is excluded by default but overridable, and `.gitignore` is opt-in per account;
+  - an ignored file stays in place in a mount root and never becomes a leftover.
+- **PR 1:** discovery, layering and caching with `explain(path)`, with no call site moved.
+- **PR 2:** the upload path, one call site at a time. A front-end needs no new verb for that yet.
+- **Hands off:** check the open PR #788 (refusing case collisions during upload recovery) before you touch `Reconciler`.
+- **Size:** L.
+
+**Later:**
+- U6 #653 and U7 #654, after N3.
+- #586 (credential health), after N1: it edits the same status reply.
+- #778 and #789 (pause): postponed by the owner (gkrost/unidrive-windows#358). Not before the client's cards, Start action and first-run
+  wizard.
+- #664: when the owner asks.
+
+### Parallel plan, next wave
+```
+A: N1 (DaemonRuntime) ─▶ N3 PR 2 ─▶ U6, U7 ; #586
+B: N2 (ProfileCommand)
+C: N3 PR 1 (new telemetry package)
+D: N4 PR 1 (ignore package) ─▶ PR 2 (upload path, after #788)
+```
