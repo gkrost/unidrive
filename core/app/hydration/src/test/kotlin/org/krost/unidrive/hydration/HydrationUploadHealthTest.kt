@@ -234,8 +234,28 @@ class HydrationUploadHealthTest {
     }
 
     @Test
+    fun `the size stays unknown while the first walk is still evicting`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, cacheMaxBytes = 100L)
+        env.stateDb.insertUploadedRow("/c/a.bin", mtime = 1_000L, size = 400L)
+        writeCache(env, "/c/a.bin", "x".repeat(400))
+        var asked = false
+        var duringPass: Long? = -1L
+        env.hydration.onDispositionBatch = {
+            asked = true
+            duringPass = env.hydration.cacheHealth().bytes
+        }
+
+        env.hydration.evictCache()
+
+        assertTrue(asked, "the pass was over budget and classified its candidates")
+        assertNull(duringPass, "accounting is not seeded until the walk is reconciled: unknown, not a partial total")
+        assertEquals(env.hydration.cacheSizeBytes(), env.hydration.cacheHealth().bytes, "once the pass is done the total is what is on disk")
+    }
+
+    @Test
     fun `a measurement request fills in the size off the caller's thread`() = runTest {
         val env = HydrationTestEnv(recoveryUploadScope = this, cacheMaxBytes = 1_000_000L)
+        env.stateDb.insertUploadedRow("/c/a.bin", mtime = 1_000L, size = 42L)
         writeCache(env, "/c/a.bin", "x".repeat(42))
         assertNull(env.hydration.cacheHealth().bytes)
 
@@ -254,5 +274,21 @@ class HydrationUploadHealthTest {
             }
         }
         assertEquals(42L, bytes)
+        assertEquals(1, env.hydration.cacheWalkCount.get())
+
+        repeat(10) { env.hydration.requestCacheMeasurement() }
+        // The requests only launch; let any walk they would start run before counting (the walk is on the IO dispatcher).
+        runCurrent()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { kotlinx.coroutines.delay(150) }
+        runCurrent()
+        assertEquals(1, env.hydration.cacheWalkCount.get(), "status polls reuse the running cache total")
+
+        val opened = assertIs<OpenResult.Ok>(env.hydration.openWriteBegin("conn", "/c/a.bin", "h1"))
+        Files.writeString(opened.cachePath, "y".repeat(13))
+        env.hydration.closeHandle("conn", "h1")
+        assertEquals(13L, env.hydration.cacheHealth().bytes, "a client write updates the total without a walk")
+        assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/c/a.bin"))
+        assertEquals(0L, env.hydration.cacheHealth().bytes, "an eviction updates the total without a walk")
+        assertEquals(1, env.hydration.cacheWalkCount.get())
     }
 }
