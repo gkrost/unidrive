@@ -246,7 +246,7 @@ class OneDriveProvider(
                             "rather than overwriting it.",
                         remotePath,
                     )
-                    return put("rename").toCloudItem()
+                    return keepBoth()
                 }
                 if (e.isSimilarName()) {
                     // The name this update targets is a similar name of another sibling: the update cannot move
