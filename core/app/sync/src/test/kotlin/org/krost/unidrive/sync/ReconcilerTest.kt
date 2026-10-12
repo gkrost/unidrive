@@ -641,6 +641,21 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `case collisions remain refused during pending upload recovery`() {
+        val paths = setOf("/Report.pdf", "/report.pdf")
+        for (path in paths) {
+            Files.writeString(syncRoot.resolve(path.removePrefix("/")), path)
+            db.upsertEntry(dbEntry(path, isHydrated = true).copy(remoteId = null, remoteHash = null, remoteSize = 0))
+        }
+        val normal = reconciler.reconcile(emptyMap(), emptyMap())
+        val streaming = reconciler.finalizeStreaming(emptyList(), emptyMap(), emptyMap())
+        for (actions in listOf(normal, streaming)) {
+            assertTrue(actions.none { it is SyncAction.Upload })
+            assertEquals(paths, actions.filterIsInstance<SyncAction.Conflict>().map { it.path }.toSet())
+        }
+    }
+
+    @Test
     fun `actions sorted folders first then files`() {
         val remoteChanges =
             mapOf(

@@ -184,6 +184,8 @@ class Reconciler(
         val allDbEntries = db.getAllEntries()
         val entryByPath = allDbEntries.associateBy { it.path }
         val entryByLcPath = allDbEntries.associateBy { it.path.lowercase(Locale.ROOT) }
+        val caseCollisionKeys = allDbEntries.groupBy { it.path.lowercase(Locale.ROOT) }
+            .filterValues { entries -> entries.size > 1 }.keys
         val entryByRemoteId = allDbEntries.mapNotNull { e -> e.remoteId?.let { it to e } }.toMap()
 
         val actions = mutableListOf<SyncAction>()
@@ -342,6 +344,10 @@ class Reconciler(
             // #526: an unresolvable name must not abort the recovery loop — skip the row.
             val localPath = safeResolveLocalOrNull(syncRoot, entry.path) ?: continue
             if (!Files.isRegularFile(localPath)) continue
+            if (entry.path.lowercase(Locale.ROOT) in caseCollisionKeys) {
+                actions.add(SyncAction.Conflict(entry.path, ChangeState.NEW, ChangeState.UNCHANGED, null, policyForPath(entry.path)))
+                continue
+            }
             // #115: preserve any persisted canonical remote path as remoteTarget
             // so the retry uploads to the same canonical the row was keyed at.
             actions.add(SyncAction.Upload(entry.path, remoteTarget = entry.remotePath))
@@ -512,6 +518,8 @@ class Reconciler(
         val allDbEntries = db.getAllEntries()
         val entryByPath = allDbEntries.associateBy { it.path }
         val entryByLcPath = allDbEntries.associateBy { it.path.lowercase(Locale.ROOT) }
+        val caseCollisionKeys = allDbEntries.groupBy { it.path.lowercase(Locale.ROOT) }
+            .filterValues { entries -> entries.size > 1 }.keys
         val entryByRemoteId = allDbEntries.mapNotNull { e -> e.remoteId?.let { it to e } }.toMap()
 
         val actions = streamedActions.toMutableList()
@@ -599,6 +607,10 @@ class Reconciler(
             // #526: an unresolvable name must not abort the recovery loop — skip the row.
             val localPath = safeResolveLocalOrNull(syncRoot, entry.path) ?: continue
             if (!Files.isRegularFile(localPath)) continue
+            if (entry.path.lowercase(Locale.ROOT) in caseCollisionKeys) {
+                actions.add(SyncAction.Conflict(entry.path, ChangeState.NEW, ChangeState.UNCHANGED, null, policyForPath(entry.path)))
+                continue
+            }
             // #115: preserve persisted canonical remote path as remoteTarget.
             actions.add(SyncAction.Upload(entry.path, remoteTarget = entry.remotePath))
         }
