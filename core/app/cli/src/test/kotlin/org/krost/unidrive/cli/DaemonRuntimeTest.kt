@@ -1278,6 +1278,73 @@ class DaemonRuntimeTest {
         }
     }
 
+    // ── the hydration layer exists before any request can reach it ─────────────────────────────────
+
+    /**
+     * A mount daemon builds its hydration layer before it binds the socket, so there is no window in which
+     * a request meets a daemon without one: the first request a client can send gets the hydration layer's
+     * own reply, never an error for a missing layer and never a dropped line. The request goes out the
+     * moment the socket file appears (a tighter poll than [awaitSocket]).
+     */
+    @Test
+    fun `the first request on a mount daemon's socket already reaches the hydration layer`() = runBlocking {
+        val runtime = startDaemon(StubProvider())
+        val daemonJob = launch { runtime.start() }
+        withTimeout(30_000) {
+            while (!Files.exists(socketPath)) {
+                check(!daemonJob.isCompleted) { "the daemon start finished without binding its socket" }
+                delay(1)
+            }
+        }
+        try {
+            assertEquals(
+                """{"ok":true,"entries":[]}""",
+                sendOneRequest("""{"verb":"hydration.list","prefix":"/"}"""),
+                "the first request is answered by the hydration layer",
+            )
+            val status = Json.parseToJsonElement(sendOneRequest("""{"verb":"daemon.status"}""")).jsonObject
+            assertTrue("cache" in status, "a mount daemon's status carries the hydration cache: $status")
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    /**
+     * A mirror daemon never builds a hydration layer. Every hydration verb and sync.enumerate get the
+     * fixed refusal, and daemon.status leaves out what only a hydration layer can know (uploads, cache).
+     */
+    @Test
+    fun `a daemon without a hydration layer refuses its verbs with wrong_mode and omits uploads and cache`() = runBlocking {
+        val runtime =
+            DaemonRuntime(
+                profileMode = ProfileMode.MIRROR,
+                profileName = "test_profile",
+                lockFile = lockFile,
+                dbPath = dbPath,
+                syncRoot = tempDir.resolve("sync-root"),
+                socketPath = socketPath,
+                providerFactory = { StubProvider() },
+            )
+        val daemonJob = launch { runtime.start() }
+        awaitSocket(daemonJob)
+        try {
+            for (verb in org.krost.unidrive.hydration.HydrationIpcHandler.VERBS + "sync.enumerate") {
+                assertEquals(
+                    """{"ok":false,"error":"wrong_mode"}""",
+                    sendOneRequest("""{"verb":"$verb"}"""),
+                    "$verb on a daemon without a hydration layer",
+                )
+            }
+            val status = Json.parseToJsonElement(sendOneRequest("""{"verb":"daemon.status"}""")).jsonObject
+            assertFalse("uploads" in status, "no upload queue to report: $status")
+            assertFalse("cache" in status, "no hydration cache to report: $status")
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
     /**
      * Minimal CloudProvider stub. Only authenticateAndLog() (via authenticate())
      * is exercised by T1's happy-path lifecycle; the rest must compile but never
