@@ -49,6 +49,7 @@ internal object IgnoreCorpus {
             "08-nested.cases",
             "09-docs-examples.cases",
             "10-edge.cases",
+            "11-discovery.cases",
         )
 
     private val TOKEN = Regex("""\{(SP|TAB|CR)}|\{u:([0-9A-Fa-f]{1,6}(?:,[0-9A-Fa-f]{1,6})*)}""")
