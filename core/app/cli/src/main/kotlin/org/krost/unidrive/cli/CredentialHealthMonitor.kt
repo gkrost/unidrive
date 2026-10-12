@@ -136,8 +136,8 @@ internal class CredentialHealthMonitor(
             when (health) {
                 is CredentialHealth.Ok -> Reading(State.OK, expiresAtMs = null, checkedAtMs = checkedAtMs)
                 is CredentialHealth.Missing -> Reading(State.MISSING, expiresAtMs = null, checkedAtMs = checkedAtMs)
-                // A warning is a finding the factory could not put in a class (a token file that does not parse,
-                // an access token past its life with no way to renew it): the daemon does not claim more than it knows.
+                // A warning is a finding the factory could not put in a class (a token file that does not parse):
+                // the daemon does not claim more than it knows.
                 is CredentialHealth.Warning -> Reading(State.UNKNOWN, expiresAtMs = null, checkedAtMs = checkedAtMs)
                 is CredentialHealth.ExpiresIn -> {
                     // remainingMs (exact) wins; whole hours are a lower bound of the time left, and 0 hours without it means expired.
