@@ -4,3 +4,5 @@
 {"ok":false,"error":"unknown_path"}
 {"verb":"hydration.hydrate","path":"/docs/../report.txt"}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.hydrate","path":"/paused/cold.txt"}
+{"ok":false,"error":"paused"}

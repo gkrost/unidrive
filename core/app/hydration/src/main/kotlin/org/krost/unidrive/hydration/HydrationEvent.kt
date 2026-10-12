@@ -29,7 +29,8 @@ sealed class HydrationEvent {
      * An upload submitted through `open_write` was accepted into the daemon's
      * upload queue but has not started transferring yet (the daemon-wide
      * per-provider transfer budget is busy). A client shows the file as
-     * waiting until hydrating/failed arrives. Always followed by one of those.
+     * waiting until hydrating/failed arrives. Always followed by one of those. Sent again when a pause
+     * aborts a transfer that was running (#778): the upload is back in the queue, not failed.
      *
      * Wire shape (NDJSON line on `hydration.subscribe` stream):
      *   `{"event":"queued","path":"/a/save.doc"}`
@@ -122,6 +123,32 @@ sealed class HydrationEvent {
             val from: String,
             val to: String,
         )
+    }
+
+    /**
+     * The daemon was paused, or its pause changed reason or `auto` while paused (#778): `daemon.status`
+     * carries the same object as `paused`. [path] is always the empty string — this event is not tied to a path.
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe` and `sync.subscribe`):
+     *   `{"event":"paused","reason":"metered","since_ms":1700000000000,"auto":true}`
+     */
+    data class Paused(
+        val reason: String,
+        /** Epoch ms of the first request of this pause; a later change of reason keeps it. */
+        val sinceMs: Long,
+        /** True when a rule of the client paused, false when a person did. */
+        val auto: Boolean,
+    ) : HydrationEvent() {
+        override val path: String get() = ""
+    }
+
+    /**
+     * The pause ended (#778). Not sent for a `daemon.resume` that found the daemon running.
+     *
+     * Wire shape (NDJSON line on `hydration.subscribe` and `sync.subscribe`): `{"event":"resumed"}`
+     */
+    data object Resumed : HydrationEvent() {
+        override val path: String get() = ""
     }
 
     companion object {

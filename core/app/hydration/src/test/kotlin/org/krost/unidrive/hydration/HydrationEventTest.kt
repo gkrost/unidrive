@@ -44,6 +44,8 @@ class HydrationEventTest {
             is HydrationEvent.Uploading      -> "up"
             is HydrationEvent.Completed      -> "co"
             is HydrationEvent.ViewInvalidated -> "vi"
+            is HydrationEvent.Paused         -> "pa"
+            HydrationEvent.Resumed           -> "re"
         }
         assertEquals("ing", s)
     }
@@ -182,5 +184,17 @@ class HydrationEventTest {
             }
             assertEquals(0, depth, "unbalanced: $json")
         }
+    }
+
+    // #778: the daemon-level events are not tied to a path; their wire shape is the corpus's events/*.ndjson.
+    @Test
+    fun `paused and resumed serialise to the corpus lines`() {
+        assertEquals(
+            """{"event":"paused","reason":"metered","since_ms":1700000000000,"auto":true}""",
+            serialiseHydrationEvent(HydrationEvent.Paused(reason = "metered", sinceMs = 1_700_000_000_000L, auto = true)),
+        )
+        assertEquals("""{"event":"resumed"}""", serialiseHydrationEvent(HydrationEvent.Resumed))
+        assertEquals("", HydrationEvent.Paused("user", 1L, false).path)
+        assertEquals("", HydrationEvent.Resumed.path)
     }
 }

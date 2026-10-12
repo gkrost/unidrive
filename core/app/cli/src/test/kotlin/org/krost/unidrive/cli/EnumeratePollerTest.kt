@@ -509,4 +509,38 @@ class EnumeratePollerTest {
         assertEquals(30L, lastProviderContactMs(30L, 20L))
         assertEquals(30L, lastProviderContactMs(10L, 30L))
     }
+
+    // #778: the poll's cloud enumeration waits while the daemon is paused and catches up the moment it resumes.
+    @Test
+    fun `the poll does not enumerate while paused and catches up at once on resume`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val gate = org.krost.unidrive.hydration.PauseGate()
+        gate.pause("metered", auto = true)
+        val reported = mutableListOf<Long?>()
+        val poller = EnumeratePoller(
+            handler = handler,
+            intervalMs = intervalMs,
+            scope = scope,
+            jitter = { it },
+            firstPollDelayMs = intervalMs,
+            onNextAttempt = { reported += it },
+            awaitResumed = { gate.awaitResumed() },
+        )
+        poller.start()
+
+        advanceTimeBy(5 * intervalMs)
+        runCurrent()
+        assertEquals(0, engine.enumerateCount.get(), "five intervals of a pause: no enumeration")
+
+        gate.resume()
+        runCurrent()
+        assertEquals(1, engine.enumerateCount.get(), "the poll runs as soon as the pause ends")
+
+        advanceTimeBy(stepOneInterval())
+        runCurrent()
+        assertEquals(2, engine.enumerateCount.get(), "and keeps its normal cadence after it")
+        scope.cancel()
+    }
 }

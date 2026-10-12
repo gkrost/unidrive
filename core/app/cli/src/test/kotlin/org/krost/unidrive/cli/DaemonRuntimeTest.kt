@@ -368,6 +368,9 @@ class DaemonRuntimeTest {
                 // handler, whether the outcome is ok or a typed error.
                 val requests = listOf(
                     """{"verb":"daemon.status"}""",
+                    // #778: a pause is followed by its resume at once, so the verbs after them meet a running daemon.
+                    """{"verb":"daemon.pause","reason":"user","auto":false}""",
+                    """{"verb":"daemon.resume"}""",
                     """{"verb":"hydration.open_read","handle_id":"h1","path":"/startup/read.txt"}""",
                     // The cache path is a JSON string: a Windows path's backslashes must be escaped.
                     """{"verb":"hydration.open_write","handle_id":"h2","path":"/startup/write.txt","cache_path":${kotlinx.serialization.json.JsonPrimitive(tempDir.resolve("write-cache.bin").toString())}}""",

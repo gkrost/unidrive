@@ -10,3 +10,7 @@
 {"ok":false,"error":"forbidden","scope":"read"}
 {"verb":"sync.enumerate"}
 {"ok":false,"error":"forbidden","scope":"read"}
+{"verb":"daemon.pause","reason":"user","auto":false}
+{"ok":false,"error":"forbidden","scope":"read"}
+{"verb":"daemon.resume"}
+{"ok":false,"error":"forbidden","scope":"read"}

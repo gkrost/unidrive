@@ -20,6 +20,7 @@ import kotlin.coroutines.coroutineContext
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -58,6 +59,35 @@ class RefreshRoutingTest {
 
         assertTrue(engine.enumerateCalled, "mount client connected must route to enumerateRemoteIntoState")
         assertFalse(engine.syncOnceCalled, "legacy syncOnce must NOT run for a mounted profile")
+    }
+
+    // #778: refresh.run enumerates the cloud on either path, so a paused daemon refuses it.
+    @Test
+    fun refresh_is_refused_while_paused_on_both_paths(): Unit = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        for (mounted in listOf(true, false)) {
+            val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+            var paused = true
+            val handler =
+                RefreshRpcHandler(
+                    server,
+                    engine,
+                    db,
+                    scope,
+                    mountClientConnected = { mounted },
+                    paused = { paused },
+                    emit = {},
+                )
+
+            assertEquals("""{"ok":false,"error":"paused"}""", handler.handle("conn-1", """{"verb":"refresh.run"}"""), "mounted=$mounted")
+            assertFalse(handler.isInFlight(), "mounted=$mounted: a refusal reserves nothing")
+            assertFalse(engine.enumerateCalled || engine.syncOnceCalled, "mounted=$mounted: nothing reached the cloud")
+
+            paused = false
+            assertTrue(handler.handle("conn-1", """{"verb":"refresh.run"}""").contains("\"ok\":true"), "mounted=$mounted: after resume")
+            handler.awaitInFlight()
+            assertTrue(engine.enumerateCalled || engine.syncOnceCalled, "mounted=$mounted: after resume it runs")
+        }
     }
 
     @Test
