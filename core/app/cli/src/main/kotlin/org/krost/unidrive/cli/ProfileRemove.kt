@@ -51,12 +51,8 @@ internal object ProfileRemover {
         val deletedProfileDir: Boolean,
     )
 
-    /** The config entry to remove, or a [LifecycleError] naming why it cannot be. */
-    private fun load(
-        configDir: Path,
-        name: String,
-    ): Triple<Path, String, org.krost.unidrive.sync.RawProvider> {
-        if (!isValidProfileName(name)) throw LifecycleError("invalid_profile_name", "'$name' is not a valid profile name")
+    /** The config of [configDir] as text and parsed, or a [LifecycleError] naming why it cannot be read. */
+    private fun readConfig(configDir: Path): Pair<String, org.krost.unidrive.sync.RawSyncConfig> {
         val configPath = configDir.resolve("config.toml")
         if (!Files.exists(configPath)) throw LifecycleError("config_not_found", "no config.toml in $configDir")
         val content = Files.readString(configPath)
@@ -67,8 +63,63 @@ internal object ProfileRemover {
                 // The parser's message can quote the offending config line, which may hold a credential.
                 throw LifecycleError("config_invalid", "config.toml could not be parsed")
             }
-        val rp = raw.providers[name] ?: throw LifecycleError("profile_not_found", "profile '$name' is not configured")
-        return Triple(configPath, content, rp)
+        return content to raw
+    }
+
+    /** The profile entry to remove, or a [LifecycleError] naming why there is none. */
+    private fun lookup(
+        raw: org.krost.unidrive.sync.RawSyncConfig,
+        name: String,
+    ): org.krost.unidrive.sync.RawProvider {
+        if (!isValidProfileName(name)) throw LifecycleError("invalid_profile_name", "'$name' is not a valid profile name")
+        return raw.providers[name] ?: throw LifecycleError("profile_not_found", "profile '$name' is not configured")
+    }
+
+    /** Refuses while another process holds the profile; a daemon is only tolerated when [stop] will deal with it. */
+    private fun refuseIfHeld(
+        holder: Holder,
+        name: String,
+        stop: Boolean,
+    ) {
+        if (holder == Holder.OTHER) {
+            throw LifecycleError("profile_in_use", "profile '$name' is in use by another unidrive process; stop it first")
+        }
+        if (holder == Holder.DAEMON && !stop) {
+            throw LifecycleError("daemon_running", "a daemon is running for profile '$name'; stop it first, or run again with --stop")
+        }
+    }
+
+    /** Asks the daemon to stop over IPC and waits a bounded time for the profile to be free; never kills it. */
+    private fun stopDaemon(
+        profileDir: Path,
+        socket: Path,
+        name: String,
+    ) {
+        val accepted = ProfileRemoveHooks.requestShutdown(IpcEndpoint(socket, profileDir, name))
+        if (!accepted) {
+            throw LifecycleError("daemon_stop_failed", "the daemon of profile '$name' did not accept the stop request; nothing was removed")
+        }
+        val deadline = System.currentTimeMillis() + ProfileRemoveHooks.stopWaitMs
+        while (holderOf(profileDir, socket) != Holder.NONE) {
+            if (System.currentTimeMillis() >= deadline) {
+                throw LifecycleError(
+                    "daemon_stop_failed",
+                    "the daemon of profile '$name' did not stop within ${ProfileRemoveHooks.stopWaitMs / 1000} s; nothing was removed",
+                )
+            }
+            Thread.sleep(100)
+        }
+    }
+
+    private fun writeConfig(
+        configPath: Path,
+        text: String,
+    ) {
+        try {
+            Files.writeString(configPath, text)
+        } catch (e: IOException) {
+            throw LifecycleError("config_write_failed", "config.toml could not be written: ${e.javaClass.simpleName}; nothing was removed", e)
+        }
     }
 
     private fun holderOf(
@@ -108,69 +159,40 @@ internal object ProfileRemover {
         stop: Boolean,
         confirm: () -> Boolean = { true },
     ): Result? {
-        val (configPath, content, rp) = load(configDir, name)
+        val configPath = configDir.resolve("config.toml")
+        val (content, raw) = readConfig(configDir)
+        val rp = lookup(raw, name)
         val profileDir = configDir.resolve(name)
         val socket = ProfileRemoveHooks.socketPath(name)
 
-        var daemonStopped = false
-        when (holderOf(profileDir, socket)) {
-            Holder.NONE -> {}
-            Holder.OTHER ->
-                throw LifecycleError("profile_in_use", "profile '$name' is in use by another unidrive process; stop it first")
-            Holder.DAEMON ->
-                if (!stop) {
-                    throw LifecycleError(
-                        "daemon_running",
-                        "a daemon is running for profile '$name'; stop it first, or run again with --stop",
-                    )
-                }
-        }
+        refuseIfHeld(holderOf(profileDir, socket), name, stop)
         if (!confirm()) return null
 
+        var daemonStopped = false
         if (holderOf(profileDir, socket) == Holder.DAEMON) {
-            val accepted = ProfileRemoveHooks.requestShutdown(IpcEndpoint(socket, profileDir, name))
-            if (!accepted) {
-                throw LifecycleError(
-                    "daemon_stop_failed",
-                    "the daemon of profile '$name' did not accept the stop request; nothing was removed",
-                )
-            }
-            val deadline = System.currentTimeMillis() + ProfileRemoveHooks.stopWaitMs
-            while (holderOf(profileDir, socket) != Holder.NONE) {
-                if (System.currentTimeMillis() >= deadline) {
-                    throw LifecycleError(
-                        "daemon_stop_failed",
-                        "the daemon of profile '$name' did not stop within ${ProfileRemoveHooks.stopWaitMs / 1000} s; nothing was removed",
-                    )
-                }
-                Thread.sleep(100)
-            }
+            stopDaemon(profileDir, socket, name)
             daemonStopped = true
         }
 
         // From here on a racing start is refused by the lock this process holds.
         val guard = ProcessLock(profileDir.resolve(".lock"))
-        var guarded = false
-        if (Files.isDirectory(profileDir)) {
-            guarded = guard.tryLock(ProcessLock.Mode.SYNC)
-            if (!guarded) throw LifecycleError("profile_in_use", "profile '$name' was taken by another unidrive process; nothing was removed")
+        val dirExists = Files.isDirectory(profileDir)
+        val guarded = dirExists && guard.tryLock(ProcessLock.Mode.SYNC)
+        if (dirExists && !guarded) {
+            throw LifecycleError("profile_in_use", "profile '$name' was taken by another unidrive process; nothing was removed")
         }
 
         val type = rp.type ?: name
         val syncRoot = rp.sync_root ?: SyncConfig.defaultSyncRoot(type).toString()
-        val wasDefault = SyncConfig.parseRaw(content, configPath.toString()).general.default_profile == name
+        val wasDefault = raw.general.default_profile == name
         val warnings = mutableListOf<String>()
-        val existed = Files.isDirectory(profileDir)
+        val existed = dirExists
         var credentialsRemoved = false
         var credentialsKept = false
         var tokensRemoved = false
         var socketRemoved = false
         try {
-            try {
-                Files.writeString(configPath, removeProfileSection(content.lines(), name).joinToString("\n"))
-            } catch (e: IOException) {
-                throw LifecycleError("config_write_failed", "config.toml could not be written: ${e.javaClass.simpleName}; nothing was removed")
-            }
+            writeConfig(configPath, removeProfileSection(content.lines(), name).joinToString("\n"))
 
             // The IPC tokens and the socket belong to a daemon that is gone: always removed, also with --keep-data.
             for (scope in IpcAuth.Scope.entries) {

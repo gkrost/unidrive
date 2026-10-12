@@ -480,7 +480,7 @@ class ProfileRemoveCommand : Callable<Int> {
         if (json) {
             return try {
                 if (!yes) throw LifecycleError("confirmation_required", "--yes is required with --json; the command never prompts")
-                val result = ProfileRemover.remove(configDir, name, keepData, stop) ?: throw IllegalStateException("not cancellable")
+                val result = ProfileRemover.remove(configDir, name, keepData, stop) ?: error("no confirmation was asked")
                 emitJson(result.json)
                 0
             } catch (e: LifecycleError) {
