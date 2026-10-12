@@ -209,9 +209,10 @@ class HydrationImpl(
     // their path's turn, the daemon-wide budget, or a retry backoff).
     private val uploadsInFlight = AtomicInteger(0)
 
-    // #658: null until the first cache walk has seeded [cacheBytes]. Thereafter the health view reads
-    // the running total and walks reconcile it periodically.
-    @Volatile private var cacheMeasuredBytes: Long? = null
+    // #658: false until a cache walk has been reconciled into [cacheBytes] (the accounting starts empty,
+    // so before that its total says nothing). Thereafter the health view reads the running total and
+    // walks reconcile it periodically.
+    @Volatile private var cacheSeeded = false
     private val cacheMeasuring = AtomicBoolean(false)
 
     // Waiting-slot budget for the upload queue. Acquired by the submitting
@@ -1186,7 +1187,6 @@ class HydrationImpl(
         val job = coroutineContext[Job]
         val files = listCacheFiles { job?.ensureActive() }
         val before = files.sumOf { it.size }
-        recordCacheSize(before) // #658: the health view reads what the last walk found
         var total = before
         val evicted = HashSet<String>()
         if (cacheMaxBytes > 0 && before > cacheMaxBytes) {
@@ -1204,9 +1204,9 @@ class HydrationImpl(
                 total -= evictDisposable(batch, rows, total - cacheMaxBytes, evicted)
             }
         }
-        recordCacheSize(total)
         lastWalkAtMs.set(System.currentTimeMillis())
         reconcileAccounting(files, evicted)
+        cacheSeeded = true // #658: only now does the running total vouch for the cache (not while the pass is still evicting)
         return CacheEvictionReport(cacheMaxBytes, before, total, evicted.size)
     }
 
@@ -1380,11 +1380,7 @@ class HydrationImpl(
     )
 
     /** What is known now, without touching the file system. See [requestCacheMeasurement]. */
-    fun cacheHealth(): CacheHealth = CacheHealth(cacheMeasuredBytes?.let { cacheBytes.get() }, cacheMaxBytes.takeIf { it > 0 })
-
-    private fun recordCacheSize(bytes: Long) {
-        cacheMeasuredBytes = bytes
-    }
+    fun cacheHealth(): CacheHealth = CacheHealth(if (cacheSeeded) cacheBytes.get() else null, cacheMaxBytes.takeIf { it > 0 })
 
     /**
      * Seeds cache accounting with one off-thread walk. Later cache changes update the running total,
@@ -1392,16 +1388,16 @@ class HydrationImpl(
      * has, so a large cache never delays a reply.
      */
     fun requestCacheMeasurement() {
-        if (cacheMeasuredBytes != null) return
+        if (cacheSeeded) return
         if (!cacheMeasuring.compareAndSet(false, true)) return
         recoveryUploadScope.launch {
             try {
                 evictionMutex.withLock {
-                    if (cacheMeasuredBytes != null) return@withLock
+                    if (cacheSeeded) return@withLock
                     val files = withContext(Dispatchers.IO) { listCacheFiles() }
                     reconcileAccounting(files, emptySet())
                     lastWalkAtMs.set(System.currentTimeMillis())
-                    recordCacheSize(cacheBytes.get())
+                    cacheSeeded = true
                 }
             } catch (e: CancellationException) {
                 throw e
