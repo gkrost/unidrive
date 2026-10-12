@@ -10,7 +10,6 @@ import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isProfileAuthenticated
 import org.krost.unidrive.sync.isValidProfileName
-import org.krost.unidrive.sync.removeProfileSection
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
@@ -440,8 +439,15 @@ class ProfileListCommand : Callable<Int> {
 
 // ── profile remove ───────────────────────────────────────────────────────────
 
-@Command(name = "remove", description = ["Remove a provider profile"], mixinStandardHelpOptions = true)
-class ProfileRemoveCommand : Runnable {
+@Command(
+    name = "remove",
+    description = [
+        "Remove a provider profile: its config section, its profile folder (state, credentials), its IPC tokens and socket. " +
+            "Refuses while a daemon holds the profile (--stop asks it to stop first). The local sync root or mount root is never deleted.",
+    ],
+    mixinStandardHelpOptions = true,
+)
+class ProfileRemoveCommand : Callable<Int> {
     @ParentCommand
     lateinit var profileCmd: ProfileCommand
 
@@ -454,51 +460,71 @@ class ProfileRemoveCommand : Runnable {
     @Option(names = ["-y", "--yes"], description = ["Skip confirmation prompt"])
     var yes: Boolean = false
 
-    override fun run() {
+    @Option(
+        names = ["--stop"],
+        description = ["Ask the profile's running daemon to stop over IPC first (waits a bounded time; never kills it)"],
+    )
+    var stop: Boolean = false
+
+    @Option(
+        names = ["--json"],
+        description = ["Print the result (or the refusal) as one JSON object on stdout; needs --yes, never prompts"],
+    )
+    var json: Boolean = false
+
+    override fun call(): Int {
         val main = profileCmd.parent
-        val configPath = main.configBaseDir().resolve("config.toml")
+        val configDir = main.configBaseDir()
+        val configPath = configDir.resolve("config.toml")
+
+        if (json) {
+            return try {
+                if (!yes) throw LifecycleError("confirmation_required", "--yes is required with --json; the command never prompts")
+                val result = ProfileRemover.remove(configDir, name, keepData, stop) ?: throw IllegalStateException("not cancellable")
+                emitJson(result.json)
+                0
+            } catch (e: LifecycleError) {
+                emitJson(lifecycleErrorJson(e))
+                1
+            }
+        }
 
         if (!Files.exists(configPath)) {
             main.reportConfigMissingAndExit(configPath)
         }
-
-        val content = Files.readString(configPath)
-        val raw = SyncConfig.parseRaw(content, configPath.toString())
+        val raw = SyncConfig.parseRaw(Files.readString(configPath), configPath.toString())
         if (name !in raw.providers) {
             System.err.println("Error: Profile '$name' not found.")
             System.err.println("Configured: ${raw.providers.keys.joinToString(", ")}")
-            System.exit(1)
+            return 1
+        }
+        if (!yes && System.console() == null) {
+            System.err.println("Error: interactive terminal required for confirmation. Use -y to skip.")
+            return 1
         }
 
-        if (!yes) {
-            val console = System.console()
-            if (console == null) {
-                System.err.println("Error: interactive terminal required for confirmation. Use -y to skip.")
-                System.exit(1)
+        val result =
+            try {
+                ProfileRemover.remove(configDir, name, keepData, stop) {
+                    if (yes) {
+                        true
+                    } else {
+                        val console = System.console()
+                        print("Remove profile '$name'? [y/N] ")
+                        console.readLine()?.trim()?.lowercase() == "y"
+                    }
+                }
+            } catch (e: LifecycleError) {
+                System.err.println("Error: ${e.message}")
+                return 1
             }
-            print("Remove profile '$name'? [y/N] ")
-            val answer = console.readLine()?.trim()?.lowercase()
-            if (answer != "y") {
-                println("Cancelled.")
-                return
-            }
+        if (result == null) {
+            println("Cancelled.")
+            return 0
         }
-
-        val newContent = removeProfileSection(content.lines(), name)
-        Files.writeString(configPath, newContent.joinToString("\n"))
-
-        if (!keepData) {
-            val profileDir = main.configBaseDir().resolve(name)
-            if (Files.isDirectory(profileDir)) {
-                Files
-                    .walk(profileDir)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach { Files.deleteIfExists(it) }
-                println("  Deleted: $profileDir")
-            }
-        }
-
+        if (result.deletedProfileDir) println("  Deleted: ${result.profileDir}")
         println("Profile '$name' removed.")
+        return 0
     }
 }
 
