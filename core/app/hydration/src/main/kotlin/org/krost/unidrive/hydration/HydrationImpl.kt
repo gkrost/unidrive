@@ -1399,9 +1399,9 @@ class HydrationImpl(
                 evictionMutex.withLock {
                     if (cacheMeasuredBytes != null) return@withLock
                     val files = withContext(Dispatchers.IO) { listCacheFiles() }
-                    recordCacheSize(files.sumOf { it.size })
                     reconcileAccounting(files, emptySet())
                     lastWalkAtMs.set(System.currentTimeMillis())
+                    recordCacheSize(cacheBytes.get())
                 }
             } catch (e: CancellationException) {
                 throw e
