@@ -8,10 +8,12 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Manages the socket.io connection to Internxt's `NOTIFICATIONS_URL` change
- * feed. Each remote-origin frame triggers the supplied [callback] — a coarse
+ * feed. Each frame triggers the supplied [onRemoteChange] — a coarse
  * "something changed, walk the delta" wake-signal, not authoritative payload.
- * Client product names are shared across installations, so matching `clientId`
- * values also trigger a hint. Local echoes cause a harmless delta scan.
+ * Frames are never filtered by `clientId`: every unidrive installation sends the
+ * same product name, so a frame carrying it cannot prove the mutation was ours,
+ * and dropping it would hide the user's other devices. Echoes of our own
+ * mutations therefore cost one delta walk after the engine's debounce.
  *
  * Lifecycle is owned by [InternxtProvider]: constructed (lazily) on
  * authenticate success when a JWT is available, disconnected on `close()`
@@ -213,7 +215,8 @@ internal class NotificationsClient(
         }
     }
 
-    internal fun handleIncomingFrame(@Suppress("UNUSED_PARAMETER") raw: Any?) {
+    internal fun handleIncomingFrame(raw: Any?) {
+        log.debug("Internxt notification (clientId={})", extractClientId(raw))
         safeInvokeCallback()
     }
 
