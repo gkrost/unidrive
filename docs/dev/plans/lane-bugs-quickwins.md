@@ -5,6 +5,26 @@ below. It also supersedes `lane-engine-bugs.md` and `lane-engine-quickwins.md` (
 verified every anchor below on `main`. Line numbers drift, so trust the symbol. Work the tiers **in order**: within a tier, the
 "Sequencing" notes resolve shared files. One item = one branch = one **draft** PR; the owner merges.
 
+## Status (after the first wave)
+
+**Merged, start from the open items below:**
+- **Tier 1, all five:** D1 #737 (#760), D2 #738 (#756), D3 #739 (#761), D4 #424 (#757), D5 #307 (#762).
+- **Tier 2:**
+  - F2 #713 (#763), F4 #726 (#758), F5 #718 test side (#766), F6 the long-path precondition #754 (#759);
+  - F1 #709 (#765) and F3 #711 (#764) are merged, but their issues are still open: **close candidates** (#709 may stay open until the
+    next Windows-leg run names the step that timed out).
+- **Tier 3:** C2 #308 (#775) and C3 #330 (#779), with #777 for the #521 socket timeout.
+- **Also from this lane's runs:** #755 javaagent separator (#771), #774 runtimeImage after the agent copy; #767 closed.
+
+**Still open:**
+- C1 #700;
+- C4 #315, C5 #394, C6 #395 (NFC part);
+- C7 #748, then #747, then #696;
+- Q1 config.example.toml, Q2 #412, Q3 #741, Q4 #742, Q5 totp-stdin (no issue yet), Q6 #740, Q7 #626 item 3, Q8 #688.
+
+**Follow-ups found in review:**
+- one conflict-copy naming helper for #760 and #756 (they differ for dotfiles);
+- the Internxt same-name file and folder edge noted on #760.
 ## Rules (read before any code)
 - **Claim:** comment on the item's issue ("lane: starting, branch …"), and check that it is still open and that no open PR touches the
   same files: `gh pr list --state open`.
