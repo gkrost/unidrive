@@ -31,8 +31,13 @@ import kotlin.random.Random
  *   provider answers again, and the next poll runs one plain interval after the failed one instead
  *   of up to [maxBackoffMs] later. Outside a back-off the signal changes nothing.
  *
+ * - While the daemon is paused (#778) no tick enumerates: a tick waits for the resume ([awaitResumed]) and runs
+ *   at once when the pause ends.
+ *
  * Cancelled cleanly when the serve scope is cancelled at shutdown.
  */
+// Every tuning knob and test seam is its own parameter: the virtual-time tests set them one by one.
+@Suppress("LongParameterList")
 class EnumeratePoller(
     private val handler: EnumerateRpcHandler,
     private val intervalMs: Long,
@@ -60,6 +65,9 @@ class EnumeratePoller(
     // #463: true while something else works the state database the way a poll would (a refresh);
     // the tick is then skipped like one that met the enumerate guard.
     private val isBusy: () -> Boolean = { false },
+    // #778: returns at once while the daemon runs and suspends while it is paused. A tick whose sleep ends in a
+    // pause waits here and runs the moment the pause ends, so the poll catches up instead of losing an interval.
+    private val awaitResumed: suspend () -> Unit = {},
 ) {
     private val log = LoggerFactory.getLogger(EnumeratePoller::class.java)
 
@@ -102,6 +110,7 @@ class EnumeratePoller(
                         delay(sleepMs)
                     }
                     onNextAttempt(null)
+                    awaitResumed()
                     val result = if (isBusy()) null else handler.runGuarded(reset = false)
                     afterFailure = result != null && !result.ok
                     nextMs =

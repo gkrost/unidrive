@@ -42,6 +42,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   close_handle reply:   {"ok":true}
  *   hydrate     request:  {"verb":"hydration.hydrate","path":"/foo"}
  *   hydrate     reply:    {"ok":true} or {"ok":false,"error":"<message>"}
+ *   While the daemon is paused (daemon.pause) open_read and hydrate answer {"ok":false,"error":"paused"} for a
+ *   file that is not in the cache: nothing is started and nothing waits (a file in the cache is served as usual).
  *   dehydrate   request:  {"verb":"hydration.dehydrate","path":"/foo"}
  *   dehydrate   reply:    {"ok":true} or {"ok":false,"error":"busy"} or {"ok":false,"error":"<message>"}
  *   mkdir       request:  {"verb":"hydration.mkdir","path":"/foo"}
@@ -662,6 +664,10 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
         val base = """{"event":"completed","path":${jsonEsc(e.path)},"handle_id":${jsonEsc(e.handleId)},"direction":"$direction","ok":${e.ok}"""
         if (e.ok) "$base}" else "$base,\"error\":${jsonEsc(e.error?.message ?: "unknown")}}"
     }
+    is HydrationEvent.Paused -> {
+        """{"event":"paused","reason":${jsonEsc(e.reason)},"since_ms":${e.sinceMs},"auto":${e.auto}}"""
+    }
+    HydrationEvent.Resumed -> """{"event":"resumed"}"""
     is HydrationEvent.ViewInvalidated -> {
         if (e.full) {
             """{"event":"view.invalidated","full":true}"""

@@ -111,4 +111,24 @@ class EnumerateRpcHandlerTest {
         assertTrue(ev.contains("\"error\":\"shutdown\""), "scope cancellation must emit shutdown, not provider_error: $ev")
         assertEquals(null, handler.inFlightJobId(), "the in-flight slot must be released on shutdown")
     }
+
+    // #778: no cloud enumeration while the daemon is paused: the verb is refused, the poll's guarded run skips.
+    @Test
+    fun enumerate_is_refused_while_paused_and_runs_again_after_resume(): Unit = runBlocking {
+        val scope = CoroutineScope(coroutineContext + SupervisorJob())
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true))
+        var paused = true
+        val handler = EnumerateRpcHandler(engine, scope, emit = {}, paused = { paused })
+
+        assertEquals("""{"ok":false,"error":"paused"}""", handler.handle("conn-1", """{"verb":"sync.enumerate"}"""))
+        assertEquals(null, handler.runGuarded(reset = false), "the poll's run is skipped while paused")
+        assertEquals(0, engine.enumerateCount.get(), "no cloud enumeration starts while paused")
+        assertTrue(!handler.isInFlight(), "a refusal leaves the in-flight guard free")
+
+        paused = false
+        assertTrue(handler.handle("conn-1", """{"verb":"sync.enumerate"}""").contains("\"ok\":true"))
+        handler.awaitInFlight()
+        assertTrue(handler.runGuarded(reset = false)?.ok == true)
+        assertEquals(2, engine.enumerateCount.get())
+    }
 }

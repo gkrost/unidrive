@@ -146,6 +146,17 @@ sealed interface HydrationError {
         override val message: String = "$BLOCKED_BY_PARENT_TOKEN: $parent"
     }
 
+    /**
+     * The daemon is paused (#778) and the request would start a cloud download: refused at once, nothing is
+     * started and nothing is left waiting. A front-end asks the user whether to lift the pause (the action
+     * unpauses everything), calls `daemon.resume` and sends the request again. A file already in the cache is
+     * still served while paused; only a download is refused. Its [message] is the STABLE wire token `paused`.
+     * Changing this string breaks that cross-repo contract.
+     */
+    data object Paused : HydrationError {
+        override val message: String = PAUSED_TOKEN
+    }
+
     companion object {
         /** Wire token prefix for [BlockedByParent]. */
         const val BLOCKED_BY_PARENT_TOKEN = "blocked_by_parent"
@@ -176,5 +187,8 @@ sealed interface HydrationError {
 
         /** Wire token for [InvalidPath]. */
         const val INVALID_PATH_TOKEN = "invalid_path"
+
+        /** Wire token for [Paused]. */
+        const val PAUSED_TOKEN = "paused"
     }
 }

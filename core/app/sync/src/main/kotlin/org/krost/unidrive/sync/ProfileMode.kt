@@ -21,11 +21,11 @@ enum class ProfileMode(
 ) {
     MIRROR(
         "mirror",
-        listOf("sync", "refresh", "apply", "sweep", "status"),
+        listOf("sync", "refresh", "apply", "sweep", "status", "pause"),
     ),
     MOUNT(
         "mount",
-        listOf("mount", "hydration", "enumerate", "refresh", "status"),
+        listOf("mount", "hydration", "enumerate", "refresh", "status", "pause"),
     ),
     ;
 

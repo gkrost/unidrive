@@ -74,9 +74,10 @@ class IpcContractCorpusTest {
     // server.registerHandler calls in DaemonRuntime.start). daemon.status is
     // listed first so its refresh_in_flight:false and idle-enumeration
     // expectations are checked before this test launches a refresh job or an
-    // enumeration; daemon.shutdown is listed last
-    // because it stops the daemon the other verbs are replayed against.
-    private val daemonVerbs = listOf("daemon.status", "sync.subscribe", "refresh.run", "sync.enumerate", "daemon.shutdown")
+    // enumeration; daemon.pause is followed by daemon.resume before any verb a paused daemon would refuse;
+    // daemon.shutdown is listed last because it stops the daemon the other verbs are replayed against.
+    private val daemonVerbs =
+        listOf("daemon.status", "daemon.pause", "daemon.resume", "sync.subscribe", "refresh.run", "sync.enumerate", "daemon.shutdown")
 
     @Test
     fun corpus_covers_every_daemon_ipc_verb() {
@@ -169,6 +170,79 @@ class IpcContractCorpusTest {
                         channel.close()
                     }
                 }
+            }
+        } finally {
+            runtime.close()
+            daemonJob.join()
+            runCatching { tempDir.toFile().deleteRecursively() }
+        }
+    }
+
+    /**
+     * `sessions/pause-cycle.ndjson`: request/reply pairs replayed in order on ONE connection against a live
+     * mount daemon (#778): a pause, the status that shows it, a refused reason, the resume, the status without
+     * it. `events/paused.ndjson` and `events/resumed.ndjson` are the lines the same pause and resume push to a
+     * subscriber, one line each.
+     */
+    @Test
+    fun pause_session_and_events_match_corpus_over_live_socket() = runBlocking {
+        val pairs = loadSession("pause-cycle")
+        val expectedPaused = loadEventLine("paused")
+        val expectedResumed = loadEventLine("resumed")
+        val tempDir = Files.createTempDirectory("ipc-contract-pause-test")
+        val socketPath = tempDir.resolve("daemon.sock")
+        val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
+            profileName = "contract_profile",
+            lockFile = tempDir.resolve(".lock"),
+            dbPath = tempDir.resolve("state.db"),
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+            providerHasQuota = false,
+        )
+        val daemonJob = launch { runtime.start() }
+        try {
+            awaitDaemonSocket(socketPath)
+            val endpoint = IpcEndpoint(socketPath, tempDir, "contract_profile")
+            val subscriber = IpcAuthClient.connect(endpoint, IpcAuth.Scope.FULL)
+            val session = IpcAuthClient.connect(endpoint, IpcAuth.Scope.FULL)
+            try {
+                subscriber.configureBlocking(false)
+                session.configureBlocking(false)
+                subscriber.write(ByteBuffer.wrap(("""{"verb":"sync.subscribe"}""" + "\n").toByteArray()))
+                readFirstLine(subscriber, timeoutMs = 5_000)
+                // sync.subscribe registers after its reply; a request on the same connection comes after that.
+                subscriber.write(ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray()))
+                readFirstLine(subscriber, timeoutMs = 5_000)
+
+                for ((request, expectedReply) in pairs) {
+                    session.write(ByteBuffer.wrap((request + "\n").toByteArray()))
+                    assertJsonMatches(
+                        expected = Json.parseToJsonElement(expectedReply),
+                        actual = Json.parseToJsonElement(readFirstLine(session, timeoutMs = 5_000)),
+                        at = "pause-cycle: reply to $request",
+                    )
+                    val verb = ((Json.parseToJsonElement(request) as JsonObject)["verb"] as JsonPrimitive).content
+                    val accepted = expectedReply.contains("\"ok\":true")
+                    if (verb == "daemon.pause" && accepted) {
+                        assertJsonMatches(
+                            expected = Json.parseToJsonElement(expectedPaused),
+                            actual = Json.parseToJsonElement(readFirstLine(subscriber, timeoutMs = 5_000)),
+                            at = "paused event",
+                        )
+                    }
+                    if (verb == "daemon.resume" && accepted) {
+                        assertJsonMatches(
+                            expected = Json.parseToJsonElement(expectedResumed),
+                            actual = Json.parseToJsonElement(readFirstLine(subscriber, timeoutMs = 5_000)),
+                            at = "resumed event",
+                        )
+                    }
+                }
+            } finally {
+                subscriber.close()
+                session.close()
             }
         } finally {
             runtime.close()
@@ -286,6 +360,24 @@ class IpcContractCorpusTest {
         return lines.single()
     }
 
+    private fun loadSession(name: String): List<Pair<String, String>> {
+        val stream = checkNotNull(javaClass.getResourceAsStream("/ipc-contract/sessions/$name.ndjson")) {
+            "missing session transcript '$name'"
+        }
+        val lines = stream.bufferedReader().readLines().filter { it.isNotBlank() }
+        check(lines.size % 2 == 0) { "sessions/$name.ndjson must hold request/response line pairs, got ${lines.size} lines" }
+        return lines.chunked(2).map { it[0] to it[1] }
+    }
+
+    private fun loadEventLine(name: String): String {
+        val stream = checkNotNull(javaClass.getResourceAsStream("/ipc-contract/events/$name.ndjson")) {
+            "missing event fixture '$name'"
+        }
+        val lines = stream.bufferedReader().readLines().filter { it.isNotBlank() }
+        check(lines.size == 1) { "events/$name.ndjson must hold exactly one line, got ${lines.size}" }
+        return lines.single()
+    }
+
     private fun loadPairs(verb: String): List<Pair<String, String>> {
         val stream = checkNotNull(javaClass.getResourceAsStream("/ipc-contract/$verb.ndjson")) {
             "missing corpus fixture for verb '$verb'"
@@ -364,9 +456,12 @@ class IpcContractCorpusTest {
      * `/cache/unidrive/hydration` → invalid_path.
      */
     private class ScriptedHydration : Hydration {
-        override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult =
-            if (path.startsWith("/missing")) OpenResult.Failed(HydrationError.UnknownPath)
-            else OpenResult.Ok(cachePathFor(path))
+        override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult = when {
+            path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
+            // A cloud download while the daemon is paused: refused at once (#778).
+            path.startsWith("/paused") -> OpenResult.Failed(HydrationError.Paused)
+            else -> OpenResult.Ok(cachePathFor(path))
+        }
 
         override suspend fun openForWrite(connectionId: String, handleId: String, path: String, cachePath: Path, baseEtag: String?): OpenResult =
             when {
@@ -385,9 +480,11 @@ class IpcContractCorpusTest {
 
         override suspend fun cancelUpload(path: String): Boolean = path == "/docs/open.txt"
 
-        override suspend fun hydrate(path: String): HydrateResult =
-            if (path.startsWith("/missing")) HydrateResult.Failed(HydrationError.UnknownPath)
-            else HydrateResult.Ok
+        override suspend fun hydrate(path: String): HydrateResult = when {
+            path.startsWith("/missing") -> HydrateResult.Failed(HydrationError.UnknownPath)
+            path.startsWith("/paused") -> HydrateResult.Failed(HydrationError.Paused)
+            else -> HydrateResult.Ok
+        }
 
         override suspend fun dehydrate(path: String): DehydrateResult = when {
             path.startsWith("/missing") -> DehydrateResult.Failed(HydrationError.UnknownPath)
@@ -544,7 +641,7 @@ class IpcContractCorpusTest {
         // cache.bytes: the cache size is measured off the request path, so right after the start it is
         // either not measured yet (null) or already measured (0 for the empty corpus daemon); the corpus
         // pins that it is a number-or-null literal, not which of the two a fresh daemon shows.
-        private val VOLATILE_FIELDS = setOf("cache_path", "uptime_ms", "clients_connected", "job_id", "engine_version", "bytes")
+        private val VOLATILE_FIELDS = setOf("cache_path", "uptime_ms", "clients_connected", "job_id", "engine_version", "bytes", "since_ms")
         private const val FIXED_MTIME_MS = 1234567890123L
         private const val FIXED_REMOTE_MS = 1234567890000L
     }

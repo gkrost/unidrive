@@ -275,6 +275,7 @@ still leave a remote item; the caller follows with the row-level verb
 | `cancelled` | completed event | upload aborted by hydration.cancel |
 | `similar_name[: <sibling>]` | failed and completed events, `hydration.list` (`blocked`) | the drive compares the entry's name as equal to a sibling's and refused it under its own name and under a server name; the local file is kept, nothing is retried. `: <sibling>` names the conflicting sibling when known |
 | `blocked_by_parent: <path>` | failed and completed events, `hydration.list` (`blocked`) | a folder above the entry was refused by name and exists only in this mount; no request was made for the entry |
+| `paused` | open_read, hydrate (and their `failed` / `completed` events) | the daemon is paused (`daemon.pause`, unidrive-daemon-design.md §4.7) and the file is not in the cache: nothing was started and nothing waits. A file already in the cache is still served. The client asks the user whether to lift the pause, calls `daemon.resume` and sends the request again |
 | `invalid_path` | every verb with a path | a `.` or `..` segment, a control character, an empty segment other than that of a leading or trailing slash, or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder. Refused before anything is changed |
 | `unknown_verb` / `missing_verb` | any | request-level refusal (startup-safe) |
 | `auth_required` / `auth_failed` / `forbidden` | any | not authenticated yet, a refused handshake step, a verb outside the connection's scope ([ipc-authentication.md](ipc-authentication.md)) |
@@ -299,6 +300,8 @@ folder from its own authority — it would desync from the rows.
   sides key-order-insensitive). Lines written without a request live in
   `ipc-contract/connection/<token>.ndjson` (one line each; today
   `too_many_clients`), checked over a live socket by the same test.
+  The pause adds `ipc-contract/sessions/pause-cycle.ndjson` (request/reply pairs on one connection) and
+  `ipc-contract/events/{paused,resumed}.ndjson` (the lines the subscribers read).
 - Connection cap and idle timeout: `IpcServerConnectionLimitsTest`.
 - Sequences (this document §3), at the SPI level against a real
   `HydrationImpl` + engine: the full write sequence and the safe-save

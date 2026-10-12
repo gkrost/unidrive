@@ -115,6 +115,9 @@ internal class MinimalFakeProvider(
     var progressSteps: Int = 0
     var progressPaceMs: Long = 0
 
+    // #778: when set, upload() reports this (done, total) once on entry, before it suspends at [uploadGate].
+    @Volatile var progressBeforeGate: Pair<Long, Long>? = null
+
     // Total upload() invocations (attempt counting for the retry tests) and
     // daemon-wide concurrency tracking for the transfer-cap test.
     private val uploadAttempts = AtomicInteger(0)
@@ -159,9 +162,23 @@ internal class MinimalFakeProvider(
         )
     }
 
+    // #778: a download that has written [partialBytes] and then suspends at [gate] (a transfer in flight
+    // when the daemon is paused). [reached] completes once the partial bytes are on disk.
+    class DownloadStall(val partialBytes: Int) {
+        val gate = CompletableDeferred<Unit>()
+        val reached = CompletableDeferred<Unit>()
+    }
+
+    @Volatile var downloadStall: DownloadStall? = null
+
     override suspend fun download(remotePath: String, destination: Path): Long {
         val content = remoteFiles[remotePath] ?: ByteArray(0)
         Files.createDirectories(destination.parent)
+        downloadStall?.let { stall ->
+            Files.write(destination, content.copyOf(stall.partialBytes))
+            stall.reached.complete(Unit)
+            stall.gate.await()
+        }
         Files.write(destination, content)
         return content.size.toLong()
     }
@@ -203,6 +220,8 @@ internal class MinimalFakeProvider(
         maxConcurrentUploadsTotal.getAndUpdate { prev -> maxOf(prev, totalNow) }
 
         try {
+            // #778: the bytes a transfer in flight has moved when the daemon is paused (done, total).
+            progressBeforeGate?.let { (done, total) -> onProgress?.invoke(done, total) }
             stallGates[remotePath]?.let { holdForStallWatchdog(it, onProgress) }
             uploadGate?.await()
             val bytes = Files.readAllBytes(localPath)
@@ -372,6 +391,9 @@ internal class HydrationTestEnv(
     val syncEngine: SyncEngineFacade
     val hydration: HydrationImpl
 
+    /** #778: the mount's pause gate (the daemon's `daemon.pause` state). */
+    val pause: PauseGate
+
     /** Direct access to the fake provider (upload gate, failure/counters). */
     val providerForTest: MinimalFakeProvider get() = fakeProvider
 
@@ -389,6 +411,7 @@ internal class HydrationTestEnv(
             excludePatterns = excludePatterns,
         )
 
+        pause = MountEngine.over(engine).pause
         tempDir = Files.createDirectories(engine.resolveCachePath("/.test-staging"))
         stateDb = StateDatabaseFacade(db)
         syncEngine = SyncEngineFacade(fakeProvider, engine)
