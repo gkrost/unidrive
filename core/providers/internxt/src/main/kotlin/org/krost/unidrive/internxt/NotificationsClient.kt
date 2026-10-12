@@ -10,8 +10,8 @@ import java.util.concurrent.atomic.AtomicReference
  * Manages the socket.io connection to Internxt's `NOTIFICATIONS_URL` change
  * feed. Each remote-origin frame triggers the supplied [callback] — a coarse
  * "something changed, walk the delta" wake-signal, not authoritative payload.
- * Loopback frames (those carrying our own [InternxtConfig.clientName] as the
- * `clientId`) are dropped silently — they're our own mutations echoing back.
+ * Client product names are shared across installations, so matching `clientId`
+ * values also trigger a hint. Local echoes cause a harmless delta scan.
  *
  * Lifecycle is owned by [InternxtProvider]: constructed (lazily) on
  * authenticate success when a JWT is available, disconnected on `close()`
@@ -61,7 +61,6 @@ import java.util.concurrent.atomic.AtomicReference
  */
 internal class NotificationsClient(
     private val notificationsUrl: String,
-    private val ownClientName: String,
     private val tokenSupplier: suspend (forceRefresh: Boolean) -> String,
     private val onRemoteChange: () -> Unit,
     private val socketFactory: NotificationsSocketFactory = SocketIoNotificationsSocketFactory,
@@ -214,23 +213,7 @@ internal class NotificationsClient(
         }
     }
 
-    /**
-     * Examine the incoming socket.io frame's `clientId`. Three outcomes:
-     *
-     * 1. Parseable JSON object with `clientId == ownClientName`: drop
-     *    silently — this is our own mutation looping back.
-     * 2. Parseable JSON object with any other `clientId`: emit a wake hint.
-     * 3. Anything else (null, non-object, missing `clientId`, parse error):
-     *    treat as a remote event and emit a wake hint — false positives
-     *    just trigger a no-op delta walk, mirroring drive-desktop's
-     *    "anything unrecognised triggers re-sync" policy.
-     */
-    internal fun handleIncomingFrame(raw: Any?) {
-        val clientId = extractClientId(raw)
-        if (clientId != null && clientId == ownClientName) {
-            log.debug("Dropping loopback notification (clientId={})", clientId)
-            return
-        }
+    internal fun handleIncomingFrame(@Suppress("UNUSED_PARAMETER") raw: Any?) {
         safeInvokeCallback()
     }
 
