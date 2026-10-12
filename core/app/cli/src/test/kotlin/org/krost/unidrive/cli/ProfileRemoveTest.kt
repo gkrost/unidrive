@@ -5,6 +5,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.Assume.assumeTrue
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.ProcessLock
 import org.krost.unidrive.sync.SyncConfig
@@ -183,6 +184,7 @@ class ProfileRemoveTest {
         assertEquals(toml(mirrorRoot), kept.getValue("sync_root").jsonPrimitive.content.replace('\\', '/'))
         assertFalse(kept.getValue("state_folder").jsonPrimitive.boolean)
         assertFalse(kept.getValue("credentials").jsonPrimitive.boolean)
+        assertEquals("not touched", kept.getValue("secret_store").jsonPrimitive.content)
 
         assertEquals(setOf("keep"), profiles(), "only the named profile goes")
         assertFalse(Files.exists(goneDir), "the profile folder goes")
@@ -445,6 +447,48 @@ class ProfileRemoveTest {
         assertFalse(Files.exists(goneDir.resolve(".lock")))
         assertEquals(setOf("keep"), profiles())
         assertNoSecret()
+    }
+
+    // ── links and junctions are leaves ──────────────────────────────────────
+
+    /** A folder outside the profile with a file in it, which no removal may touch. */
+    private fun outsideFolder(): Path {
+        val outside = Files.createDirectories(dir.resolve("outside"))
+        Files.writeString(outside.resolve("must-survive.txt"), "keep me")
+        return outside
+    }
+
+    @Test
+    fun `a junction in the profile folder is removed as an entry and its target is left alone`() {
+        assumeTrue("junctions (mklink /J) exist only on Windows", System.getProperty("os.name").lowercase().contains("win"))
+        populate()
+        val outside = outsideFolder()
+        val junction = goneDir.resolve("linked")
+        val made = ProcessBuilder("cmd", "/c", "mklink", "/J", junction.toString(), outside.toString()).redirectErrorStream(true).start()
+        val output = made.inputStream.readBytes().toString(Charsets.UTF_8)
+        assumeTrue("mklink /J is not available here: $output", made.waitFor() == 0 && Files.exists(junction))
+
+        assertEquals(0, run("profile", "remove", "gone", "--yes", "--json"), stderr())
+
+        assertFalse(Files.exists(junction, java.nio.file.LinkOption.NOFOLLOW_LINKS), "the junction itself goes")
+        assertTrue(Files.exists(outside.resolve("must-survive.txt")), "what the junction points to is never touched")
+        assertFalse(Files.exists(goneDir), "the profile folder goes")
+        assertEquals(setOf("keep"), profiles())
+    }
+
+    @Test
+    fun `a symbolic link in the profile folder is removed as an entry and its target is left alone`() {
+        populate()
+        val outside = outsideFolder()
+        val link = goneDir.resolve("linked")
+        val made = runCatching { Files.createSymbolicLink(link, outside) }
+        assumeTrue("symbolic links are not available here", made.isSuccess)
+
+        assertEquals(0, run("profile", "remove", "gone", "--yes", "--json"), stderr())
+
+        assertFalse(Files.exists(link, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+        assertTrue(Files.exists(outside.resolve("must-survive.txt")))
+        assertFalse(Files.exists(goneDir))
     }
 
     // ── no secret in any output ─────────────────────────────────────────────

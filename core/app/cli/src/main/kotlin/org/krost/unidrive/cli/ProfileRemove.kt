@@ -196,25 +196,25 @@ internal object ProfileRemover {
 
             // The IPC tokens and the socket belong to a daemon that is gone: always removed, also with --keep-data.
             for (scope in IpcAuth.Scope.entries) {
-                if (deleteQuietly(IpcAuth.tokenFile(profileDir, scope), warnings)) tokensRemoved = true
+                if (ProfilePurge.deleteQuietly(IpcAuth.tokenFile(profileDir, scope), warnings)) tokensRemoved = true
             }
-            if (deleteQuietly(socket, warnings)) socketRemoved = true
-            deleteQuietly(socket.resolveSibling("${socket.fileName}.meta"), warnings)
+            if (ProfilePurge.deleteQuietly(socket, warnings)) socketRemoved = true
+            ProfilePurge.deleteQuietly(socket.resolveSibling("${socket.fileName}.meta"), warnings)
 
             val present = StoragePermissions.CREDENTIAL_FILES.filter { Files.exists(profileDir.resolve(it), LinkOption.NOFOLLOW_LINKS) }
             if (keepData) {
                 credentialsKept = present.isNotEmpty()
             } else {
-                for (file in present) if (deleteQuietly(profileDir.resolve(file), warnings)) credentialsRemoved = true
+                for (file in present) if (ProfilePurge.deleteQuietly(profileDir.resolve(file), warnings)) credentialsRemoved = true
                 credentialsKept = present.any { Files.exists(profileDir.resolve(it), LinkOption.NOFOLLOW_LINKS) }
-                if (existed) purge(profileDir, ProtectedRoot.of(syncRoot), warnings, isTop = true)
+                if (existed) ProfilePurge.purge(profileDir, ProfilePurge.ProtectedRoot.of(syncRoot), warnings, isTop = true)
             }
         } finally {
             if (guarded) guard.unlock()
         }
         if (!keepData && Files.isDirectory(profileDir)) {
-            deleteQuietly(profileDir.resolve(".lock"), warnings)
-            deleteQuietly(profileDir.resolve(".lock.pid"), warnings)
+            ProfilePurge.deleteQuietly(profileDir.resolve(".lock"), warnings)
+            ProfilePurge.deleteQuietly(profileDir.resolve(".lock.pid"), warnings)
             // Fails quietly while the folder still holds the local root or an entry that could not be deleted.
             runCatching { Files.deleteIfExists(profileDir) }
         }
@@ -244,91 +244,12 @@ internal object ProfileRemover {
                         put("sync_root", syncRoot)
                         put("state_folder", Files.isDirectory(profileDir))
                         put("credentials", credentialsKept)
+                        // Credentials held outside the profile folder (an OS secret store) are not touched.
+                        put("secret_store", "not touched")
                     },
                 )
                 put("warnings", JsonArray(warnings.map { JsonPrimitive(it) }))
             }
         return Result(json, profileDir, profileDirGone)
-    }
-
-    private fun deleteQuietly(
-        path: Path,
-        warnings: MutableList<String>,
-    ): Boolean =
-        try {
-            Files.deleteIfExists(path)
-        } catch (e: IOException) {
-            warnings += "${path.fileName}: could not be deleted (${e.javaClass.simpleName})"
-            false
-        }
-
-    /** The local root that must survive the removal, as a lexical and (when it exists) a resolved path. */
-    private class ProtectedRoot(
-        private val lexical: Path?,
-        private val real: Path?,
-    ) {
-        /** [dir] is the root itself. */
-        fun isRoot(dir: Path): Boolean = matches(dir) { it == lexical || it == real }
-
-        /** [dir] holds the root somewhere below it (or is the root). */
-        fun covers(dir: Path): Boolean =
-            matches(dir) { d -> (lexical?.startsWith(d) ?: false) || (real?.startsWith(d) ?: false) }
-
-        private fun matches(
-            dir: Path,
-            test: (Path) -> Boolean,
-        ): Boolean {
-            val lex = dir.toAbsolutePath().normalize()
-            return test(lex) || runCatching { test(dir.toRealPath()) }.getOrDefault(false)
-        }
-
-        companion object {
-            fun of(syncRoot: String): ProtectedRoot {
-                val lex = runCatching { Path.of(syncRoot).toAbsolutePath().normalize() }.getOrNull()
-                val real = lex?.let { runCatching { it.toRealPath() }.getOrNull() }
-                return ProtectedRoot(lex, real)
-            }
-        }
-    }
-
-    /**
-     * Deletes [path] and everything below it except the protected root and what holds it. Returns true when [path] is gone.
-     * A failed delete is recorded in [warnings] and never aborts the rest. The process lock files of the top
-     * folder are left for the caller, which still holds the lock.
-     */
-    private fun purge(
-        path: Path,
-        root: ProtectedRoot,
-        warnings: MutableList<String>,
-        isTop: Boolean = false,
-    ): Boolean {
-        val isDir = Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
-        if (isDir && root.isRoot(path)) return false
-        if (isDir) {
-            val children =
-                try {
-                    Files.list(path).use { it.toList() }
-                } catch (e: IOException) {
-                    warnings += "state: ${path.fileName}: could not be listed (${e.javaClass.simpleName})"
-                    return false
-                }
-            var all = true
-            for (child in children) {
-                if (isTop && (child.fileName.toString() == ".lock" || child.fileName.toString() == ".lock.pid")) {
-                    all = false
-                    continue
-                }
-                if (!purge(child, root, warnings)) all = false
-            }
-            if (!all || root.covers(path)) return false
-            if (isTop) return false // the caller deletes the folder once the lock is released
-        }
-        return try {
-            Files.deleteIfExists(path)
-            true
-        } catch (e: IOException) {
-            warnings += "state: ${path.fileName}: could not be deleted (${e.javaClass.simpleName})"
-            false
-        }
     }
 }
