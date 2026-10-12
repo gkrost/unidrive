@@ -76,7 +76,7 @@ class OneDriveProvider(
             return graphApi.listChildren(path).filterNot { noteAndSkipVault(it) }.map { it.toCloudItem() }
     }
 
-    override suspend fun getMetadata(path: String): CloudItem = graphApi.getItemByPath(path).toCloudItem()
+    override suspend fun getMetadata(path: String): CloudItem = itemAt(path).toCloudItem()
 
     override suspend fun download(
         remotePath: String,
@@ -106,7 +106,7 @@ class OneDriveProvider(
         remotePath: String,
         destination: Path,
     ): Long {
-        val item = graphApi.getItemByPath(remotePath)
+        val item = itemAt(remotePath)
         return try {
             graphApi.downloadFile(item.id, destination)
         } catch (e: GraphApiException) {
@@ -122,7 +122,7 @@ class OneDriveProvider(
                     "re-resolving the item by path and retrying once",
                 remotePath,
             )
-            val fresh = graphApi.getItemByPath(remotePath)
+            val fresh = itemAt(remotePath)
             graphApi.downloadFile(fresh.id, destination)
         }
     }
@@ -135,6 +135,33 @@ class OneDriveProvider(
 
     private fun GraphApiException.isInvalidRequest(): Boolean =
         statusCode == 400 && message?.contains("\"code\":\"invalidRequest\"") == true
+
+    private fun GraphApiException.isNameAlreadyExists(): Boolean =
+        statusCode == 409 && message?.contains("nameAlreadyExists") == true
+
+    // A name the drive compares as equal to a sibling's although it differs: the file shapes of the refusal say
+    // so ("The specified item name is incompatible with a similar name on an existing item.").
+    private fun GraphApiException.isSimilarName(): Boolean =
+        isNameAlreadyExists() && message?.contains("similar name", ignoreCase = true) == true
+
+    // The item at [path], and only that item. The drive resolves a path with the same name comparison it
+    // applies to siblings, so a lookup of one name can answer its similar sibling: a delete or a move built on it
+    // would act on the wrong file. A resolution to another name is answered as a missing item instead.
+    private suspend fun itemAt(path: String): DriveItem {
+        val item = graphApi.getItemByPath(path)
+        val clean = "/" + path.trim('/')
+        val wanted = clean.substringAfterLast('/')
+        val got = item.name
+        if (wanted.isEmpty() || got == null) return item
+        // The parent the drive reports, when it reports one, must be the parent asked for as well.
+        val actualParent = item.parentReference?.path?.removePrefix("/drive/root:")?.trimEnd('/')
+        val parentMatches = actualParent == null || OneDriveServerNames.sameName(actualParent, clean.substringBeforeLast('/'))
+        if (OneDriveServerNames.sameName(got, wanted) && parentMatches) return item
+        throw GraphApiException(
+            "API error: 404 Not Found - {\"error\":{\"code\":\"itemNotFound\",\"message\":\"'$path' resolved to a different name\"}}",
+            404,
+        )
+    }
 
     override suspend fun upload(
         localPath: Path,
@@ -156,12 +183,41 @@ class OneDriveProvider(
         // A CREATE (existingRemoteId == null) uploads with "fail" so a pre-existing remote at
         // the path is never blind-overwritten (UD-366 data-loss); the create-collision is then
         // resolved by keeping BOTH below.
-        suspend fun put(conflictBehavior: String, etag: String? = null) =
+        suspend fun put(conflictBehavior: String, etag: String? = null, target: String = remotePath) =
             if (fileSize <= 4 * 1024 * 1024) {
                 val content = Files.readAllBytes(localPath)
-                graphApi.uploadSimple(remotePath, content, fsInfo, conflictBehavior, etag)
+                graphApi.uploadSimple(target, content, fsInfo, conflictBehavior, etag)
             } else {
-                graphApi.uploadLargeFile(localPath, remotePath, onProgress, fsInfo, conflictBehavior, etag)
+                graphApi.uploadLargeFile(localPath, target, onProgress, fsInfo, conflictBehavior, etag)
+            }
+
+        // The drive refused the NAME as equal to a sibling's (a similar name; see [OneDriveServerNames]). Keep-both
+        // by `rename` is refused too, so the file lands under a server name that carries an ASCII discriminator
+        // derived from the original name (stable across retries and runs). Created with `fail` like any create:
+        // an existing item of that name is never overwritten. When that is refused as well, the entry is
+        // blocked by name: the exception names the sibling and is not retried.
+        suspend fun landUnderServerName(refused: GraphApiException): CloudItem {
+            val serverPath = serverPathFor(remotePath)
+            log.warn(
+                "OneDrive refuses the name of '{}' as a similar name of an existing sibling; landing the local copy as '{}' " +
+                    "instead (the local name is kept, the mapping is recorded by the engine).",
+                remotePath,
+                serverPath,
+            )
+            return try {
+                put("fail", target = serverPath).toCloudItem().asLanded(serverPath)
+            } catch (e: GraphApiException) {
+                throw if (e.isNameAlreadyExists()) nameRefused(remotePath, e, refused) else e
+            }
+        }
+
+        // The keep-both of a true duplicate (the pre-existing item is preserved, the copy gets a server-assigned name).
+        // The drive can still refuse it as a similar name, which is landed under a server name like any other.
+        suspend fun keepBoth(): CloudItem =
+            try {
+                put("rename").toCloudItem()
+            } catch (renameRefused: GraphApiException) {
+                if (renameRefused.isSimilarName()) landUnderServerName(renameRefused) else throw renameRefused
             }
 
         if (existingRemoteId != null) {
@@ -173,7 +229,7 @@ class OneDriveProvider(
             // engine's stale-view window — see #291 for the plan-time-persistence limitation).
             val guardETag =
                 ifMatchETag
-                    ?: runCatching { graphApi.getItemByPath(remotePath) }.getOrNull()?.eTag
+                    ?: runCatching { itemAt(remotePath) }.getOrNull()?.eTag
             return try {
                 put("replace", guardETag).toCloudItem()
             } catch (e: GraphApiException) {
@@ -192,11 +248,15 @@ class OneDriveProvider(
                     )
                     return put("rename").toCloudItem()
                 }
-                if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
+                if (e.isSimilarName()) {
+                    // The name this update targets is a similar name of another sibling: the update cannot move
+                    // to a server name without breaking the item's identity, so it is blocked by name, not retried.
+                    throw nameRefused(remotePath, e, e)
+                }
+                if (e.isNameAlreadyExists()) {
                     log.warn(
-                        "UD-307: OneDrive rejected '{}' with nameAlreadyExists on a replace — likely a " +
-                            "ZWJ-compound emoji filename or other server-side normalisation collision. " +
-                            "Sync continues; rename the source file to work around.",
+                        "UD-307: OneDrive rejected '{}' with nameAlreadyExists on a replace. Sync continues; " +
+                            "rename the source file to work around.",
                         remotePath,
                     )
                 }
@@ -216,14 +276,16 @@ class OneDriveProvider(
         return try {
             put("fail").toCloudItem()
         } catch (e: GraphApiException) {
-            if (e.statusCode == 409 && e.message?.contains("nameAlreadyExists") == true) {
+            if (e.isSimilarName()) {
+                landUnderServerName(e)
+            } else if (e.isNameAlreadyExists()) {
                 log.warn(
                     "UD-366: create-collision on '{}' — a different remote already exists at this path; " +
                         "preserving it untouched and landing the local copy as a keep-both copy " +
                         "(conflictBehavior=rename) rather than overwriting it.",
                     remotePath,
                 )
-                put("rename").toCloudItem()
+                keepBoth()
             } else if (e.isInvalidRequest()) {
                 throw PermanentUploadFailureException(
                     "OneDrive rejected the upload to '$remotePath' as invalidRequest: ${e.message}",
@@ -238,7 +300,7 @@ class OneDriveProvider(
     override suspend fun delete(remotePath: String, ifMatchETag: String?) {
         val item =
             try {
-                graphApi.getItemByPath(remotePath)
+                itemAt(remotePath)
             } catch (e: GraphApiException) {
                 if (e.statusCode == 404) return // Already deleted
                 throw e
@@ -257,14 +319,106 @@ class OneDriveProvider(
             cleanPath.substringBeforeLast("/", "").let {
                 if (it.isEmpty()) "/" else "/$it"
             }
-        return graphApi.createFolder(name, parent).toCloudItem()
+        return try {
+            graphApi.createFolder(name, parent).toCloudItem()
+        } catch (e: GraphApiException) {
+            if (!e.isNameAlreadyExists()) throw e
+            createRefusedFolder(parent, name, e)
+        }
+    }
+
+    // A folder create answers 409 nameAlreadyExists / "Name already exists" for a true duplicate and for a
+    // similar name alike. Only the parent's listing tells them apart: an exact-name sibling is a true duplicate
+    // (the existing path: the caller sees the 409); none means the drive compares the name as equal to another
+    // sibling's, and the folder lands under a server name with an ASCII discriminator, adopting one that is
+    // already there (a retry after a lost response, or a lost mapping).
+    private suspend fun createRefusedFolder(
+        parent: String,
+        name: String,
+        refused: GraphApiException,
+    ): CloudItem {
+        val siblings = listSiblings(parent)
+        if (siblings == null || siblings.any { it.name != null && OneDriveServerNames.sameName(it.name, name) }) throw refused
+        val serverName = OneDriveServerNames.disambiguate(name)
+        val serverPath = (if (parent == "/") "" else parent) + "/" + serverName
+        log.warn(
+            "OneDrive refuses the folder name '{}/{}' as a similar name of an existing sibling; creating '{}' instead " +
+                "(the local name is kept, the mapping is recorded by the engine).",
+            parent,
+            name,
+            serverName,
+        )
+        return try {
+            graphApi.createFolder(serverName, parent).toCloudItem().asLanded(serverPath)
+        } catch (e: GraphApiException) {
+            serverFolderOrNull(e, parent, serverName, serverPath)
+                ?: throw nameRefused((if (parent == "/") "" else parent) + "/" + name, e, refused, siblings)
+        }
+    }
+
+    // The folder already holding the server name, when the create of it was refused as a duplicate: ours from an
+    // earlier attempt. Anything but a name conflict is not this function's to answer.
+    private suspend fun serverFolderOrNull(
+        refusal: GraphApiException,
+        parent: String,
+        serverName: String,
+        serverPath: String,
+    ): CloudItem? {
+        if (!refusal.isNameAlreadyExists()) throw refusal
+        val taken = listSiblings(parent)?.firstOrNull { it.name != null && OneDriveServerNames.sameName(it.name, serverName) }
+        return taken?.takeIf { it.isFolder }?.toCloudItem()?.asLanded(serverPath)
+    }
+
+    // The children of [parent], or null when they cannot be listed: a classification that needs them then stays as it was.
+    private suspend fun listSiblings(parent: String): List<DriveItem>? =
+        try {
+            graphApi.listChildren(parent)
+        } catch (_: GraphApiException) {
+            null
+        } catch (_: java.io.IOException) {
+            null
+        }
+
+    // The name a landed item has on the server, as a CloudItem the engine can tell from a keep-both copy.
+    private fun CloudItem.asLanded(serverPath: String): CloudItem =
+        copy(path = serverPath, name = serverPath.substringAfterLast('/'), nameOverridden = true)
+
+    private fun serverPathFor(remotePath: String): String {
+        val parent = remotePath.substringBeforeLast('/', "")
+        return parent + "/" + OneDriveServerNames.disambiguate(remotePath.substringAfterLast('/'))
+    }
+
+    // The refusal for [path]: names the sibling the drive treats the name as equal to, when one can be found among
+    // the parent's children by the ASCII part of the names (a message and a status detail, never a decision).
+    private suspend fun nameRefused(
+        path: String,
+        cause: GraphApiException,
+        first: GraphApiException,
+        known: List<DriveItem>? = null,
+    ): NameRefusedException {
+        val parent = path.substringBeforeLast('/', "").ifEmpty { "/" }
+        val name = path.substringAfterLast('/')
+        val siblings = known ?: listSiblings(parent).orEmpty()
+        val mine = OneDriveServerNames.skeleton(name)
+        val sibling =
+            siblings.mapNotNull { it.name }
+                .filter { !OneDriveServerNames.sameName(it, name) && OneDriveServerNames.skeleton(it) == mine }
+                .minOrNull()
+        return NameRefusedException(
+            "OneDrive treats the name of '$path' as identical to ${sibling?.let { "'$it'" } ?: "another item"} in the same folder " +
+                "and refuses it (409 nameAlreadyExists): ${first.message}",
+            reason = NameRefusedException.SIMILAR_NAME,
+            sibling = sibling,
+            cause = cause,
+            requestId = cause.requestId,
+        )
     }
 
     override suspend fun move(
         fromPath: String,
         toPath: String,
     ): CloudItem {
-        val item = graphApi.getItemByPath(fromPath)
+        val item = itemAt(fromPath)
         return graphApi.moveItem(item.id, toPath, fromPath, ifMatchETag = item.eTag).toCloudItem()
     }
 

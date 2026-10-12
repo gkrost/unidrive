@@ -804,6 +804,9 @@ class RemoteGather(
         // merge preserves their real-local path + remote_path. No alias active
         // → both helpers are identity and this is byte-identical to pre-#115.
         val remoteToLocalTop = localTopAliases(remoteChanges)
+        // Folders the drive holds under another name than their local one (a name it refused, landed under a server
+        // name): a NEW item beneath such a folder arrives at the server path and is keyed at the local path.
+        val folderOverrides = db.foldersWithRemotePath().sortedByDescending { it.second.length }
         val changed = java.util.LinkedHashSet<String>()
         val moved = mutableListOf<RemoteMerge.Move>()
         for ((path, item) in remoteChanges) {
@@ -838,7 +841,7 @@ class RemoteGather(
                     continue
                 }
             }
-            val realLocalPath = applyReverseTop(path, remoteToLocalTop)
+            val realLocalPath = applyReverseFolders(path, folderOverrides).takeIf { it != path } ?: applyReverseTop(path, remoteToLocalTop)
             val isAliased = realLocalPath != path
             // Match an existing row by effective remote path (handles aliased
             // rows keyed at their real-local path).
@@ -950,6 +953,20 @@ class RemoteGather(
         const val REMOTE_COLLISIONS_KEY: String = "remote_collisions"
         const val REMOTE_COLLISION_PATHS_KEY: String = "remote_collisions_paths"
         const val COLLISION_PATHS_STATUS_LIMIT: Int = 50
+
+        /**
+         * [path] with the longest remote folder path of [overrides] (local path to remote path, longest remote path first)
+         * that is its ancestor replaced by that folder's local path. [path] itself when none is.
+         */
+        fun applyReverseFolders(
+            path: String,
+            overrides: List<Pair<String, String>>,
+        ): String {
+            for ((local, remote) in overrides) {
+                if (path.startsWith("$remote/")) return local + path.substring(remote.length)
+            }
+            return path
+        }
 
         /** #115: [path] with its canonical top-level folder replaced by the local alias, if any. */
         fun applyReverseTop(

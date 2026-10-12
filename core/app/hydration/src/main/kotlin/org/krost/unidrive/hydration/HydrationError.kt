@@ -121,7 +121,35 @@ sealed interface HydrationError {
         override val message: String = INVALID_PATH_TOKEN
     }
 
+    /**
+     * The drive refuses the entry by its NAME: it compares the name as equal to a sibling's although the two differ
+     * (OneDrive ignores some characters in its uniqueness check), and landing the entry under another name was
+     * refused too. Not transient and not about the content: the upload is not retried, the local file is kept, and the
+     * entry is reported as blocked. The wire form is the STABLE token [reason] (`similar_name`), followed by
+     * `: <sibling>` when the conflicting sibling is known. A client matches the prefix up to ": ".
+     */
+    data class NameRefused(
+        val reason: String,
+        val sibling: String?,
+    ) : HydrationError {
+        override val message: String = if (sibling != null) "$reason: $sibling" else reason
+    }
+
+    /**
+     * The entry waits for a folder above it that the drive refused by name: nothing below that folder can reach the
+     * drive until the folder does, and no request was made for the entry. Wire form: the STABLE token
+     * `blocked_by_parent: <path of the folder>`.
+     */
+    data class BlockedByParent(
+        val parent: String,
+    ) : HydrationError {
+        override val message: String = "$BLOCKED_BY_PARENT_TOKEN: $parent"
+    }
+
     companion object {
+        /** Wire token prefix for [BlockedByParent]. */
+        const val BLOCKED_BY_PARENT_TOKEN = "blocked_by_parent"
+
         /** Wire token for [NotFound]; shared verbatim with the mount crate. */
         const val NOT_FOUND_TOKEN = "not_found"
 
