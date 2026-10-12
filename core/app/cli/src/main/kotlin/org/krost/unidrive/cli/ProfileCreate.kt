@@ -86,7 +86,7 @@ internal object ProfileCreator {
                 // The parser's message can quote the offending config line, which may hold a credential.
                 throw LifecycleError("config_invalid", "config.toml could not be parsed")
             }
-        if (name in raw.providers) {
+        if (raw.providers.keys.any { it.equals(name, ignoreCase = true) }) {
             throw LifecycleError("profile_exists", "profile '$name' already exists")
         }
 

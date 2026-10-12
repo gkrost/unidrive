@@ -160,7 +160,7 @@ class ProfileAddCommand : Callable<Int> {
             } else {
                 SyncConfig.parseRaw("[general]\n")
             }
-        if (name in raw.providers) {
+        if (raw.providers.keys.any { it.equals(name, ignoreCase = true) }) {
             System.err.println("Error: Profile '$name' already exists.")
             System.exit(1)
         }
