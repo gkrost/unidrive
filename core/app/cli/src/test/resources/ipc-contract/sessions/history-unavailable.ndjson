@@ -1,0 +1,4 @@
+{"verb":"history.list"}
+{"ok":false,"error":"history_unavailable","reason":"mirror"}
+{"verb":"history.subscribe"}
+{"ok":false,"error":"history_unavailable","reason":"mirror"}
