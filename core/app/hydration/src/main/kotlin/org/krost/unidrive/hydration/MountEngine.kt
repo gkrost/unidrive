@@ -477,6 +477,53 @@ class MountEngine private constructor(
 
     private fun isNameBlocked(path: String): Boolean = db.nameBlock(path) != null || blockedAncestorOf(path) != null
 
+    // The keep-local branch of [uploadFromCache]: an excluded or ignored path is never uploaded.
+    private fun keepLocal(
+        path: String,
+        cachePath: Path,
+    ): UploadOutcome {
+        log.info("Skipping upload of excluded path (keep-local): {}", path)
+        val inCloud = db.getEntry(path)
+        if (inCloud?.remoteId != null) {
+            // #660: the cloud holds an earlier version. The row keeps that version as its baseline, so the
+            // edit stays owed to the cloud: it is uploaded (the start-up replay's dirty overwrites) once the path
+            // is no longer excluded or ignored, and its cache copy, which is not the baseline, is never evicted.
+            // Recording these bytes as the baseline would make them look like the cloud's and evictable.
+            return UploadOutcome(sent = false, size = Files.size(cachePath), oldHash = null, newHash = null)
+        }
+        // Keep-local files are never uploaded, but the local watermark must still
+        // advance. HydrationImpl.lastSynced() reports localMtime as the watermark,
+        // and the co-daemon's crash-recovery scanner replays open_write for any
+        // cache file whose mtime exceeds it — so without this, every daemon restart
+        // re-replays excluded files forever. remoteId stays null (nothing uploaded).
+        val mtime = Files.getLastModifiedTime(cachePath).toMillis()
+        val size = Files.size(cachePath)
+        db.upsertEntry(
+            inCloud?.copy(
+                localMtime = mtime,
+                localSize = size,
+                isHydrated = true,
+                // #396: new bytes behind this mtime/size; a recorded hash of the old ones is stale.
+                localHash = null,
+                cacheBacked = true,
+            ) ?: SyncEntry(
+                path = path,
+                remoteId = null,
+                remoteHash = null,
+                remoteSize = 0L,
+                remoteModified = null,
+                localMtime = mtime,
+                localSize = size,
+                isFolder = false,
+                isPinned = false,
+                isHydrated = true,
+                lastSynced = Instant.now(),
+                cacheBacked = true,
+            ),
+        )
+        return UploadOutcome(sent = false, size = size, oldHash = null, newHash = null)
+    }
+
     suspend fun uploadFromCache(
         path: String,
         cachePath: Path,
@@ -488,49 +535,7 @@ class MountEngine private constructor(
         onProgress: ((Long, Long) -> Unit)? = null,
     ): UploadOutcome {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
-        if (isExcludedPath(path)) {
-            log.info("Skipping upload of excluded path (keep-local): {}", path)
-            val inCloud = db.getEntry(path)
-            if (inCloud?.remoteId != null) {
-                // #660: the cloud holds an earlier version. The row keeps that version as its baseline, so the
-                // edit stays owed to the cloud: it is uploaded (the start-up replay's dirty overwrites) once the path
-                // is no longer excluded or ignored, and its cache copy, which is not the baseline, is never evicted.
-                // Recording these bytes as the baseline would make them look like the cloud's and evictable.
-                return UploadOutcome(sent = false, size = Files.size(cachePath), oldHash = null, newHash = null)
-            }
-            // Keep-local files are never uploaded, but the local watermark must still
-            // advance. HydrationImpl.lastSynced() reports localMtime as the watermark,
-            // and the co-daemon's crash-recovery scanner replays open_write for any
-            // cache file whose mtime exceeds it — so without this, every daemon restart
-            // re-replays excluded files forever. remoteId stays null (nothing uploaded).
-            val mtime = Files.getLastModifiedTime(cachePath).toMillis()
-            val size = Files.size(cachePath)
-            val existing = inCloud
-            db.upsertEntry(
-                existing?.copy(
-                    localMtime = mtime,
-                    localSize = size,
-                    isHydrated = true,
-                    // #396: new bytes behind this mtime/size; a recorded hash of the old ones is stale.
-                    localHash = null,
-                    cacheBacked = true,
-                ) ?: SyncEntry(
-                    path = path,
-                    remoteId = null,
-                    remoteHash = null,
-                    remoteSize = 0L,
-                    remoteModified = null,
-                    localMtime = mtime,
-                    localSize = size,
-                    isFolder = false,
-                    isPinned = false,
-                    isHydrated = true,
-                    lastSynced = Instant.now(),
-                    cacheBacked = true,
-                ),
-            )
-            return UploadOutcome(sent = false, size = size, oldHash = null, newHash = null)
-        }
+        if (isExcludedPath(path)) return keepLocal(path, cachePath)
         val existingEntry = db.getEntry(path)
             // #319/#301: no row means the file was renamed away, unlinked, or reaped
             // (the remote vanished) while this upload sat queued. The old fallback
