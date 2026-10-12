@@ -335,6 +335,11 @@ data class RawProvider(
     // #463: how often `daemon run` polls the cloud for changes made elsewhere, in seconds. 0 = off.
     // Absent = the default (60). `daemon run --poll-interval` overrides it.
     val daemon_poll_seconds: Int? = null,
+    // #660: also read `.gitignore` files as ignore rules (beside `.unidrive.ignore`). Absent = off.
+    val honor_gitignore: Boolean? = null,
+    // #660: the account's own ignore rules, git syntax, applied at the root (below every rule file, above the
+    // built-in defaults). Not the same as exclude_patterns, which keep their glob syntax and meaning.
+    val ignore_rules: List<String>? = null,
     // S3 credentials
     val bucket: String? = null,
     val region: String? = null,
@@ -476,6 +481,16 @@ data class SyncConfig(
      */
     fun quotaRefreshMs(): Long = quotaRefreshMinutes.toLong() * 60_000L
 
+    /**
+     * #660: the ignore rules of a profile (its `honor_gitignore` and `ignore_rules` keys). The rule files themselves
+     * (`.unidrive.ignore`, `.gitignore` when honoured) are found where the profile keeps its local copy.
+     */
+    fun ignoreSettings(profileName: String): org.krost.unidrive.sync.ignore.IgnoreSettings =
+        org.krost.unidrive.sync.ignore.UploadIgnore.settingsFor(
+            honorGitignore = providers[profileName]?.honorGitignore ?: false,
+            accountRules = providers[profileName]?.ignoreRules ?: emptyList(),
+        )
+
     fun effectiveExcludePatterns(providerId: String): List<String> =
         DEFAULT_EXCLUDE_PATTERNS + globalExcludePatterns + (providers[providerId]?.excludePatterns ?: emptyList())
 
@@ -486,6 +501,8 @@ data class SyncConfig(
         val excludePatterns: List<String> = emptyList(),
         val hydrationCacheMaxBytes: Long? = null,
         val daemonPollSeconds: Int? = null,
+        val honorGitignore: Boolean = false,
+        val ignoreRules: List<String> = emptyList(),
     )
 
     companion object {
@@ -897,6 +914,8 @@ data class SyncConfig(
                         excludePatterns = rp.exclude_patterns ?: emptyList(),
                         hydrationCacheMaxBytes = rp.hydration_cache_max_bytes,
                         daemonPollSeconds = rp.daemon_poll_seconds,
+                        honorGitignore = rp.honor_gitignore ?: false,
+                        ignoreRules = rp.ignore_rules ?: emptyList(),
                     )
                 }
             val pollInt = general.poll_interval ?: 60

@@ -378,6 +378,8 @@ internal class HydrationTestEnv(
     providerId: String = "fake-hydration",
     /** #652: the transfer history the hydration layer records into; null = none. */
     history: org.krost.unidrive.telemetry.TransferHistory? = null,
+    /** #660: the mount's ignore rules (read from this env's cache); null = off. */
+    ignore: org.krost.unidrive.sync.ignore.IgnoreSettings? = null,
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
@@ -393,6 +395,9 @@ internal class HydrationTestEnv(
     val syncEngine: SyncEngineFacade
     val hydration: HydrationImpl
 
+    /** The engine under the hydration layer (the mount's guard, its ignore rules). */
+    val engine: SyncEngine
+
     /** #778: the mount's pause gate (the daemon's `daemon.pause` state). */
     val pause: PauseGate
 
@@ -403,7 +408,7 @@ internal class HydrationTestEnv(
         val db = StateDatabase(dbPath = dbPath, inMemory = true)
         db.initialize()
 
-        val engine = SyncEngine(
+        engine = SyncEngine(
             provider = fakeProvider,
             db = db,
             syncRoot = Files.createTempDirectory("unidrive-hydration-sync"),
@@ -411,6 +416,7 @@ internal class HydrationTestEnv(
             syncPaths = syncPaths,
             standingScope = syncPaths,
             excludePatterns = excludePatterns,
+            mountIgnore = ignore,
         )
 
         pause = MountEngine.over(engine).pause

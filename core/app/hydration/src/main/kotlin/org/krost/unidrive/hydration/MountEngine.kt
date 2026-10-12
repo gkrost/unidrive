@@ -146,7 +146,18 @@ class MountEngine private constructor(
     fun isOutOfScope(path: String): Boolean = guard.isOutOfScope(path)
 
     /** See [RemoteOperationGuard.isExcludedPath]. */
-    fun isExcludedPath(path: String): Boolean = guard.isExcludedPath(path)
+    fun isExcludedPath(
+        path: String,
+        isDir: Boolean = false,
+    ): Boolean = guard.isExcludedPath(path, isDir)
+
+    /** See [RemoteOperationGuard.matchingExcludePattern]. */
+    fun matchingExcludePattern(path: String): String? = guard.matchingExcludePattern(path)
+
+    /** #660: a rule file of the ignore rules was handed over at [path]; see [RemoteOperationGuard.ignoreRuleFileWritten]. */
+    fun ignoreRuleFileWritten(path: String) {
+        if (guard.isIgnoreRuleFile(path)) guard.ignoreRuleFileWritten(path)
+    }
 
     /** See [RemoteOperationGuard.withTransferPermit]. */
     suspend fun <T> withTransferPermit(block: suspend () -> T): T = guard.withTransferPermit(block)
@@ -321,6 +332,8 @@ class MountEngine private constructor(
                 withLocalHash(rebaselined, cachePath, rebaselined.localMtime!!, rebaselined.localSize!!),
             )
             recordProviderContact()
+            // #660: a downloaded rule file is readable now; its folder is no longer held back.
+            ignoreRuleFileWritten(path)
             return cachePath
         } finally {
             runCatching { Files.deleteIfExists(staged) }
@@ -367,6 +380,9 @@ class MountEngine private constructor(
         if (entry.isFolder || entry.remoteId == null || entry.lastErrorAt != null) {
             return CacheDisposition.PROTECTED
         }
+        // #660: the ignore rules are read from the cache copies of their rule files, never downloaded for it; an
+        // evicted rule file would hold its folder back until it is opened again.
+        if (guard.isIgnoreRuleFile(path)) return CacheDisposition.PROTECTED
         val cache = rowCachePath(path) ?: return CacheDisposition.PROTECTED
         return try {
             if (!Files.isRegularFile(cache)) return CacheDisposition.PROTECTED
@@ -474,6 +490,14 @@ class MountEngine private constructor(
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
         if (isExcludedPath(path)) {
             log.info("Skipping upload of excluded path (keep-local): {}", path)
+            val inCloud = db.getEntry(path)
+            if (inCloud?.remoteId != null) {
+                // #660: the cloud holds an earlier version. The row keeps that version as its baseline, so the
+                // edit stays owed to the cloud: it is uploaded (the start-up replay's dirty overwrites) once the path
+                // is no longer excluded or ignored, and its cache copy, which is not the baseline, is never evicted.
+                // Recording these bytes as the baseline would make them look like the cloud's and evictable.
+                return UploadOutcome(sent = false, size = Files.size(cachePath), oldHash = null, newHash = null)
+            }
             // Keep-local files are never uploaded, but the local watermark must still
             // advance. HydrationImpl.lastSynced() reports localMtime as the watermark,
             // and the co-daemon's crash-recovery scanner replays open_write for any
@@ -481,7 +505,7 @@ class MountEngine private constructor(
             // re-replays excluded files forever. remoteId stays null (nothing uploaded).
             val mtime = Files.getLastModifiedTime(cachePath).toMillis()
             val size = Files.size(cachePath)
-            val existing = db.getEntry(path)
+            val existing = inCloud
             db.upsertEntry(
                 existing?.copy(
                     localMtime = mtime,

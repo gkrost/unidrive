@@ -77,7 +77,7 @@ class IpcContractCorpusTest {
     // enumeration; daemon.pause is followed by daemon.resume before any verb a paused daemon would refuse;
     // daemon.shutdown is listed last because it stops the daemon the other verbs are replayed against.
     private val daemonVerbs =
-        listOf("daemon.status", "daemon.pause", "daemon.resume", "sync.subscribe", "refresh.run", "sync.enumerate", "daemon.shutdown")
+        listOf("daemon.status", "daemon.pause", "daemon.resume", "sync.subscribe", "refresh.run", "sync.enumerate", "ignore.explain", "daemon.shutdown")
 
     @Test
     fun corpus_covers_every_daemon_ipc_verb() {

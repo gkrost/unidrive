@@ -23,6 +23,8 @@ import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.telemetry.TransferHistory
+import org.krost.unidrive.sync.ignore.IgnoreSettings
+import org.krost.unidrive.sync.ignore.UploadIgnore
 import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.nio.file.Files
@@ -92,6 +94,9 @@ class DaemonRuntime(
     // reports `unknown`.
     private val credentialHealthCheck: (() -> CredentialHealth)? = null,
     private val credentialHealthTtlMs: Long = 60_000L,
+    // #660: the profile's ignore rules (honor_gitignore, ignore_rules). A mount daemon applies them to its uploads and
+    // reports them (daemon.status `ignore`, ignore.explain); null = off, the built-in excludes stay plain patterns.
+    private val ignoreSettings: IgnoreSettings? = UploadIgnore.settingsFor(honorGitignore = false, accountRules = emptyList()),
     // How a start that loses the profile lock ends the process (a seam for tests, which cannot exit).
     private val exitProcess: (Int) -> Unit = { code -> System.exit(code) },
     // #678: where the startup replay and the cache sweep run their blocking per-record walks.
@@ -231,6 +236,7 @@ class DaemonRuntime(
                 val engine = SyncEngine(
                     provider, db!!, syncRoot = syncRoot, cacheKey = profileName, syncPaths = syncPaths,
                     standingScope = syncPaths, excludePatterns = excludePatterns,
+                    mountIgnore = ignoreSettings.takeIf { profileMode == ProfileMode.MOUNT },
                     uploadInFlight = hydrationLink::hasUploadSlot,
                     viewInvalidationSink = { changedPaths, full, moved ->
                         val cap = HydrationEvent.VIEW_INVALIDATED_PATH_CAP
@@ -563,10 +569,18 @@ class DaemonRuntime(
                         healthJson +
                         ",\"provider_health\":$providerHealth" +
                         ",\"credential_health\":$credentialHealthJson" +
+                        // ignore (#660): present where the ignore rules apply (a mount profile); held_back counts the folders
+                        // whose uploads wait for a rule file that cannot be read.
+                        (engine.uploadIgnore?.let { ",\"ignore\":${ignoreHealthJson(it.heldBack())}" } ?: "") +
                         // paused (#778): present only while the daemon is paused; uploads and quota above keep reporting.
                         (pause.current?.let { ",\"paused\":${it.toJson()}" } ?: "") +
                         "}"
                 }
+
+                // ignore.explain (#660): a read verb; the mount's own rules answer it, so it says what the upload path
+                // decides. A mirror daemon does not apply ignore rules yet.
+                val ignoreHandler = engine.uploadIgnore?.let { IgnoreRpcHandler(it, mount::matchingExcludePattern) }
+                server.registerHandler("ignore.explain") { _, json -> ignoreHandler?.explain(json) ?: wrongModeReply }
 
                 // daemon.pause / daemon.resume (#778): the daemon holds its pause in memory only. A pause stops every
                 // upload, cloud download and cloud enumeration from starting (local writes stay queued, reported as

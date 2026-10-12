@@ -87,6 +87,7 @@ class DaemonRunCommand : Runnable {
             providerFactory = { parent.createProvider() },
             syncPaths = config.syncPaths,
             excludePatterns = config.effectiveExcludePatterns(profile.name),
+            ignoreSettings = config.ignoreSettings(profile.name),
             pollIntervalMs = pollIntervalMs,
             hydrationCacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
             profileMode = mode,
