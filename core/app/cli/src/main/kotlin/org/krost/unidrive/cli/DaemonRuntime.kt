@@ -9,6 +9,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.slf4j.MDCContext
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.authenticateAndLog
 import org.krost.unidrive.hydration.HydrationEvent
 import org.krost.unidrive.hydration.HydrationImpl
@@ -50,6 +51,9 @@ import java.nio.file.Path
  * Phase 2 scope: hydration.* verbs + sync.subscribe wired. refresh.run and
  * daemon.status come in Phase 3.
  */
+// The constructor lists the daemon's seams one by one (tests build it with named arguments); its baseline entry
+// quoted the whole parameter list, so it is suppressed here instead.
+@Suppress("LongParameterList")
 class DaemonRuntime(
     private val profileName: String,
     private val lockFile: Path,
@@ -82,6 +86,11 @@ class DaemonRuntime(
     // #655: whether the provider's quota() reports the account's storage plan (ProviderMetadata
     // hasQuota). False — e.g. localfs — keeps the `quota` field ABSENT from daemon.status.
     private val providerHasQuota: Boolean = true,
+    // #586: the offline credential check behind `credential_health` in daemon.status (`daemon run` passes the provider
+    // factory's), re-run at most once per TTL and never inside a status request. Null = no check can run: the field then
+    // reports `unknown`.
+    private val credentialHealthCheck: (() -> CredentialHealth)? = null,
+    private val credentialHealthTtlMs: Long = 60_000L,
     // How a start that loses the profile lock ends the process (a seam for tests, which cannot exit).
     private val exitProcess: (Int) -> Unit = { code -> System.exit(code) },
     // #678: where the startup replay and the cache sweep run their blocking per-record walks.
@@ -455,6 +464,10 @@ class DaemonRuntime(
                 // reconcile, not the mount-view poll (the poller is constructed above, null on a mirror).
                 poller?.start()
 
+                // credential_health (#586): checked off the request path, so the first status can already carry an answer.
+                val credentialHealth = CredentialHealthMonitor(credentialHealthCheck, credentialHealthTtlMs, serveScope)
+                credentialHealth.refreshAsync()
+
                 // daemon.status verb (spec §4.3). protocol_version is the
                 // additive cross-repo handshake field (IPC_PROTOCOL_VERSION):
                 // co-clients warn/refuse on mismatch instead of failing on a
@@ -494,9 +507,12 @@ class DaemonRuntime(
                         val uploads = h.uploadHealthSnapshot()
                         (uploads?.let { ",\"uploads\":${it.toJson()}" } ?: "") + ",\"cache\":${h.cacheHealth().toJson()}"
                     } ?: ""
-                    val providerHealth = providerHealthJson(
-                        lastProviderContactMs(enumerationStatus.lastSuccessAtMs, mount.lastProviderContactAtMs),
-                    )
+                    val lastContactMs = lastProviderContactMs(enumerationStatus.lastSuccessAtMs, mount.lastProviderContactAtMs)
+                    val providerHealth = providerHealthJson(lastContactMs)
+                    // credential_health (#586): the last offline check, or `expired` at once when the provider rejected the
+                    // credentials after the check (a transfer or an enumeration failed authentication and nothing worked since).
+                    val credentialHealthJson =
+                        credentialHealth.reading().withRejection(mount.authRejectedAtMs, lastContactMs).toJson(System.currentTimeMillis())
                     // mode + capabilities (#603 U4): what this daemon serves, so a client can check the
                     // hosting contract before it sends a verb the profile refuses (additive, read-only).
                     val modeJson = kotlinx.serialization.json.JsonPrimitive(profileMode.wireName).toString()
@@ -531,6 +547,7 @@ class DaemonRuntime(
                         (quotaJson?.let { ",\"quota\":$it" } ?: "") +
                         healthJson +
                         ",\"provider_health\":$providerHealth" +
+                        ",\"credential_health\":$credentialHealthJson" +
                         // paused (#778): present only while the daemon is paused; uploads and quota above keep reporting.
                         (pause.current?.let { ",\"paused\":${it.toJson()}" } ?: "") +
                         "}"

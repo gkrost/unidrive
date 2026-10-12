@@ -113,14 +113,14 @@ open class OneDriveProviderFactory : ProviderFactory {
                     // check below flagged every healthy profile ("[!] ...: 0h").
                     CredentialHealth.Ok
                 else -> {
-                    val hoursRemaining =
-                        java.time.Duration
-                            .between(
-                                java.time.Instant.now(),
-                                java.time.Instant.ofEpochMilli(token.expiresAt),
-                            ).toHours()
+                    val remaining =
+                        java.time.Duration.between(
+                            java.time.Instant.now(),
+                            java.time.Instant.ofEpochMilli(token.expiresAt),
+                        )
+                    val hoursRemaining = remaining.toHours()
                     if (hoursRemaining < 24) {
-                        CredentialHealth.ExpiresIn(hoursRemaining, "${hoursRemaining}h")
+                        CredentialHealth.ExpiresIn(hoursRemaining, "${hoursRemaining}h", remainingMs = remaining.toMillis())
                     } else {
                         CredentialHealth.Ok
                     }

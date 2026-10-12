@@ -139,8 +139,14 @@ sealed class CredentialHealth {
         val message: String,
     ) : CredentialHealth()
 
+    /**
+     * The credential stops working soon. [hours] is the whole hours left (0 = expired already, or under an hour left);
+     * [remainingMs], when the provider knows it, is the exact time left and tells the two apart: positive = still valid,
+     * zero or negative = expired. Null = only [hours] is known (a 0 then means expired).
+     */
     data class ExpiresIn(
         val hours: Long,
         val message: String,
+        val remainingMs: Long? = null,
     ) : CredentialHealth()
 }

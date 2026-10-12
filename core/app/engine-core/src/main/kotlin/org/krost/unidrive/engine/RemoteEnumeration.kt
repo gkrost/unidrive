@@ -1,6 +1,7 @@
 package org.krost.unidrive.engine
 
 import kotlinx.coroutines.CancellationException
+import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.engine.RemoteGather.Companion.applyReverseTop
@@ -131,7 +132,7 @@ class RemoteEnumeration(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            tracker.failed(e.message ?: e.javaClass.simpleName)
+            tracker.failed(e.message ?: e.javaClass.simpleName, authRejected = e is AuthenticationException)
             throw e
         } finally {
             // A no-op once the attempt succeeded or failed; a cancelled one is neither.
@@ -196,7 +197,7 @@ class RemoteEnumeration(
             try {
                 gather.gather(progress = tracker).filterKeys { gather.isTracked(it) }
             } catch (e: ProviderException) {
-                tracker.failed(e.message ?: e.javaClass.simpleName)
+                tracker.failed(e.message ?: e.javaClass.simpleName, authRejected = e is AuthenticationException)
                 recordEnumerateFailureStreak()
                 return EnumerateResult(ok = false, error = e.message)
             }

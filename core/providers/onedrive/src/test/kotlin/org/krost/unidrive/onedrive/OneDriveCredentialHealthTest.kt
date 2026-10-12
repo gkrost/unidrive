@@ -48,5 +48,10 @@ class OneDriveCredentialHealthTest {
             health is CredentialHealth.ExpiresIn,
             "without a refresh token the credential really expires, got: $health",
         )
+        val left = (health as CredentialHealth.ExpiresIn).remainingMs
+        assertTrue(
+            left != null && left in 80 * 60_000L..90 * 60_000L,
+            "the exact time left (about 90 min) tells expiring from expired, got: $left",
+        )
     }
 }

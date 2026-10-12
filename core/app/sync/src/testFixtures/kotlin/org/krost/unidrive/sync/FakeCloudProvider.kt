@@ -73,6 +73,7 @@ class FakeCloudProvider : CloudProvider {
     var deleteFailCount = 0
     var deltaFailCount = 0
     var authFailOnDownload = false
+    var authFailOnUpload = false
     // #110: when true, delta() throws DeltaCursorExpiredException if called
     // with a non-null cursor (simulating an aged-out OneDrive delta cursor),
     // and clears itself after the first throw so the recovery full-enum
@@ -216,6 +217,7 @@ class FakeCloudProvider : CloudProvider {
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
         lastUploadExistingRemoteId = existingRemoteId
+        if (authFailOnUpload) throw AuthenticationException("Token expired")
         if (uploadFailCount > 0) {
             uploadFailCount--
             throw ProviderException("Network timeout on upload")

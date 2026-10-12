@@ -57,6 +57,15 @@ class EnumerationTracker(
     private var lastError: String? = null
     private var nextAttemptAtMs: Long? = null
 
+    /**
+     * When an attempt last failed because the provider rejected the credentials (epoch ms), or null. Not reset by a
+     * success: whoever reads it compares it with the last success, because a rejection older than a success is
+     * history. Kept out of [EnumerationStatus] (the wire object of the enumeration).
+     */
+    @Volatile
+    var authRejectedAtMs: Long? = null
+        private set
+
     /** How long the listing of the running attempt took, frozen at its [saving] transition. */
     private var listingElapsedMs: Long? = null
 
@@ -136,9 +145,16 @@ class EnumerationTracker(
         }
     }
 
-    /** The attempt failed. What it had reached stays visible; [reason] is sanitised. */
-    fun failed(reason: String?) {
+    /**
+     * The attempt failed. What it had reached stays visible; [reason] is sanitised. [authRejected]: the provider
+     * refused the credentials (an authentication failure, after its own token refresh), see [authRejectedAtMs].
+     */
+    fun failed(
+        reason: String?,
+        authRejected: Boolean = false,
+    ) {
         synchronized(lock) {
+            if (authRejected) authRejectedAtMs = clock()
             state = EnumerationStatus.State.FAILED
             attempt = max(attempt, 1)
             lastError = sanitizeError(reason)
