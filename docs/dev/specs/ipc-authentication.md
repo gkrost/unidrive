@@ -89,7 +89,7 @@ Classified by the exact wire string; a verb that is not listed is `admin` (defau
 
 | Class | Verbs |
 |---|---|
-| read | `daemon.status`, `hydration.list`, `hydration.last_synced`, `hydration.subscribe`, `sync.subscribe`, `hydration.open_read` |
+| read | `daemon.status`, `hydration.list`, `hydration.last_synced`, `hydration.subscribe`, `sync.subscribe`, `hydration.open_read`, `metrics.query` |
 | write | `hydration.hydrate`, `hydration.dehydrate`, `hydration.create`, `hydration.open_write`, `hydration.open_write_begin`, `hydration.close_handle`, `hydration.mkdir`, `hydration.unlink`, `hydration.rmdir`, `hydration.rename`, `hydration.cancel`, `sync.enumerate` |
 | admin | `daemon.shutdown`, `daemon.pause`, `daemon.resume`, `refresh.run` |
 
@@ -105,7 +105,7 @@ on another verb than the one checked. `hello` and `hello.proof` after authentica
 triggers after its reply: an observer (a status UI) cannot make the daemon scan the remote. Of the read
 class, only `hydration.open_read` does work: it downloads and caches the file's content, so a front-end that
 only observes must not call it. The other read verbs (`daemon.status`, `hydration.list`,
-`hydration.last_synced`, `sync.subscribe`) answer from state the daemon already holds.
+`hydration.last_synced`, `sync.subscribe`, `metrics.query`) answer from state the daemon already holds.
 
 `IpcContractCorpusTest` keeps the table equal to the contract corpus: every corpus verb has a class and
 the table holds no verb the daemon does not register.

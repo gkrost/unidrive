@@ -1,6 +1,7 @@
 package org.krost.unidrive.onedrive
 
 import io.ktor.client.*
+import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.call.*
 import io.ktor.client.plugins.*
 import io.ktor.client.request.*
@@ -16,6 +17,8 @@ import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.ShareInfo
 import org.krost.unidrive.http.HttpRetryBudget
+import org.krost.unidrive.http.RequestMetricsSink
+import org.krost.unidrive.http.RequestMetricsTap
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.readBoundedErrorBody
@@ -32,19 +35,20 @@ import java.nio.file.StandardOpenOption
 class GraphApiService(
     private val config: OneDriveConfig,
     private val throttleBudget: HttpRetryBudget = HttpRetryBudget(maxConcurrency = 8),
+    // Tests hand in a MockEngine; production lets Ktor pick the engine.
+    engine: HttpClientEngine? = null,
     private val tokenProvider: suspend (forceRefresh: Boolean) -> String,
 ) : AutoCloseable {
     private val log = LoggerFactory.getLogger(GraphApiService::class.java)
 
-    private val httpClient =
-        HttpClient {
-            install(HttpTimeout) {
-                connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
-                socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
-                requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
-            }
-            install(org.krost.unidrive.http.RequestId)
-        }
+    // The seam the daemon attaches its request-attempt recorder to; no sink, no metrics (see attachRequestMetrics).
+    private val requestMetrics = RequestMetricsTap()
+
+    private val httpClient = graphHttpClient(requestMetrics, engine)
+
+    fun attachRequestMetrics(sink: RequestMetricsSink?) {
+        requestMetrics.sink = sink
+    }
 
     private val json = org.krost.unidrive.UnidriveJson
     private val sessionStore = UploadSessionStore(config.tokenPath)

@@ -453,6 +453,10 @@ The namespace verbs that act on the cloud synchronously (`hydration.mkdir`, `unl
 
 **Stop while paused.** `daemon.shutdown` and the signal path behave as before: waiting uploads are cancelled with the serve scope, their rows stay never-uploaded (or keep the cache copy that differs from the row's baseline), and the next start replays them. Nothing is stamped failed.
 
+### 4.8 `metrics.query`
+
+READ class. The per-minute roll-ups of this daemon's provider request attempts (counts, outcome classes, header and total time p50/p95, bytes), read from the profile's `telemetry.db`. A mount daemon records them; a mirror daemon answers `recording:false` and an empty series. No data is an empty series with `has_data:false`, never zeros. The request, the reply, what an attempt is, the retention windows and the byte budget shared with the transfer history are in `request-metrics.md`.
+
 ## 5. Invariants and failure modes
 
 ### 5.1 Invariants

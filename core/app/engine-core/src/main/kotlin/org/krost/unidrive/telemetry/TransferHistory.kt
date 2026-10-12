@@ -115,6 +115,7 @@ class TransferHistory private constructor(
     private val nanoClock: () -> Long,
     private val store: TelemetryStore,
     private val writer: HistoryWriter,
+    private val config: HistoryConfig,
 ) : AuditSink,
     AutoCloseable {
     val stats: HistoryStats
@@ -184,6 +185,19 @@ class TransferHistory private constructor(
 
     internal fun enqueue(row: TransferRow) = writer.offer(row)
 
+    private var metrics: RequestMetricsRecorder? = null
+
+    /**
+     * The request-attempt recorder on this history's file, started on first use and closed with the history. It
+     * shares the history's byte budget ([HistoryConfig.maxBytes]) and gives way to it first.
+     */
+    @Synchronized
+    fun requestMetrics(metricsConfig: RequestMetricsConfig = RequestMetricsConfig()): RequestMetricsRecorder =
+        metrics ?: RequestMetricsRecorder(profile, metricsConfig, config.maxBytes, clock, store).also {
+            it.start()
+            metrics = it
+        }
+
     /** Waits until everything queued so far is written (or dropped). For shutdown and tests, not the hot path. */
     fun flush(timeoutMs: Long = HistoryWriter.DEFAULT_WAIT_MS): Boolean = writer.flush(timeoutMs)
 
@@ -196,14 +210,18 @@ class TransferHistory private constructor(
 
     internal fun fileBytes(): Long = store.fileBytes()
 
+    internal fun attemptCount(): Int = store.attemptCount()
+
     /** Test seam: the process dies; nothing more is written and nothing is finished. */
     internal fun abandon() {
+        synchronized(this) { metrics?.abandon() }
         writer.abandon()
         store.close()
     }
 
     /** Writes what is queued, stops the writer and closes the file. */
     override fun close() {
+        synchronized(this) { metrics?.close() }
         if (writer.close()) store.close()
     }
 
@@ -225,7 +243,7 @@ class TransferHistory private constructor(
             val store = TelemetryStore.open(dbPath, afterOpen)
             val writer = HistoryWriter(profile, config, clock, store)
             writer.start()
-            return TransferHistory(profile, clock, nanoClock, store, writer)
+            return TransferHistory(profile, clock, nanoClock, store, writer, config)
         }
     }
 }

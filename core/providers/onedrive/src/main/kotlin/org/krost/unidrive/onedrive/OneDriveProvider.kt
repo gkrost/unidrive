@@ -67,6 +67,8 @@ class OneDriveProvider(
 
     override suspend fun logout() = tokenManager.logout()
 
+    override fun attachRequestMetrics(sink: org.krost.unidrive.http.RequestMetricsSink?) = graphApi.attachRequestMetrics(sink)
+
     override fun close() {
         oauthService.close()
         graphApi.close()
