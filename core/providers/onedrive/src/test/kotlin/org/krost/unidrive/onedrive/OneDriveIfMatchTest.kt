@@ -143,6 +143,52 @@ class OneDriveIfMatchTest {
         }
 
     @Test
+    fun `keep both after a stale update lands under a server name when rename is refused`() =
+        runTest {
+            val behaviors = mutableListOf<String?>()
+            val name = "g2-c-ꕙ.txt"
+            val serverName = OneDriveServerNames.disambiguate(name)
+            val engine =
+                MockEngine { request ->
+                    when {
+                        request.method == HttpMethod.Put && request.url.encodedPath.endsWith("/content") -> {
+                            val behavior = request.url.parameters["@microsoft.graph.conflictBehavior"]
+                            behaviors += behavior
+                            when (behavior) {
+                                "replace" -> respond(
+                                    """{"error":{"code":"preconditionFailed","message":"etag mismatch"}}""",
+                                    HttpStatusCode.PreconditionFailed,
+                                    jsonHeaders(),
+                                )
+                                "rename" -> respond(
+                                    """{"error":{"code":"nameAlreadyExists","message":"The specified item name is incompatible with a similar name on an existing item."}}""",
+                                    HttpStatusCode.Conflict,
+                                    jsonHeaders(),
+                                )
+                                else -> respond(driveItemJson("landed-id", serverName), HttpStatusCode.OK, jsonHeaders())
+                            }
+                        }
+                        request.method == HttpMethod.Patch ->
+                            respond(driveItemJson("landed-id", serverName), HttpStatusCode.OK, jsonHeaders())
+                        else -> respond("{}", HttpStatusCode.OK, jsonHeaders())
+                    }
+                }
+            val provider = providerWith(engine)
+            val local = Files.createTempFile("ud-stale-similar", ".txt")
+            try {
+                Files.writeString(local, "local edit")
+                val item = provider.upload(local, "/$name", existingRemoteId = "owned-id", ifMatchETag = "stale")
+
+                assertEquals(listOf<String?>("replace", "rename", "fail"), behaviors)
+                assertTrue(item.nameOverridden)
+                assertEquals("/$serverName", item.path)
+            } finally {
+                provider.close()
+                Files.deleteIfExists(local)
+            }
+        }
+
+    @Test
     fun `new upload sends no If-Match and succeeds`() =
         runTest {
             val ifMatchHeaders = mutableListOf<String?>()

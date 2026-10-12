@@ -1,0 +1,144 @@
+## Nested rule files as the discovery layer (IgnoreTree) finds them: which files are read, which directories they
+## apply to, and the re-include limit across files. Every case here runs through both the bare matcher and IgnoreTree.
+## A path that is the directory of a rule file must be asked as a directory (trailing /): it exists on disk.
+
+=== rule-file-inside-a-directory-the-root-excludes
+--- .gitignore
+build/
+--- build/.gitignore
+!*
+--- paths
+build/
+build/a
+build/sub/
+build/sub/b
+
+=== rule-files-are-read-even-when-they-are-themselves-ignored
+--- .gitignore
+.gitignore
+--- sub/.gitignore
+*.tmp
+--- paths
+sub/a.tmp
+a.tmp
+sub/x/a.tmp
+
+=== reinclude-a-directory-below-a-starred-parent-then-a-nested-file
+--- .gitignore
+sub/*
+!sub/keep/
+--- sub/keep/.gitignore
+x
+--- paths
+sub/a
+sub/keep/
+sub/keep/x
+sub/keep/y
+sub/keep/deep/x
+sub/other/x
+
+=== nested-file-excludes-a-directory-deeper-files-cannot-reinclude
+--- a/.gitignore
+b/
+--- a/b/.gitignore
+!c
+--- a/b/c/.gitignore
+!d
+--- paths
+a/b/
+a/b/c/
+a/b/c/d
+a/x/b/
+a/x/b/c
+b/
+
+=== nested-negation-of-a-root-directory-rule
+--- .gitignore
+build/
+--- p/.gitignore
+!build/
+--- paths
+build/
+build/x
+p/build/
+p/build/x
+p/q/build/
+p/q/build/x
+
+=== nested-anchored-doublestar
+--- p/.gitignore
+/**/gen
+a/**/b
+--- paths
+p/gen
+p/x/gen
+gen
+p/a/b
+p/a/x/y/b
+a/b
+p/q/a/b
+
+=== sibling-directories-with-opposite-rules
+--- .gitignore
+*.log
+--- a/.gitignore
+*.log
+--- b/.gitignore
+!*.log
+--- paths
+a/x.log
+b/x.log
+c/x.log
+x.log
+b/c/x.log
+
+=== nested-dir-only-rule-on-files-and-directories
+--- p/.gitignore
+cache/
+--- paths
+p/cache
+p/cache/
+p/cache/x
+p/q/cache/
+cache/
+
+=== deep-file-last-match-within-the-file
+--- a/b/c/.gitignore
+*.txt
+!important.txt
+important.txt
+!*.txt
+secret.txt
+--- paths
+a/b/c/x.txt
+a/b/c/important.txt
+a/b/c/secret.txt
+a/b/c/d/secret.txt
+a/b/secret.txt
+
+=== nested-rule-excludes-the-directory-of-a-deeper-rule-file
+--- .gitignore
+!*
+--- p/.gitignore
+q
+--- p/q/.gitignore
+!r
+--- paths
+p/q/
+p/q/r
+p/x/q
+r
+
+=== vcs-directory-in-a-nested-project
+--- .gitignore
+.hg/
+--- work/proj/.gitignore
+!.hg/
+--- paths
+.hg/
+x/.hg/
+x/.hg/store
+work/proj/.hg/
+work/proj/.hg/store
+work/proj/lib/.hg/
+work/other/.hg/store

@@ -7,7 +7,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.NameRefusedException
 import org.krost.unidrive.PermanentDownloadFailureException
+import org.krost.unidrive.PermanentUploadFailureException
 import org.krost.unidrive.engine.AuditSink
 import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.EnumerationEntryPoint
@@ -20,6 +22,7 @@ import org.krost.unidrive.sync.EnumerateResult
 import org.krost.unidrive.sync.EnumerationStatus
 import org.krost.unidrive.sync.EnumerationTracker
 import org.krost.unidrive.sync.HashVerifier
+import org.krost.unidrive.sync.PathNormalizer
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.model.SyncEntry
 import org.krost.unidrive.telemetry.TransferHandle
@@ -249,7 +252,7 @@ class MountEngine private constructor(
                     // #652: a cold download is a transfer from here on (a warm serve and a refusal for a pause never get here).
                     history?.started()
                     transfer.measuredBy(entry.remoteSize) { runCatching { Files.size(staged) }.getOrDefault(0L) }
-                    Transfers.downloadByIdOrPath(provider, remoteItem, path, staged)
+                    Transfers.downloadByIdOrPath(provider, remoteItem, remotePathOf(path, entry), staged)
                 }
             if (options.verifyIntegrity) {
                 val verified = HashVerifier.verify(staged, entry.remoteHash, algorithm = provider.hashAlgorithm())
@@ -406,6 +409,31 @@ class MountEngine private constructor(
             size
         }
 
+    /**
+     * The path the cloud knows [path] by: the row's own remote path when it has one (an entry the drive refused under
+     * its local name and holds under a server name, or a locale alias), else that of the nearest folder above it that
+     * has one, extended by the rest of the path, else [path] itself. Every operation that talks to the provider about
+     * a path of this mount asks here first.
+     */
+    internal fun remotePathOf(
+        path: String,
+        entry: SyncEntry? = db.getEntry(path),
+    ): String {
+        entry?.remotePath?.let { return it }
+        val nfc = PathNormalizer.nfc(path)
+        val (ancestor, ancestorRemote) = db.remoteAncestor(nfc) ?: return path
+        return ancestorRemote + nfc.substring(ancestor.length)
+    }
+
+    /** The nearest folder above [path] that the drive refused by name, so that nothing below it can exist there. */
+    private fun blockedAncestorOf(path: String): String? = db.blockedAncestor(path)
+
+    private fun requireNotBlockedByParent(path: String) {
+        blockedAncestorOf(path)?.let { throw BlockedByParentException(it) }
+    }
+
+    private fun isNameBlocked(path: String): Boolean = db.nameBlock(path) != null || blockedAncestorOf(path) != null
+
     suspend fun uploadFromCache(
         path: String,
         cachePath: Path,
@@ -463,13 +491,17 @@ class MountEngine private constructor(
             ?: throw IllegalStateException(
                 "uploadFromCache: row for $path vanished while the upload was queued; refusing to recreate it",
             )
+        // A folder above this file was refused by name and exists only here: nothing below it can reach the drive
+        // until the folder does. Said without a request, so a subtree is not asked for file by file.
+        requireNotBlockedByParent(path)
         val prevHash = existingEntry.remoteHash
         val existingRemoteId = existingEntry.remoteId
         // #115: if the existing row is a locale-aliased one, its content lives
         // at the canonical remote path; the FUSE write-back must upload there,
         // not at the alias `path`. Non-aliased rows have remotePath == null →
-        // upload at `path`, byte-identical to pre-#115.
-        val remotePath = existingEntry.remotePath ?: path
+        // upload at `path`, byte-identical to pre-#115. The same holds for a row the
+        // drive holds under a server name, or beneath a folder that is (remotePathOf).
+        val remotePath = remotePathOf(path, existingEntry)
         val sizeForLog = Files.size(cachePath)
         val sent = statBeforeUpload(cachePath)
         // #583: bytes identical to the version the row records, and the cloud still holds that version: there is
@@ -495,13 +527,16 @@ class MountEngine private constructor(
                     )
                     throw e
                 }
+        // Where the item is now: a provider that had to place it under another name says so (nameOverridden), and
+        // the row remembers that name from here on. Any other answer leaves the place it was asked for.
+        val landedRemote = if (result.nameOverridden) result.path else remotePath
         val auditResult = if (unchanged != null) "skipped:unchanged" else "success"
         // #658: only a real transfer is a provider round trip; the skipped-unchanged path made no upload.
         if (unchanged == null) recordProviderContact()
         // Defer the absence sweep's deletion verdict while the delta feed catches up
         // to this just-written remote item (see markRecentlyUploaded). Keyed by the
         // REMOTE path so the absence sweep (remote namespace) matches. Nothing was written when the upload was skipped.
-        if (unchanged == null) markRecentlyUploaded(remotePath)
+        if (unchanged == null) markRecentlyUploaded(landedRemote)
         // #337/#148: the row records the cache copy's stats as they were BEFORE
         // the transfer (same rule as applyUpload). A write landing mid-upload
         // keeps a newer mtime than the recorded watermark, so a later re-upload
@@ -542,6 +577,7 @@ class MountEngine private constructor(
         // copy, always — the bytes that were just sent are the bytes the cache
         // holds, and no local folder copy exists to converge with.
         val uploaded = existing.copy(
+            remotePath = landedRemote.takeIf { it != path },
             remoteId = result.id,
             remoteHash = result.hash,
             remoteSize = result.size,
@@ -636,10 +672,92 @@ class MountEngine private constructor(
      * updated after the provider call succeeds.
      */
     suspend fun createRemoteFolder(path: String): CloudItem {
-        val item = provider.createFolder(path)
-        db.insertFolder(path = path, remoteId = item.id, mtime = item.modified ?: Instant.now())
+        requireNotBlockedByParent(path)
+        val remote = remotePathOf(path)
+        val item = provider.createFolder(remote)
+        // A folder the provider had to place under another name keeps its local name here; the rows beneath it
+        // (a folder refused earlier and created now has local-only children) follow it.
+        val landed = if (item.nameOverridden) item.path else remote
+        val existing = db.getEntry(path)
+        if (existing == null) {
+            db.insertFolder(path = path, remoteId = item.id, mtime = item.modified ?: Instant.now(), remotePath = landed.takeIf { it != path })
+        } else if (existing.remoteId == null) {
+            // The row of a folder that was refused by name and lived only here until now; the upsert also clears its block.
+            db.upsertEntry(
+                existing.copy(
+                    remotePath = landed.takeIf { it != path },
+                    remoteId = item.id,
+                    remoteModified = item.modified ?: Instant.now(),
+                    lastErrorAt = null,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            if (landed != path) db.assignRemotePaths(path, landed)
+        }
         return item
     }
+
+    /**
+     * The drive refuses the folder [path] by its name: it exists only here, so the client can go on filling it. Its
+     * block ([reason], the conflicting [sibling] when known) is what the status reports, and everything beneath it is
+     * blocked by it ([BLOCKED_BY_PARENT]) until [retryBlockedFolders] finds the drive willing.
+     */
+    fun recordBlockedFolder(
+        path: String,
+        reason: String,
+        sibling: String?,
+    ) {
+        if (db.getEntry(path) == null) {
+            db.upsertEntry(
+                SyncEntry(
+                    path = path,
+                    remoteId = null,
+                    remoteHash = null,
+                    remoteSize = 0L,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = true,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+        }
+        if (reason == BLOCKED_BY_PARENT) db.markUploadFailed(path, Instant.now()) else db.markNameBlocked(path, reason, sibling)
+    }
+
+    /**
+     * Asks the drive again for every folder that was refused by name, and then for the local-only folders beneath each
+     * one it now accepts (their files follow through the upload replay). A refusal stays a block. Returns the number
+     * of folders created.
+     */
+    suspend fun retryBlockedFolders(): Int {
+        var created = 0
+        for (blocked in db.blockedRows().filter { it.isFolder }) {
+            if (!retryFolder(blocked.path)) continue
+            created++
+            val below = db.getEntriesByPrefix(blocked.path.trimEnd('/') + "/").filter { it.isFolder && it.remoteId == null }.sortedBy { it.path }
+            for (folder in below) if (retryFolder(folder.path)) created++
+        }
+        return created
+    }
+
+    private suspend fun retryFolder(path: String): Boolean =
+        try {
+            createRemoteFolder(path)
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: NameRefusedException) {
+            db.markNameBlocked(path, e.reason, e.sibling)
+            false
+        } catch (_: BlockedByParentException) {
+            false
+        } catch (e: Exception) {
+            log.warn("retry of the blocked folder {} failed: {}", path, e.message)
+            false
+        }
 
     /**
      * Delete a path on the remote provider and update state.db.
@@ -668,13 +786,18 @@ class MountEngine private constructor(
         // Read before the delete: the folder check below needs the row, and once the
         // row is tombstoned the alive view no longer answers for it.
         val entryBefore = db.getEntry(path)
-        try {
-            provider.delete(path)
-        } catch (e: Exception) {
-            if (isAlreadyGone(e)) {
-                // Remote is already gone; fall through to markDeleted below.
-            } else {
-                throw e
+        // A folder the drive refused by name, or one beneath such a folder, was never created there: the delete is
+        // local, and a lookup by its name could only reach a similar sibling.
+        val neverOnDrive = entryBefore != null && entryBefore.remoteId == null && entryBefore.isFolder && isNameBlocked(path)
+        if (!neverOnDrive) {
+            try {
+                provider.delete(remotePathOf(path, entryBefore))
+            } catch (e: Exception) {
+                if (isAlreadyGone(e)) {
+                    // Remote is already gone; fall through to markDeleted below.
+                } else {
+                    throw e
+                }
             }
         }
         db.markDeleted(path)
@@ -714,8 +837,14 @@ class MountEngine private constructor(
      * both OneDrive and Internxt.
      */
     suspend fun renameRemote(oldPath: String, newPath: String) {
-        provider.move(oldPath, newPath)
+        // The cloud knows both ends by their remote paths: the old one by the row's (or its folder's) server name, the
+        // new one by the destination folder's. A moved item whose new name is an ordinary one drops its server name.
+        val oldRemote = remotePathOf(oldPath)
+        val newRemote = remotePathOf(newPath, entry = null)
+        provider.move(oldRemote, newRemote)
         db.renamePrefix(oldPath, newPath)
+        db.rebaseRemotePaths(oldRemote, newRemote)
+        if (newRemote != newPath) db.assignRemotePaths(newPath, newRemote)
     }
 
     // The remote item at [path], or null only when the provider proves it ABSENT.
@@ -730,7 +859,9 @@ class MountEngine private constructor(
     // OneDrive's GraphApiException.
     suspend fun remoteItemOrNull(path: String): CloudItem? =
         try {
-            provider.getMetadata(path)
+            // An entry the drive refused by name cannot be there under that name, and a lookup by it could only
+            // reach a similar sibling: nothing to probe.
+            if (isNameBlocked(path)) null else provider.getMetadata(remotePathOf(path))
         } catch (e: Exception) {
             if (isAlreadyGone(e) || statusCodeOf(e) == 404 || (e.cause?.let { statusCodeOf(it) } == 404)) {
                 null
@@ -799,3 +930,12 @@ data class UploadOutcome(
     val oldHash: String?,
     val newHash: String?,
 )
+ * A folder above the path was refused by name ([NameRefusedException]) and exists only in this mount, so the drive cannot
+ * take anything below it. Raised without a request to the provider; permanent, so the upload queue does not retry it.
+ */
+class BlockedByParentException(
+    val parent: String,
+) : PermanentUploadFailureException("blocked by the folder $parent, which the drive refuses by name")
+
+/** The reason of an entry that waits for a blocked folder above it; the reason of the folder itself is [NameRefusedException.SIMILAR_NAME]. */
+const val BLOCKED_BY_PARENT = "blocked_by_parent"

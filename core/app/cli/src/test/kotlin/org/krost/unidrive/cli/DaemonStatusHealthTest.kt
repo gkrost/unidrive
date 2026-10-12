@@ -7,6 +7,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -300,6 +301,85 @@ class DaemonStatusHealthTest {
             assertFalse("cache" in s)
             assertNotNull(s["provider_health"], "provider contact is known to every mode")
             assertEquals(JsonNull, s.getValue("provider_health").jsonObject.getValue("last_contact_ms"))
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    // ── entries the drive refuses by their name (uploads.blocked) ──────────────────────────────
+
+    private fun folderRow(path: String) =
+        SyncEntry(
+            path = path,
+            remoteId = null,
+            remoteHash = null,
+            remoteSize = 0L,
+            remoteModified = null,
+            localMtime = null,
+            localSize = null,
+            isFolder = true,
+            isPinned = false,
+            isHydrated = false,
+            lastSynced = Instant.now(),
+        )
+
+    @Test
+    fun `entries blocked by name are listed with their reason, capped, and the rest counted`() = runBlocking {
+        val total = HydrationImpl.BLOCKED_ITEMS_CAP + 11
+        StateDatabase(tempDir.resolve("state.db")).also { db ->
+            db.initialize()
+            db.upsertEntry(folderRow("/x"))
+            db.markNameBlocked("/x", "similar_name", "sibling")
+            for (i in 1..total - 2) db.upsertEntry(localRow("/x/f%03d.txt".format(i), Instant.now()))
+            db.upsertEntry(localRow("/z.txt", Instant.now()))
+            db.markNameBlocked("/z.txt", "similar_name", null)
+            db.close()
+        }
+        val runtime = runtime(FlakyProvider())
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+        try {
+            val uploads = status().getValue("uploads").jsonObject
+            val blocked = uploads.getValue("blocked").jsonObject
+
+            assertEquals(setOf("count", "more", "items"), blocked.keys)
+            assertEquals(total.toLong(), blocked.getValue("count").jsonPrimitive.long)
+            assertEquals(11L, blocked.getValue("more").jsonPrimitive.long)
+            val items = blocked.getValue("items").jsonArray
+            assertEquals(HydrationImpl.BLOCKED_ITEMS_CAP, items.size)
+            val folder = items[0].jsonObject
+            assertEquals("/x", folder.getValue("path").jsonPrimitive.content)
+            assertEquals("similar_name", folder.getValue("reason").jsonPrimitive.content)
+            assertEquals("sibling", folder.getValue("sibling").jsonPrimitive.content)
+            assertEquals(setOf("path", "reason", "sibling"), folder.keys)
+            val child = items[1].jsonObject
+            assertEquals("/x/f001.txt", child.getValue("path").jsonPrimitive.content)
+            assertEquals("blocked_by_parent", child.getValue("reason").jsonPrimitive.content)
+            assertEquals("/x", child.getValue("parent").jsonPrimitive.content)
+            assertEquals(setOf("path", "reason", "parent"), child.keys)
+            assertEquals(total.toLong() - 1, uploads.getValue("pending").jsonPrimitive.long, "the blocked files are still pending uploads")
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    @Test
+    fun `a sibling that is not known is null, not absent`() = runBlocking {
+        StateDatabase(tempDir.resolve("state.db")).also { db ->
+            db.initialize()
+            db.upsertEntry(localRow("/z.txt", Instant.now()))
+            db.markNameBlocked("/z.txt", "similar_name", null)
+            db.close()
+        }
+        val runtime = runtime(FlakyProvider())
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+        try {
+            val item = status().getValue("uploads").jsonObject.getValue("blocked").jsonObject.getValue("items").jsonArray.single().jsonObject
+
+            assertEquals(JsonNull, item.getValue("sibling"))
         } finally {
             runtime.close()
             daemonJob.join()
