@@ -62,6 +62,10 @@ import java.time.Instant
  *    file, a cancelled upload is audited as failed and leaves the row pending. Background work runs
  *    elsewhere: the upload queue in [HydrationImpl]'s `recoveryUploadScope`, the poller in the
  *    daemon's serve scope.
+ *  - **Pause (#778).** [pause] holds the daemon's pause. A cold [ensureHydrated] is refused while it is set
+ *    ([TransferPausedException], answered `paused`), one already downloading is judged by the in-flight rule of
+ *    [PauseGate.abortSlowTransfers]; a warm-cache serve needs no cloud and is unaffected. The uploads wait in
+ *    [HydrationImpl]'s queue; the enumeration is gated by the daemon's handlers and poller.
  *  - **Shutdown order.** This class holds no thread, file or connection to close. The daemon cancels
  *    its serve scope (the poller, the IPC handlers, the hydration event fan-out), then closes the IPC
  *    server, the state database and the process lock, in that order (`DaemonRuntime.cleanup`). The
@@ -100,6 +104,12 @@ class MountEngine private constructor(
     private fun recordProviderContact() {
         lastProviderContactAtMs = System.currentTimeMillis()
     }
+
+    /**
+     * #778: the daemon's pause. A download ([ensureHydrated]) starts only while it is clear, and the upload queue
+     * ([HydrationImpl]) consults the same gate; `daemon.pause` and `daemon.resume` set it. One per front-end.
+     */
+    val pause: PauseGate = PauseGate()
 
     /** See [RemoteOperationGuard.isOutOfScope]. */
     fun isOutOfScope(path: String): Boolean = guard.isOutOfScope(path)
@@ -222,7 +232,14 @@ class MountEngine private constructor(
                 ),
             )
         try {
-            val downloadedSize = Transfers.downloadByIdOrPath(provider, remoteItem, path, staged)
+            // #778: a download starts only while the daemon is not paused; one running when a pause begins is
+            // judged on the bytes the staging file holds so far.
+            val downloadedSize =
+                pause.track(path) { transfer ->
+                    transfer.begin()
+                    transfer.measuredBy(entry.remoteSize) { runCatching { Files.size(staged) }.getOrDefault(0L) }
+                    Transfers.downloadByIdOrPath(provider, remoteItem, path, staged)
+                }
             if (options.verifyIntegrity) {
                 val verified = HashVerifier.verify(staged, entry.remoteHash, algorithm = provider.hashAlgorithm())
                 if (!verified) {

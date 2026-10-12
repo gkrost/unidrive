@@ -17,6 +17,13 @@ class HydrationErrorTest {
         assertEquals("unknown_path", HydrationError.UNKNOWN_PATH_TOKEN)
     }
 
+    // #778: a download refused while the daemon is paused; the front-end asks the user, then resumes and retries.
+    @Test
+    fun `paused carries the stable paused wire token`() {
+        assertEquals("paused", HydrationError.Paused.message)
+        assertEquals("paused", HydrationError.PAUSED_TOKEN)
+    }
+
     @Test
     fun `conflict carries the stable conflict wire token`() {
         assertEquals("conflict", HydrationError.Conflict.message)
@@ -57,6 +64,7 @@ class HydrationErrorTest {
             is HydrationError.RemoteIncomplete -> "remote_incomplete"
             HydrationError.RemoteObjectMissing -> "remote_object_missing"
             HydrationError.InvalidPath -> "invalid_path"
+            HydrationError.Paused -> "paused"
         }
         assertTrue(rendered.startsWith("generic:"))
     }

@@ -150,6 +150,9 @@ class HydrationImpl(
 
     private val log = LoggerFactory.getLogger(HydrationImpl::class.java)
 
+    // #778: the daemon's pause, shared with the downloads of the mount front-end.
+    private val pause: PauseGate = mount.pause
+
     private val _events = MutableSharedFlow<HydrationEvent>(extraBufferCapacity = 64)
     override val events: Flow<HydrationEvent> = _events.asSharedFlow()
 
@@ -731,6 +734,39 @@ class HydrationImpl(
     }
 
     /**
+     * One transfer attempt of an upload, held back by a pause (#778). While the daemon is paused nothing starts:
+     * the attempt waits for the resume, outside the stall watchdog and without holding the queue's waiting slot.
+     * An attempt that was running when a pause began and needed ten seconds or more is aborted
+     * ([PauseGate.abortSlowTransfers]) and waits the same way. Neither is a failure: no row is stamped, no
+     * `failed` goes out, and the retry ladder of [runUploadWithRetries] does not count the attempt.
+     */
+    private suspend fun runWatchedTransferAttempt(
+        path: String,
+        cachePath: Path,
+        baseEtag: String?,
+        onProgress: (Long, Long) -> Unit,
+        onPermitAcquired: () -> Unit,
+    ) {
+        while (true) {
+            if (pause.isPaused) {
+                // Waiting out a pause is not waiting for a transfer: the waiting slot is handed over now, or a long
+                // pause would hold the callers of open_write back at the queue depth.
+                onPermitAcquired()
+                pause.awaitResumed()
+            }
+            try {
+                pause.track(path) { transfer ->
+                    runTrackedTransferAttempt(path, cachePath, baseEtag, onProgress, onPermitAcquired, transfer)
+                }
+                return
+            } catch (_: TransferPausedException) {
+                // The upload is back in the queue: waiting, not failed.
+                _events.emit(HydrationEvent.Queued(path))
+            }
+        }
+    }
+
+    /**
      * One transfer attempt under the stall watchdog (gkrost/unidrive#613): runs the
      * transfer-permit wait and the transfer itself, and cancels both when [uploadStallTimeoutMs]
      * elapses with no byte progress from the provider. The wait for the permit, the provider's
@@ -743,16 +779,23 @@ class HydrationImpl(
      * reports through [onProgress]; a slow transfer that keeps reporting bytes never trips it.
      * [uploadStallTimeoutMs] of 0 or less runs the attempt unwrapped (tests).
      */
-    private suspend fun runWatchedTransferAttempt(
+    private suspend fun runTrackedTransferAttempt(
         path: String,
         cachePath: Path,
         baseEtag: String?,
-        onProgress: (Long, Long) -> Unit,
+        progress: (Long, Long) -> Unit,
         onPermitAcquired: () -> Unit,
+        transfer: PauseGate.Transfer,
     ) {
+        // The pause's in-flight rule reads the bytes the provider reports.
+        val onProgress: (Long, Long) -> Unit = { done, total ->
+            transfer.report(done, total)
+            progress(done, total)
+        }
         if (uploadStallTimeoutMs <= 0) {
             mount.withTransferPermit {
                 onPermitAcquired()
+                transfer.begin()
                 holdingPermit {
                     _events.emit(HydrationEvent.Hydrating(path))
                     mount.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
@@ -783,6 +826,7 @@ class HydrationImpl(
             try {
                 mount.withTransferPermit {
                     onPermitAcquired()
+                    transfer.begin()
                     holdingPermit {
                         _events.emit(HydrationEvent.Hydrating(path))
                         mount.uploadMountWriteFromCache(path, cachePath, baseEtag, kicked)
@@ -2084,9 +2128,12 @@ class HydrationImpl(
     }
 
     // One classification for a failed download, shared by the open_read path and the hydrate verb:
-    // a stored object shorter than the size the drive reports (#536) carries its own token with the
-    // numbers, a genuinely-gone read the not_found token, everything else stays Generic (→ EIO).
+    // a refusal for a pause (#778) carries the paused token, a stored object shorter than the size the
+    // drive reports (#536) carries its own token with the numbers, a genuinely-gone read the not_found
+    // token, everything else stays Generic (→ EIO).
     private fun downloadFailureOf(e: Exception, fallback: String): HydrationError = when {
+        // #778: the daemon is paused (or paused while this download ran): not a failure of the download.
+        e is TransferPausedException -> HydrationError.Paused
         e is RemoteIncompleteDownloadException -> HydrationError.RemoteIncomplete(e.storedBytes, e.declaredBytes)
         e is RemoteObjectMissingDownloadException -> HydrationError.RemoteObjectMissing
         isNotFound(e) -> HydrationError.NotFound
