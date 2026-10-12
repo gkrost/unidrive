@@ -268,8 +268,7 @@ class MountEngine private constructor(
                 pause.track(path) { transfer ->
                     transfer.begin()
                     transfer.measuredBy(entry.remoteSize) { runCatching { Files.size(staged) }.getOrDefault(0L) }
-                    watchingCredentials { Transfers.downloadByIdOrPath(provider, remoteItem, path, staged) }
-                    Transfers.downloadByIdOrPath(provider, remoteItem, remotePathOf(path, entry), staged)
+                    watchingCredentials { Transfers.downloadByIdOrPath(provider, remoteItem, remotePathOf(path, entry), staged) }
                 }
             if (options.verifyIntegrity) {
                 val verified = HashVerifier.verify(staged, entry.remoteHash, algorithm = provider.hashAlgorithm())
