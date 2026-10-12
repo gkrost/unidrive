@@ -170,6 +170,7 @@ class AuthCompleteCommand : Callable<Int> {
     name = "login",
     description = [
         "Sign in to Internxt without a console. The password is read from standard input (first line), " +
+            "or asked for without echo when standard input and output are a terminal; " +
             "never from an argument. Starts no daemon.",
     ],
     mixinStandardHelpOptions = true,
@@ -184,7 +185,7 @@ class AuthLoginCommand : Callable<Int> {
     @Option(names = ["--email"], required = true, description = ["Account e-mail"])
     lateinit var email: String
 
-    @Option(names = ["--password-stdin"], description = ["Read the password from the first line of standard input (required)"])
+    @Option(names = ["--password-stdin"], description = ["Read the password from the first line of standard input, or without echo at a terminal (required)"])
     var passwordStdin: Boolean = false
 
     @Option(names = ["--totp"], description = ["Current two-factor code, when the account has one"])

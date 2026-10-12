@@ -98,6 +98,7 @@ class AuthLifecycleTest {
     @BeforeTest
     fun setUp() {
         dir = Files.createTempDirectory("auth-lifecycle")
+        LifecycleHooks.terminalPassword = { null } // never the developer's own console
         System.setOut(PrintStream(out, true, Charsets.UTF_8))
         System.setErr(PrintStream(err, true, Charsets.UTF_8))
         Files.writeString(
