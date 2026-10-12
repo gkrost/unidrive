@@ -930,6 +930,7 @@ data class UploadOutcome(
     val oldHash: String?,
     val newHash: String?,
 )
+/**
  * A folder above the path was refused by name ([NameRefusedException]) and exists only in this mount, so the drive cannot
  * take anything below it. Raised without a request to the provider; permanent, so the upload queue does not retry it.
  */
