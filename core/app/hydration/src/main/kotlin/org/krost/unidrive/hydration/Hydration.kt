@@ -149,6 +149,9 @@ sealed class ListResult {
         // served from local content that is deliberately never uploaded. Only
         // serialized on the wire when true.
         val excluded: Boolean = false,
+        // Why the drive refuses this entry by its name (`similar_name`), or that it waits for a folder above it that
+        // it refuses (`blocked_by_parent`). Null for every other row; only serialized on the wire when set.
+        val blocked: String? = null,
     )
 }
 

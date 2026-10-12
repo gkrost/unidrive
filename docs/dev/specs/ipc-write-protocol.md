@@ -194,6 +194,17 @@ hydration.rmdir   {path}  -> {"ok":true} | {"ok":false,"error":"path_is_file"} |
 | `view.invalidated` | `{"event":"view.invalidated","paths":[…],"full":…}` | enumeration changed the view; drop readdir/getattr caches |
 | `lost` | `{"event":"lost","since_last":N}` | your queue overflowed; resync from `hydration.list` |
 
+Blocked names: a drive that refuses an entry by its name (OneDrive's uniqueness check ignores some characters, so a
+sibling that differs from an existing one only in such characters is refused) first gets the entry under a stable
+server name, invisible to the client: the local name stays and `hydration.list` shows it as an ordinary synced entry. If that
+is refused too, the entry is *blocked*. A blocked file keeps its bytes and ends with `failed`
+(`error:"similar_name[: <sibling>]"`, `retry_scheduled:false`) and `completed ok:false` with the same error token; a
+blocked folder is **accepted by `mkdir` (`ok:true`)** so the client can fill it, with the same `failed` event, and
+everything created below it ends with `blocked_by_parent: <folder>` without a request to the drive. `hydration.list`
+entries of blocked rows carry `"blocked":"similar_name"` or `"blocked":"blocked_by_parent"` (absent otherwise), next to
+`pending_upload:true` and `error:true`. `daemon.status` summarises them as `uploads.blocked`
+([unidrive-daemon-design.md](unidrive-daemon-design.md) section 4.3). A daemon restart asks the drive again.
+
 Excluded names (`exclude_patterns`): `create`/`open_write` answer
 `{"ok":true,...,"excluded":true}` and the stream carries `skipped` and a
 `completed ok:false error:excluded` — never `hydrating`/`hydrated`. The file
@@ -227,10 +238,10 @@ still leave a remote item; the caller follows with the row-level verb
   (default 3). Every failed attempt stamps the row (`error` flag in
   `hydration.list`, doctor surfacing) and emits `failed` with
   `retry_scheduled:true`; the last attempt emits `retry_scheduled:false`.
-  Two failures are never retried and emit `retry_scheduled:false` at once: a `conflict` (the cloud copy
-  changed under the edit) and an upload whose row or cache copy has vanished while it was queued (renamed away,
-  unlinked, reaped): nothing a later attempt can change, and waiting would keep the path busy to `dehydrate` and
-  replace-`rename`.
+  Failures that are never retried emit `retry_scheduled:false` at once: a `conflict` (the cloud copy
+  changed under the edit), an upload whose row or cache copy has vanished while it was queued (renamed away,
+  unlinked, reaped), and a name the drive refuses (`similar_name`, `blocked_by_parent`, below): nothing a later
+  attempt can change, and waiting would keep the path busy to `dehydrate` and replace-`rename`.
 - **Replay:** state.db rows are the durable queue. At daemon start every
   hydrated file row whose content never reached the cloud is re-enqueued once
   through the same queue — a restart alone drains the backlog with no client
@@ -262,6 +273,8 @@ still leave a remote item; the caller follows with the row-level verb
 | `busy` | dehydrate, replace-rename | an upload is in flight on that path |
 | `excluded` | completed event | keep-local name, never uploaded |
 | `cancelled` | completed event | upload aborted by hydration.cancel |
+| `similar_name[: <sibling>]` | failed and completed events, `hydration.list` (`blocked`) | the drive compares the entry's name as equal to a sibling's and refused it under its own name and under a server name; the local file is kept, nothing is retried. `: <sibling>` names the conflicting sibling when known |
+| `blocked_by_parent: <path>` | failed and completed events, `hydration.list` (`blocked`) | a folder above the entry was refused by name and exists only in this mount; no request was made for the entry |
 | `paused` | open_read, hydrate (and their `failed` / `completed` events) | the daemon is paused (`daemon.pause`, unidrive-daemon-design.md §4.7) and the file is not in the cache: nothing was started and nothing waits. A file already in the cache is still served. The client asks the user whether to lift the pause, calls `daemon.resume` and sends the request again |
 | `invalid_path` | every verb with a path | a `.` or `..` segment, a control character, an empty segment other than that of a leading or trailing slash, or a segment over 255 UTF-16 units; a new name the host's file system cannot hold (create, mkdir, rename); a path whose cache file would lie outside the profile's hydration cache folder. Refused before anything is changed |
 | `unknown_verb` / `missing_verb` | any | request-level refusal (startup-safe) |

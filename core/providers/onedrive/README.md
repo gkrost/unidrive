@@ -9,7 +9,7 @@ Talks to Microsoft Graph v1.0 (`https://graph.microsoft.com/v1.0`) through `Grap
 | `GET /me/drive/root/delta` (+ `@odata.nextLink` / `@odata.deltaLink`) | `getDelta` | Cursor-replay retry on truncated bodies; cursor is opaque, treated as long-lived. |
 | `GET /me/drive/items/{id}/content` and pre-signed `@microsoft.graph.downloadUrl` | `downloadFile` | `downloadUrl` is short-lived (Microsoft: "might expire within minutes"); resolved via `getItemById` immediately before GET, never cached. Azure-CDN closes mid-stream on ~5 % of 1–500 MB files; same-URL retry. |
 | `GET /me/drive/items/{id}` | `getItemById` | Used to refresh `downloadUrl` right before a download. |
-| `GET /me/drive/root:/{path}` and `GET /me/drive/root` | `getItemByPath` | ZWJ-emoji path segments can 409 after correct percent-encoding (Graph normalises composite codepoints differently from the filesystem). |
+| `GET /me/drive/root:/{path}` and `GET /me/drive/root` | `getItemByPath` | Resolves a path with the same name comparison the drive applies to siblings (see "Names the drive compares as equal"), so the provider accepts the answer only when it has exactly the name asked for. |
 | `GET /me/drive/root/children` and `:/{path}:/children` | `listChildren` | Paginated via `@odata.nextLink` with `$top=999`. |
 | `PUT /me/drive/root:/{path}:/content` | `uploadSimple` | ≤4 MiB payloads. |
 | `POST :/createUploadSession` + chunked `PUT` + `GET` (status) | `resolveUploadSession`, `uploadChunkWithRetry` | 10 MiB chunks (multiple of 320 KiB), `UploadSessionStore` persists session URL + expiry across daemon restarts; on 5xx GET session status and trim `currentBytes` to the server-committed offset. `conflictBehavior: replace`. |
@@ -23,6 +23,17 @@ Talks to Microsoft Graph v1.0 (`https://graph.microsoft.com/v1.0`) through `Grap
 | `DELETE /me/drive/items/{id}/permissions/{permId}` | `deletePermission` | |
 | `GET /me/drive/sharedWithMe` | `listSharedWithMe` | Wired but not surfaced through `CloudProvider`. |
 | `POST /subscriptions`, `PATCH`, `DELETE` | webhook lifecycle | |
+
+## Names the drive compares as equal
+
+OneDrive stores a name exactly (no replacement, no normalisation) but judges the uniqueness of siblings on a key that ignores some characters: N'Ko, Tifinagh, Vai, Ethiopic, Adlam, Syriac, Canadian Syllabics and emoji were measured; Cyrillic, Latin (with combining marks) and the other scripts of the golden corpus compare normally, and the full set is not documented. `g-<Tifinagh letter>.txt` and `g-<Vai letter>.txt` are the same name to it, so the second create in a folder is refused with `409 nameAlreadyExists`: "The specified item name is incompatible with a similar name on an existing item." for a file (simple PUT and upload session, whatever the conflict behaviour, so the keep-both `rename` is refused as well) and "Name already exists" for a folder (`POST /children`, no conflict behaviour). A true duplicate (the same name) answers the second shape too.
+
+What the provider does:
+
+- A file refused with "similar name" is created again under a server name with an ASCII discriminator, `name~ud<8 hex>.ext`, the hex being the SHA-256 of the NFC name (`OneDriveServerNames`): the same name every time, so a retry or a second run lands on the same item, and the key is unique because the discriminator is not ignorable. The create still uses `conflictBehavior=fail`; nothing is overwritten. The returned `CloudItem` has `nameOverridden = true` and the server path, and the mount front-end records the difference in the row (`SyncEntry.remotePath`).
+- A refused folder create is told from a true duplicate by listing the parent: an exact-name sibling means a duplicate (the `409` stays as it was); none means a similar name, and the folder is created under the server name, or adopted when it is already there. Its children are addressed beneath it by the mount front-end.
+- When the server name is refused as well, the provider raises `NameRefusedException` (reason `similar_name`, the conflicting sibling when one can be found by the ASCII part of the names). Nothing is retried; the mount blocks the entry and reports it (`daemon.status` `uploads.blocked`).
+- Path lookups (`getMetadata`, `delete`, `move`, download) accept an item only when it has exactly the name asked for (NFC, case-insensitive); a lookup that resolves to a similar sibling reads as "not found", so a delete or a move never reaches the wrong item.
 
 ## Robustness
 

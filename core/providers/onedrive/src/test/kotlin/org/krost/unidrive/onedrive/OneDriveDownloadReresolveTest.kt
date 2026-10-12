@@ -71,9 +71,10 @@ class OneDriveDownloadReresolveTest {
         id: String,
         downloadUrl: String?,
         size: Long = 4,
+        name: String = "f.bin",
     ): String {
         val dl = downloadUrl?.let { ""","@microsoft.graph.downloadUrl":"$it"""" } ?: ""
-        return """{"id":"$id","name":"f.bin","size":$size,"file":{"mimeType":"application/octet-stream"}$dl}"""
+        return """{"id":"$id","name":"$name","size":$size,"file":{"mimeType":"application/octet-stream"}$dl}"""
     }
 
     @Test
@@ -213,14 +214,14 @@ class OneDriveDownloadReresolveTest {
                         url.contains("/me/drive/root:/") -> {
                             getByPathCalls.incrementAndGet()
                             respond(
-                                content = jsonItem("gone-1", "https://cdn.example/gone"),
+                                content = jsonItem("gone-1", "https://cdn.example/gone", name = "gone.bin"),
                                 status = HttpStatusCode.OK,
                                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
                             )
                         }
                         url.contains("/me/drive/items/gone-1") && !url.endsWith("/content") -> {
                             respond(
-                                content = jsonItem("gone-1", "https://cdn.example/gone"),
+                                content = jsonItem("gone-1", "https://cdn.example/gone", name = "gone.bin"),
                                 status = HttpStatusCode.OK,
                                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
                             )

@@ -64,6 +64,8 @@ class HydrationErrorTest {
             is HydrationError.RemoteIncomplete -> "remote_incomplete"
             HydrationError.RemoteObjectMissing -> "remote_object_missing"
             HydrationError.InvalidPath -> "invalid_path"
+            is HydrationError.NameRefused -> "name_refused"
+            is HydrationError.BlockedByParent -> "blocked_by_parent"
             HydrationError.Paused -> "paused"
         }
         assertTrue(rendered.startsWith("generic:"))
@@ -73,5 +75,15 @@ class HydrationErrorTest {
     fun `invalid path carries the stable invalid_path wire token`() {
         assertEquals("invalid_path", HydrationError.InvalidPath.message)
         assertEquals("invalid_path", HydrationError.INVALID_PATH_TOKEN)
+    }
+
+    // The drive refuses an entry by its name: the stable token, then the sibling when it is known. A client matches the
+    // prefix up to ": ".
+    @Test
+    fun `name refused carries the stable similar_name token and the sibling when known`() {
+        assertEquals("similar_name", HydrationError.NameRefused("similar_name", null).message)
+        assertEquals("similar_name: sibling.txt", HydrationError.NameRefused("similar_name", "sibling.txt").message)
+        assertEquals("blocked_by_parent: /a/b", HydrationError.BlockedByParent("/a/b").message)
+        assertEquals("blocked_by_parent", HydrationError.BLOCKED_BY_PARENT_TOKEN)
     }
 }

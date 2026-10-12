@@ -26,4 +26,10 @@ data class CloudItem(
     // file removal. [accessRevoked] is only set by OneDriveProvider; all other
     // providers and construction sites leave it at the safe default of false.
     val accessRevoked: Boolean = false,
+    // The provider stored the item under a different name than the one asked for, because the drive
+    // refuses that name (OneDrive: a name it compares as equal to a sibling's). [path] and [name] are where
+    // and as what it landed. The engine records the difference in the row (SyncEntry.remotePath) so the
+    // local name stays and later operations address the item under its server name. False for every item a
+    // caller did not ask to place under another name, and for a keep-both copy named by the server.
+    val nameOverridden: Boolean = false,
 )

@@ -371,6 +371,23 @@ A provider that rejects the credentials turns the state to `expired` without wai
 
 **The `paused` object** (additive; see §4.7) is present only while the daemon is paused: `"paused": {"reason": "metered", "since_ms": 1700000000000, "auto": true}`. A status line must show it instead of "up to date". `capabilities` lists `pause` on an engine that has the verbs.
 
+**`uploads.blocked`** (additive; the protocol version does not change). Some drives refuse an entry by its *name*, whatever its bytes: OneDrive stores names exactly but compares siblings on a key that ignores some characters (N'Ko, Tifinagh, Vai, Ethiopic, Adlam, Syriac, emoji, ...), so a second sibling that differs from an existing one only in such characters is refused. The engine first lands such an entry on the drive under a stable server name (an ASCII discriminator derived from the original name) and keeps the local name; only when that is refused too is the entry blocked, which is what this object reports. The object is **present only while something is blocked**; absent means nothing is.
+
+```json
+"uploads": {"pending": 12, "in_flight": 0, "failed": 12, "oldest_pending_age_ms": 600000,
+  "blocked": {"count": 21, "more": 0, "items": [
+    {"path": "/african/x", "reason": "similar_name", "sibling": "y"},
+    {"path": "/african/x/a.txt", "reason": "blocked_by_parent", "parent": "/african/x"}]}}
+```
+
+| field | meaning |
+|---|---|
+| `blocked.count` | every blocked entry: those the drive refused (`similar_name`) and everything waiting for a blocked folder above it (`blocked_by_parent`, folders and files, as far as they exist only in this mount). Files among them are also counted in `uploads.pending` and `uploads.failed` |
+| `blocked.items` | the first 50 by path; each has `path`, `reason`, and `sibling` (`similar_name`: the name it conflicts with, `null` when the engine could not tell) or `parent` (`blocked_by_parent`: the blocked folder it waits for) |
+| `blocked.more` | `count` minus the items listed |
+
+Nothing blocked is retried in a loop. The refusal is not repeated per file: a blocked folder is asked once, and the files below it are reported `blocked_by_parent` without a request. A daemon restart asks again (the sibling may be gone); an accepted folder unblocks its subtree. The local files are never touched.
+
 ### 4.4 `sync.subscribe` (existing, unchanged semantics)
 
 The verb stays registered on the daemon's `IpcServer` with the same `scheduleAfterReply` post-reply hook mechanism (β) the `SyncCommand` uses today. On the daemon side, the only events emitted are refresh-progress events (the daemon has no reconcile loop). On the `SyncCommand` side today, the same verb emits sync-progress events. Both implementations honor the same subscriber-set contract; the event source differs by which IPC server the client connects to.

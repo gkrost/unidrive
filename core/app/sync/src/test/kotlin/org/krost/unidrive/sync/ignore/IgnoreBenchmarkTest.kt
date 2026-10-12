@@ -190,6 +190,90 @@ class IgnoreBenchmarkTest {
         assertTrue(sink >= 0)
     }
 
+    /**
+     * The same synthetic tree, now through [IgnoreTree]: the rules are split over a root `.unidrive.ignore` (IDE and
+     * OS) and one `.unidrive.ignore` per project (build output, dependencies, secrets), plus the built-in content
+     * defaults, and the walk prunes on [IgnoreTree.explainEntry]. Three walks: the first scan (every directory
+     * probed, every rule file parsed), a second scan after [IgnoreTree.revalidate] with nothing changed (probes,
+     * no parsing), and a third after one project's file changed (exactly that file parsed again).
+     */
+    @Test
+    fun oneMillionPathsThroughDiscoveryWithPruning() {
+        val rootRules = rules.lines().filter { it.startsWith(".idea") || it.startsWith("*.iml") || it.startsWith(".vscode") || it.startsWith("!.vscode") || it in setOf(".DS_Store", "Thumbs.db", "*~", "*.swp") }
+        val projectRules = rules.lines().filterNot { it in rootRules }
+        val files = HashMap<String, String>()
+        files[".unidrive.ignore"] = rootRules.joinToString("\n", postfix = "\n")
+        for (p in 0 until 2_000) files["services/svc$p/.unidrive.ignore"] = projectRules.joinToString("\n", postfix = "\n")
+        val src = MemoryIgnoreSource(files)
+        val tree = IgnoreTree(src)
+        val target = 1_000_000
+
+        // Warm-up on a separate tree, so the measured first scan is cold for its own caches but not for the JIT.
+        val warm = IgnoreTree(MemoryIgnoreSource(files))
+        repeat(2) { Tree(200_000) { p, d -> !warm.explainEntry(p, d).ignored }.run() }
+
+        val baseTree = Tree(target) { p, _ -> p.length > 0 }
+        val tBase = time { baseTree.run() }
+        // The same rules in one flat matcher (no discovery): what the rule count alone costs.
+        val flat =
+            IgnoreMatcher(
+                listOf(
+                    IgnoreRules.parse(rules, source = ".unidrive.ignore"),
+                    IgnoreRules.parse(IgnoreDefaults.CONTENT.joinToString("\n"), source = IgnoreDefaults.DEFAULT_SOURCE),
+                ),
+            )
+        Tree(200_000) { p, d -> !flat.explainEntry(p, d).ignored }.run()
+        val flatTree = Tree(target) { p, d -> !flat.explainEntry(p, d).ignored }
+        val tFlat = time { flatTree.run() }
+
+        fun scan(): Pair<Tree, Long> {
+            var ignored = 0
+            val t =
+                Tree(target) { p, d ->
+                    val v = tree.explainEntry(p, d)
+                    if (v.ignored) ignored++
+                    !v.ignored
+                }
+            val ms = time { t.run() }
+            assertTrue(ignored > 0)
+            return t to ms
+        }
+
+        val (first, tFirst) = scan()
+        val readsFirst = src.totalReads
+        val probesFirst = src.totalProbes
+        tree.revalidate()
+        val (_, tSecond) = scan()
+        val readsSecond = src.totalReads - readsFirst
+        src.put("services/svc0/.unidrive.ignore", projectRules.joinToString("\n", postfix = "\n") + "docs/\n")
+        tree.revalidate()
+        val (third, tThird) = scan()
+        val readsThird = src.totalReads - readsFirst - readsSecond
+
+        val projects = files.keys.count { k -> src.reads.containsKey(k) } - 1
+        val report =
+            buildString {
+                appendLine("discovery: root file ${rootRules.size} rules + one file per project ${projectRules.size} rules + ${IgnoreDefaults.CONTENT.size} content defaults; JDK ${System.getProperty("java.version")}, ${Runtime.getRuntime().availableProcessors()} cpus")
+                appendLine("generator only: ${baseTree.entries} paths in $tBase ms")
+                appendLine("same rules in one flat matcher, no discovery: ${flatTree.entries} paths, ${flatTree.pruned} directories pruned, $tFlat ms")
+                appendLine("first scan (cold caches): ${first.entries} paths, ${first.pruned} directories pruned, $projects projects, $readsFirst rule files parsed, $probesFirst probes, $tFirst ms")
+                appendLine("second scan (revalidate, nothing changed): $readsSecond rule files parsed, $tSecond ms")
+                appendLine("third scan (one project file changed): $readsThird rule files parsed, ${third.pruned} directories pruned, $tThird ms")
+                appendLine("matcher + discovery time (minus generator): first ${tFirst - tBase} ms, second ${tSecond - tBase} ms, third ${tThird - tBase} ms")
+            }
+        println(report)
+        val out = Paths.get("build", "reports", "ignore-discovery-benchmark.txt")
+        Files.createDirectories(out.parent)
+        Files.writeString(out, report)
+
+        assertTrue(first.entries >= target && first.pruned > 0)
+        assertEquals(projects + 1, readsFirst, "each rule file parsed once in the first scan")
+        assertEquals(0, readsSecond, "nothing parsed again when nothing changed")
+        assertEquals(1, readsThird, "only the changed file parsed again")
+        assertTrue(third.pruned > first.pruned, "the new docs/ rule prunes more")
+        assertTrue(tFirst < 30_000 && tSecond < 30_000, "1 M paths must take seconds: first $tFirst ms, second $tSecond ms")
+    }
+
     private fun time(block: () -> Unit): Long {
         val t0 = System.nanoTime()
         block()

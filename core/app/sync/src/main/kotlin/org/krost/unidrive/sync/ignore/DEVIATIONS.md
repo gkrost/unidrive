@@ -1,10 +1,11 @@
 # Ignore matcher: conformance with git, and the deviations
 
 `org.krost.unidrive.sync.ignore` implements the pattern rules of `.gitignore` as a library: `IgnoreRules` (one parsed
-rule file), `IgnoreMatcher` (layers, ancestor rule, `explain`) and `GlobPattern` (one compiled pattern). It is a
-clean-room implementation: written from the published `gitignore` documentation and glob(7), with `git check-ignore`
-used only as a black box (the oracle below). Nothing in the engine calls it yet; the existing `Reconciler.matchesGlob`
-is untouched.
+rule file), `IgnoreMatcher` (layers, ancestor rule, `explain`), `GlobPattern` (one compiled pattern) and
+`IgnoreTree` (discovery of the rule files of a sync root, layering with the defaults, caching; its precedence is in
+`docs/dev/specs/ignore-layering-design.md`). It is a clean-room implementation: written from the published `gitignore`
+documentation and glob(7), with `git check-ignore` used only as a black box (the oracle below). Nothing in the engine
+calls it yet; the existing `Reconciler.matchesGlob` is untouched.
 
 ## The oracle
 
@@ -12,7 +13,11 @@ is untouched.
 `core/app/sync/src/test/resources/ignore-oracle/*.cases` (rule files plus path lists, format in `IgnoreCorpus.kt`)
 through `git check-ignore --stdin -z -v -n --no-index` in a throwaway repository and compares, for every path, the
 winning rule (file, line number, text) with `IgnoreMatcher.explain`. It does this with `core.ignorecase` off and on, and
-once more with the NFC option against git run on NFC-normalised inputs.
+once more with the NFC option against git run on NFC-normalised inputs. Every case is also run through `IgnoreTree`
+(the files found by discovery from an in-memory source, with no content defaults, since git has none): once as
+`.gitignore` files with the opt-in on, once renamed to `.unidrive.ignore`. Both must give git's answer, apart from the
+file name. `11-discovery.cases` holds the nested-file cases: rule files inside excluded directories, rule files that
+are themselves ignored, re-includes across files.
 
 - Reference: **git 2.55.0**, built from its release tag in CI (`.github/actions/pinned-git`). Zero differences required.
 - Drift detector: **git 2.43.0** (Ubuntu 24.04), same corpus, informational. Cases that pin newer behaviour carry
@@ -42,10 +47,32 @@ Every example the documentation will advertise (IG-6) must be a case in `09-docs
 4. **Only the rule files you hand over exist.** Not read, by design (epic decisions): `.git/info/exclude`, the global
    excludes file, `core.excludesFile`. No index: git ignores only untracked files, this matcher answers for every
    path, so tracked-file behaviour is not claimed.
-5. **`.git` is not special here.** The overridable default for `.git` directories belongs to the layering work.
-   (The oracle corpus uses `.hg` where a literal `.git` would make git itself refuse to look inside.)
-6. **No limits.** git has none worth naming for patterns; the size and count caps for rule files belong to the
-   discovery layer, not to the matcher.
+5. **`.git` is not special in the matcher.** The overridable default for `.git` lives in `IgnoreTree` (below). (The
+   oracle corpus uses `.hg` where a literal `.git` would make git itself refuse to look inside.)
+6. **No limits in the matcher.** git has none worth naming for patterns; the size cap for rule files is
+   `IgnoreTree`'s (below).
+
+## What `IgnoreTree` adds on top of git, deliberately
+
+The layers are specified in `docs/dev/specs/ignore-layering-design.md`; these are the points where the result differs
+from `git check-ignore` on the same tree.
+
+1. **Content defaults** (`IgnoreDefaults.CONTENT`): `.git`, `.svn`, `.hg`, `.bzr` and desktop, OS and editor junk are
+   excluded with no rule file at all. git excludes nothing by default (it skips its own `.git` by other means). They are
+   the lowest layer, so any rule re-includes them (`!.git`). The oracle runs with them switched off.
+2. **`.gitignore` is opt-in** per account. With the opt-in off, `.gitignore` files are not even probed.
+3. **`.unidrive.ignore`** is read in every directory, with git's per-directory semantics. In one directory it beats
+   `.gitignore`; a deeper `.gitignore` beats a shallower `.unidrive.ignore` (deepest wins, whatever the file name).
+4. **Account rules** sit between the defaults and the rule files: git's nearest equivalent, `core.excludesFile`, is
+   not read (decision 4 above).
+5. **Operational rules** (`/.unidrive-trash`, `/.unidrive-versions`) cannot be overridden by any rule.
+6. **An unreadable or oversized rule file holds back its directory's contents** (fail closed): a rule that is not
+   applied could upload what the user meant to keep local. This is a policy of our own, not taken from git. A
+   symbolic link is not followed and counts as absent, as `gitignore(5)` documents for `.gitignore`.
+7. **Rule files are decoded as UTF-8.** Bytes that are not UTF-8 become U+FFFD; git compares the raw bytes.
+8. **Rule-file lookup follows the file system**: whether `Sub/.unidrive.ignore` is found for `sub/x` is the file
+   system's answer (yes on NTFS, no on a case-sensitive one). The oracle's in-memory source is case-sensitive, so the
+   corpus never spells a rule-file directory in two cases.
 
 ## Where this implementation is git, even where git is surprising
 
