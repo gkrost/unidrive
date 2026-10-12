@@ -390,6 +390,7 @@ class DaemonRuntimeTest {
                     """{"verb":"sync.subscribe"}""",
                     """{"verb":"refresh.run"}""",
                     """{"verb":"sync.enumerate"}""",
+                    """{"verb":"ignore.explain","path":"/startup/build/out.o"}""",
                     // No handler exists for this verb; the client must still learn that.
                     """{"verb":"daemon.statusx"}""",
                     """{"verb":"daemon.shutdown"}""",
