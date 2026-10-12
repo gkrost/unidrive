@@ -22,6 +22,10 @@ class TransferHandle internal constructor(
     private var startedNanos: Long? = null
     private var finished = false
 
+    /** True once [started] was called: a row for this transfer exists and needs its [finish]. */
+    val hasStarted: Boolean
+        @Synchronized get() = startedNanos != null
+
     /** The transfer permit was acquired: the queue wait ends, the transfer time starts. */
     @Synchronized
     fun started() {
@@ -49,7 +53,8 @@ class TransferHandle internal constructor(
     }
 
     /**
-     * The logical transfer ended. A success or a failure counts the final attempt; a skip made none.
+     * The logical transfer ended. A success or a failure counts the final attempt; a skip made none,
+     * and neither did an end where [attempted] is false (refused before any request, cancelled while queued).
      * [errorClass] and [message] replace the last failed attempt's when given.
      */
     @Synchronized
@@ -60,13 +65,14 @@ class TransferHandle internal constructor(
         message: String? = null,
         oldHash: String? = null,
         newHash: String? = null,
+        attempted: Boolean = result != TransferResult.SKIPPED,
     ) {
         require(result != TransferResult.RUNNING) { "a finished transfer is not running" }
         if (finished) return
         finished = true
         val nowNanos = history.nanoNow()
         val started = startedNanos
-        val attempted = if (result == TransferResult.SKIPPED) 0 else 1
+        val made = if (attempted) 1 else 0
         row =
             row.copy(
                 finishedAt = history.wallNow(),
@@ -75,7 +81,7 @@ class TransferHandle internal constructor(
                 result = result,
                 errorClass = if (errorClass != null) HistorySanitizer.errorClass(errorClass) else row.errorClass,
                 errorMessage = if (message != null) HistorySanitizer.message(message) else row.errorMessage,
-                attempts = (row.attempts ?: 0) + attempted,
+                attempts = (row.attempts ?: 0) + made,
                 oldHash = oldHash ?: row.oldHash,
                 newHash = newHash ?: row.newHash,
             )

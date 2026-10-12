@@ -26,6 +26,7 @@ import org.krost.unidrive.sync.HashVerifier
 import org.krost.unidrive.sync.PathNormalizer
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.model.SyncEntry
+import org.krost.unidrive.telemetry.TransferHandle
 import org.slf4j.Logger
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -207,11 +208,19 @@ class MountEngine private constructor(
      * #318: the whole check+download runs under a per-path mutex. Concurrent
      * opens of the same path must not double-download, and a re-download must
      * never truncate a cache file another handle is reading.
+     *
+     * #652: [history] is the transfer being recorded. It is started only when a cold download really begins (a warm
+     * serve, and a refusal for a pause, never start it); the caller finishes it with the outcome.
      */
-    suspend fun ensureHydrated(path: String): Path =
-        hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock { ensureHydratedLocked(path) }
+    suspend fun ensureHydrated(
+        path: String,
+        history: TransferHandle? = null,
+    ): Path = hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock { ensureHydratedLocked(path, history) }
 
-    private suspend fun ensureHydratedLocked(path: String): Path {
+    private suspend fun ensureHydratedLocked(
+        path: String,
+        history: TransferHandle?,
+    ): Path {
         val entry = db.getEntry(path)
             ?: throw IllegalArgumentException("Unknown remote path: $path")
         val cachePath = resolveCachePath(path)
@@ -267,6 +276,8 @@ class MountEngine private constructor(
             val downloadedSize =
                 pause.track(path) { transfer ->
                     transfer.begin()
+                    // #652: a cold download is a transfer from here on (a warm serve and a refusal for a pause never get here).
+                    history?.started()
                     transfer.measuredBy(entry.remoteSize) { runCatching { Files.size(staged) }.getOrDefault(0L) }
                     watchingCredentials { Transfers.downloadByIdOrPath(provider, remoteItem, remotePathOf(path, entry), staged) }
                 }
@@ -459,7 +470,7 @@ class MountEngine private constructor(
         // that don't need it leave it null (the sync-progress reporter below
         // always runs).
         onProgress: ((Long, Long) -> Unit)? = null,
-    ) {
+    ): UploadOutcome {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
         if (isExcludedPath(path)) {
             log.info("Skipping upload of excluded path (keep-local): {}", path)
@@ -494,7 +505,7 @@ class MountEngine private constructor(
                     cacheBacked = true,
                 ),
             )
-            return
+            return UploadOutcome(sent = false, size = size, oldHash = null, newHash = null)
         }
         val existingEntry = db.getEntry(path)
             // #319/#301: no row means the file was renamed away, unlinked, or reaped
@@ -586,7 +597,7 @@ class MountEngine private constructor(
                 newHash = result.hash,
                 result = auditResult,
             )
-            return
+            return UploadOutcome(sent = unchanged == null, size = size, oldHash = prevHash, newHash = result.hash)
         }
         // #319: `existing` is non-null here (the vanished-row case returns above),
         // so the upload rebaselines the row that owns the bytes instead of
@@ -618,6 +629,7 @@ class MountEngine private constructor(
             newHash = result.hash,
             result = auditResult,
         )
+        return UploadOutcome(sent = unchanged == null, size = size, oldHash = prevHash, newHash = result.hash)
     }
 
     /**
@@ -666,7 +678,7 @@ class MountEngine private constructor(
         cachePath: Path,
         baseToken: String?,
         onProgress: ((Long, Long) -> Unit)? = null,
-    ) = uploadFromCache(
+    ): UploadOutcome = uploadFromCache(
         path = path,
         cachePath = cachePath,
         ifMatchETag = if (provider.id == "onedrive") null else baseToken,
@@ -934,6 +946,18 @@ class MountEngine private constructor(
  */
 enum class CacheDisposition { PROTECTED, DISPOSABLE }
 
+/**
+ * What [MountEngine.uploadFromCache] did, for the transfer history: [sent] is false when no byte left the
+ * machine (the cloud already held these bytes, or the path is keep-local); [size] is the cache copy's size,
+ * [oldHash] the version the row recorded before and [newHash] the one the cloud reports now. A value the
+ * upload did not learn is null.
+ */
+data class UploadOutcome(
+    val sent: Boolean,
+    val size: Long?,
+    val oldHash: String?,
+    val newHash: String?,
+)
 /**
  * A folder above the path was refused by name ([NameRefusedException]) and exists only in this mount, so the drive cannot
  * take anything below it. Raised without a request to the provider; permanent, so the upload queue does not retry it.

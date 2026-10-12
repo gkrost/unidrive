@@ -30,6 +30,10 @@ import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.MountHost
 import org.krost.unidrive.sync.PathNormalizer
 import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.telemetry.TransferDirection
+import org.krost.unidrive.telemetry.TransferHandle
+import org.krost.unidrive.telemetry.TransferHistory
+import org.krost.unidrive.telemetry.TransferResult
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
@@ -90,6 +94,9 @@ class HydrationImpl(
     // #493: a row whose last upload attempt failed is replayed this much after the start instead of at once, so work
     // that can succeed (and the client's fresh writes) goes first. 0 = replay at once, as before.
     private val failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
+    // #652: where finished transfers are recorded (the daemon opens it per mount profile); null = no history.
+    // The history never fails or slows a transfer: every call on it only hands a snapshot to its writer queue.
+    private val history: TransferHistory? = null,
 ) : Hydration {
 
     /** Test seam to hold a startup cache scan in flight and verify cancellation between entries. */
@@ -132,6 +139,7 @@ class HydrationImpl(
         evictionDelayMs: Long = EVICTION_DELAY_MS,
         evictionMinIntervalMs: Long = EVICTION_MIN_INTERVAL_MS,
         failedReplayDelayMs: Long = DEFAULT_FAILED_REPLAY_DELAY_MS,
+        history: TransferHistory? = null,
     ) : this(
         MountEngine.over(syncEngine),
         stateDb,
@@ -146,6 +154,7 @@ class HydrationImpl(
         evictionDelayMs,
         evictionMinIntervalMs,
         failedReplayDelayMs,
+        history,
     )
 
     private val log = LoggerFactory.getLogger(HydrationImpl::class.java)
@@ -344,6 +353,8 @@ class HydrationImpl(
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         touch(path)
+        // #652: a cold read is a download in the history; a warm serve never starts the handle, so it leaves no row.
+        val tx = history?.begin(TransferDirection.DOWNLOAD, path, bytesTotal = entry.remoteSize.takeIf { it > 0 })
 
         val cachePath = try {
             // Always emit Hydrating + Hydrated, even when MountEngine returns a warm cache
@@ -351,7 +362,7 @@ class HydrationImpl(
             // regardless of cache state; the cache layer is an implementation detail of
             // MountEngine, not part of the Hydration SPI contract.
             _events.emit(HydrationEvent.Hydrating(path))
-            val p = mount.ensureHydrated(path)
+            val p = mount.ensureHydrated(path, tx)
             val bytes = java.nio.file.Files.size(p)
             accountCacheFile(path, bytes)
             // Re-read the row after hydration: ensureHydrated persists the freshly
@@ -371,6 +382,7 @@ class HydrationImpl(
                     "incomplete hydration for $path: cached $bytes of ${current.remoteSize} bytes",
                 )
             }
+            tx.endDownload(bytes)
             _events.emit(HydrationEvent.Hydrated(path, bytes))
             _events.emit(
                 HydrationEvent.Completed(
@@ -388,6 +400,7 @@ class HydrationImpl(
             // than the size the drive reports (#536) is not a gone file: its own
             // token carries the numbers. Any other failure stays Generic (→ EIO).
             val err: HydrationError = downloadFailureOf(e, fallback = "download failed")
+            tx.endDownloadFailed(e)
             _events.emit(HydrationEvent.Failed(path, err))
             _events.emit(
                 HydrationEvent.Completed(
@@ -537,6 +550,9 @@ class HydrationImpl(
         handleId: String,
         baseEtag: String?,
     ) {
+        // #652: the logical transfer starts being queued here (the wait for a waiting slot is queue time); nothing is
+        // written until it gets a transfer permit or ends.
+        val tx = history?.begin(TransferDirection.UPLOAD, path, bytesTotal = runCatching { Files.size(cachePath) }.getOrNull())
         _events.emit(HydrationEvent.Queued(path))
         queueSlots.acquire()
         // Atomically create-or-get the slot and bump its pending count. The bin lock
@@ -578,7 +594,7 @@ class HydrationImpl(
                     slot.mutex.withLock {
                         try {
                             ensureActive()
-                            completed = runUploadWithRetries(path, cachePath, handleId, baseEtag, onProgress) {
+                            completed = runUploadWithRetries(path, cachePath, handleId, baseEtag, onProgress, tx) {
                                 if (waitingSlotHeld) {
                                     queueSlots.release()
                                     waitingSlotHeld = false
@@ -596,6 +612,8 @@ class HydrationImpl(
                     // while queued, mid-transfer, or in a retry backoff: the
                     // handle's correlation must end with a cause, not hang.
                     // tryEmit — a cancelled coroutine can no longer suspend.
+                    // #652: neither a success nor a failure: the row, if the transfer had started, ends interrupted.
+                    tx?.finish(TransferResult.INTERRUPTED, errorClass = "cancelled", attempted = tx.hasStarted)
                     _events.tryEmit(
                         HydrationEvent.Completed(
                             path = path,
@@ -644,6 +662,7 @@ class HydrationImpl(
         handleId: String,
         baseEtag: String?,
         onProgress: (Long, Long) -> Unit,
+        tx: TransferHandle?,
         onPermitAcquired: () -> Unit,
     ): HydrationEvent.Completed {
         // #493: the provider refused exactly these bytes before; asking again would be refused again.
@@ -651,13 +670,22 @@ class HydrationImpl(
             val err = HydrationError.Generic("refused earlier: $reason")
             _events.emit(HydrationEvent.Failed(path, err, retryScheduled = false))
             log.info("upload of {} not attempted: the provider refused this content before ({})", path, reason)
+            tx?.finish(TransferResult.FAILED, errorClass = "refused_earlier", message = reason, attempted = false)
             return HydrationEvent.Completed(path = path, handleId = handleId, direction = HydrationEvent.Completed.Direction.UPLOAD, ok = false, error = err)
         }
         var lastError: HydrationError = HydrationError.Generic("upload failed")
+        var lastFailure: Exception? = null
         for (attempt in 1..maxUploadAttempts) {
             try {
-                runWatchedTransferAttempt(path, cachePath, baseEtag, onProgress, onPermitAcquired)
+                val outcome = runWatchedTransferAttempt(path, cachePath, baseEtag, onProgress, tx, onPermitAcquired)
                 val bytes = Files.size(cachePath)
+                // #652: identical bytes the cloud already holds are a skipped transfer; nothing moved, so no byte count.
+                tx?.finish(
+                    if (outcome.sent) TransferResult.SUCCESS else TransferResult.SKIPPED,
+                    bytesDone = if (outcome.sent) outcome.size ?: bytes else null,
+                    oldHash = outcome.oldHash,
+                    newHash = outcome.newHash,
+                )
                 _events.emit(HydrationEvent.Hydrated(path, bytes))
                 return HydrationEvent.Completed(
                     path = path,
@@ -675,6 +703,7 @@ class HydrationImpl(
                 runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
                 _events.emit(HydrationEvent.Failed(path, HydrationError.Conflict, retryScheduled = false))
                 log.warn("upload of {} hit a remote conflict, not retrying: {}", path, e.message ?: "conflict")
+                tx?.finish(TransferResult.CONFLICT, errorClass = e.javaClass.simpleName, message = e.message)
                 return HydrationEvent.Completed(
                     path = path,
                     handleId = handleId,
@@ -708,6 +737,7 @@ class HydrationImpl(
                 val err = HydrationError.Generic(e.message ?: "upload refused")
                 _events.emit(HydrationEvent.Failed(path, err, retryScheduled = false))
                 log.warn("upload of {} refused by the provider, not retrying: {}", path, e.message ?: "upload refused")
+                tx?.finish(TransferResult.FAILED, errorClass = e.javaClass.simpleName, message = e.message)
                 return HydrationEvent.Completed(
                     path = path,
                     handleId = handleId,
@@ -724,6 +754,7 @@ class HydrationImpl(
                 val gone = runCatching { stateDb.getEntry(path) }.getOrNull() == null || !Files.exists(cachePath)
                 val err = HydrationError.Generic(e.message ?: "upload failed")
                 lastError = err
+                lastFailure = e
                 val retryScheduled = !gone && attempt < maxUploadAttempts
                 _events.emit(HydrationEvent.Failed(path, err, retryScheduled = retryScheduled))
                 if (retryScheduled) {
@@ -731,6 +762,8 @@ class HydrationImpl(
                         "upload attempt {}/{} failed for {}: {}; retrying",
                         attempt, maxUploadAttempts, path, e.message,
                     )
+                    // #652: one logical transfer; the failed attempt is counted on its row, not a row of its own.
+                    tx?.attemptFailed(e.javaClass.simpleName, e.message)
                     delay(retryDelayMs(attempt))
                 } else if (gone) {
                     log.warn("upload of {} abandoned: its row or cache copy is gone ({}), not retrying", path, e.message)
@@ -743,6 +776,11 @@ class HydrationImpl(
                 }
             }
         }
+        tx?.finish(
+            TransferResult.FAILED,
+            errorClass = lastFailure?.javaClass?.simpleName ?: "upload_failed",
+            message = lastFailure?.message,
+        )
         return HydrationEvent.Completed(
             path = path,
             handleId = handleId,
@@ -764,8 +802,9 @@ class HydrationImpl(
         cachePath: Path,
         baseEtag: String?,
         onProgress: (Long, Long) -> Unit,
+        tx: TransferHandle?,
         onPermitAcquired: () -> Unit,
-    ) {
+    ): UploadOutcome {
         while (true) {
             if (pause.isPaused) {
                 // Waiting out a pause is not waiting for a transfer: the waiting slot is handed over now, or a long
@@ -774,10 +813,9 @@ class HydrationImpl(
                 pause.awaitResumed()
             }
             try {
-                pause.track(path) { transfer ->
-                    runTrackedTransferAttempt(path, cachePath, baseEtag, onProgress, onPermitAcquired, transfer)
+                return pause.track(path) { transfer ->
+                    runTrackedTransferAttempt(path, cachePath, baseEtag, onProgress, tx, onPermitAcquired, transfer)
                 }
-                return
             } catch (_: TransferPausedException) {
                 // The upload is back in the queue: waiting, not failed.
                 _events.emit(HydrationEvent.Queued(path))
@@ -803,24 +841,25 @@ class HydrationImpl(
         cachePath: Path,
         baseEtag: String?,
         progress: (Long, Long) -> Unit,
+        tx: TransferHandle?,
         onPermitAcquired: () -> Unit,
         transfer: PauseGate.Transfer,
-    ) {
+    ): UploadOutcome {
         // The pause's in-flight rule reads the bytes the provider reports.
         val onProgress: (Long, Long) -> Unit = { done, total ->
             transfer.report(done, total)
             progress(done, total)
         }
         if (uploadStallTimeoutMs <= 0) {
-            mount.withTransferPermit {
+            return mount.withTransferPermit {
                 onPermitAcquired()
                 transfer.begin()
+                tx?.started()
                 holdingPermit {
                     _events.emit(HydrationEvent.Hydrating(path))
                     mount.uploadMountWriteFromCache(path, cachePath, baseEtag, onProgress)
                 }
             }
-            return
         }
         // Every provider progress callback kicks the watchdog; conflated so a
         // kick landing while the watcher is between receives is never lost. The
@@ -830,7 +869,7 @@ class HydrationImpl(
             kicks.trySend(Unit)
             onProgress(done, total)
         }
-        coroutineScope {
+        return coroutineScope {
             val watcher = launch {
                 while (true) {
                     try {
@@ -846,6 +885,7 @@ class HydrationImpl(
                 mount.withTransferPermit {
                     onPermitAcquired()
                     transfer.begin()
+                    tx?.started()
                     holdingPermit {
                         _events.emit(HydrationEvent.Hydrating(path))
                         mount.uploadMountWriteFromCache(path, cachePath, baseEtag, kicked)
@@ -1536,15 +1576,18 @@ class HydrationImpl(
     override suspend fun hydrate(path: String): HydrateResult {
         if (!resolvesInsideCache(path)) return HydrateResult.Failed(HydrationError.InvalidPath)
         touch(path)
+        val tx = history?.begin(TransferDirection.DOWNLOAD, path, bytesTotal = stateDb.getEntry(path)?.remoteSize?.takeIf { it > 0 })
         return try {
             _events.emit(HydrationEvent.Hydrating(path))
-            val cachePath = mount.ensureHydrated(path)
+            val cachePath = mount.ensureHydrated(path, tx)
             val bytes = java.nio.file.Files.size(cachePath)
+            tx.endDownload(bytes)
             accountCacheFile(path, bytes)
             _events.emit(HydrationEvent.Hydrated(path, bytes))
             HydrateResult.Ok
         } catch (e: Exception) {
             val err = downloadFailureOf(e, fallback = "hydrate failed")
+            tx.endDownloadFailed(e)
             _events.emit(HydrationEvent.Failed(path, err))
             HydrateResult.Failed(err)
         }
@@ -2223,6 +2266,22 @@ class HydrationImpl(
         // #728: a client that wrote through the mount and died without closing its handles never
         // reaches closeHandle: pick the sizes up here, while the paths are still known.
         openSets.remove(connectionId)?.values?.forEach { accountCacheFileOnDisk(it) }
+    }
+
+    // #652: the end of a download's logical transfer. A read served from the cache, and a cold read refused for a pause
+    // before it began, never started their handle and leave no row. A download the pause aborted ends interrupted: the
+    // client reads again later, which is a new transfer.
+    private fun TransferHandle?.endDownload(bytes: Long) {
+        if (this != null && hasStarted) finish(TransferResult.SUCCESS, bytesDone = bytes)
+    }
+
+    private fun TransferHandle?.endDownloadFailed(e: Exception) {
+        if (this == null || !hasStarted) return
+        when (e) {
+            is TransferPausedException -> finish(TransferResult.INTERRUPTED, errorClass = "paused")
+            is CancellationException -> finish(TransferResult.INTERRUPTED, errorClass = "cancelled")
+            else -> finish(TransferResult.FAILED, errorClass = e.javaClass.simpleName, message = e.message)
+        }
     }
 
     // One classification for a failed download, shared by the open_read path and the hydrate verb:

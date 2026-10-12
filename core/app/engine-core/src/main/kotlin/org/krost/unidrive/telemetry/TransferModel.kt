@@ -31,6 +31,8 @@ enum class TransferDirection(
 /**
  * How a logical transfer ended. [RUNNING] is a row that was started and not finished yet; the next
  * open of the store turns every such row into [INTERRUPTED], so a crash is never read as a success.
+ * [INTERRUPTED] also ends a transfer that was cancelled, or aborted by a pause: it neither failed nor finished.
+ * [CONFLICT] is an upload the cloud refused because its copy changed since the version the write started from.
  */
 enum class TransferResult(
     val wire: String,
@@ -39,6 +41,7 @@ enum class TransferResult(
     SUCCESS("success"),
     FAILED("failed"),
     SKIPPED("skipped"),
+    CONFLICT("conflict"),
     INTERRUPTED("interrupted"),
     ;
 
