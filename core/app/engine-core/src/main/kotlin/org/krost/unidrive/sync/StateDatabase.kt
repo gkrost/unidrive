@@ -277,7 +277,8 @@ class StateDatabase(
                     last_error_at        TEXT,
                     local_hash           TEXT,
                     cache_backed         INTEGER,
-                    upload_refused       TEXT
+                    upload_refused       TEXT,
+                    name_block           TEXT
                 )
             """,
             )
@@ -436,6 +437,30 @@ class StateDatabase(
                     "ALTER TABLE sync_entries ADD COLUMN upload_refused TEXT",
                 )
             }
+            // The drive refuses this entry by its NAME (it compares the name as equal to a sibling's), as
+            // `<reason>|<sibling name or empty>`: see [markNameBlocked]. Same additive pattern, no schema_version bump:
+            // NULL = not blocked, which is every older row. Any upsert of the row (INSERT OR REPLACE) clears it, a
+            // successful upload or a folder created at last included.
+            if (!columnExists("sync_entries", "name_block")) {
+                stmt.executeUpdate(
+                    "ALTER TABLE sync_entries ADD COLUMN name_block TEXT",
+                )
+            }
+            // The rows that carry a remote path of their own (the server name of an entry the drive refused under its
+            // local name) and the rows blocked by name are few, and every mount operation asks for the nearest ancestor
+            // of its path among them. Partial indexes keep that question proportional to those rows, not to the table.
+            stmt.executeUpdate(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sync_entries_remote_path_set
+                    ON sync_entries(remote_path) WHERE status='EXISTS' AND remote_path IS NOT NULL
+            """,
+            )
+            stmt.executeUpdate(
+                """
+                CREATE INDEX IF NOT EXISTS idx_sync_entries_name_block
+                    ON sync_entries(name_block) WHERE status='EXISTS' AND name_block IS NOT NULL
+            """,
+            )
             // Every item a gather brings is looked up by its effective remote path (getEntryByRemotePath), and no
             // other index covers that expression: each lookup scanned the whole table, so saving the first
             // enumeration of a large drive took time quadratic in its size (hours for a few hundred thousand
@@ -939,12 +964,13 @@ class StateDatabase(
      * (CloudItem.modified) stored in the remote_modified column.
      */
     @Synchronized
-    fun insertFolder(path: String, remoteId: String, mtime: java.time.Instant) {
+    fun insertFolder(path: String, remoteId: String, mtime: java.time.Instant, remotePath: String? = null) {
         val existing = getEntry(path)
         if (existing != null) return
         upsertEntry(
             SyncEntry(
                 path = path,
+                remotePath = remotePath,
                 remoteId = remoteId,
                 remoteHash = null,
                 remoteSize = 0L,
@@ -1133,6 +1159,186 @@ class StateDatabase(
                 stmt.setString(1, stamp)
                 stmt.setString(2, path)
                 return stmt.executeUpdate() == 1
+            }
+    }
+
+    /** Why the drive refuses an entry by its name: a stable [reason] token and the conflicting [sibling]'s name when known. */
+    data class NameBlock(
+        val reason: String,
+        val sibling: String?,
+    )
+
+    /** A blocked row, as [blockedRows] reports it. */
+    data class BlockedRow(
+        val path: String,
+        val isFolder: Boolean,
+        val block: NameBlock,
+    )
+
+    /**
+     * Records that the drive refuses the alive row at [pathRaw] by its NAME (it compares the name as equal to a
+     * sibling's although the two differ), and stamps `last_error_at` like any failed upload. Unlike a refused
+     * request ([markUploadRefused]) the refusal says nothing about the content, so it is kept per path and any
+     * upsert of the row (a successful upload, the folder created at last) clears it.
+     */
+    @Synchronized
+    fun markNameBlocked(
+        pathRaw: String,
+        reason: String,
+        sibling: String?,
+        at: Instant = Instant.now(),
+    ): Boolean {
+        beginWrite()
+        val path = PathNormalizer.nfc(pathRaw)
+        conn
+            .prepareStatement(
+                "UPDATE sync_entries SET name_block=?, last_error_at=? WHERE path=? AND status='EXISTS'",
+            ).use { stmt ->
+                stmt.setString(1, "$reason|${sibling ?: ""}")
+                stmt.setString(2, at.toString())
+                stmt.setString(3, path)
+                return stmt.executeUpdate() == 1
+            }
+    }
+
+    /** The name block recorded by [markNameBlocked] for this alive row, or null. */
+    @Synchronized
+    fun nameBlock(pathRaw: String): NameBlock? {
+        val path = PathNormalizer.nfc(pathRaw)
+        conn.prepareStatement("SELECT name_block FROM alive_entries WHERE path=?").use { stmt ->
+            stmt.setString(1, path)
+            val rs = stmt.executeQuery()
+            return if (rs.next()) rs.getString(1)?.let { parseNameBlock(it) } else null
+        }
+    }
+
+    /** Every alive row blocked by name, ordered by path. */
+    @Synchronized
+    fun blockedRows(): List<BlockedRow> {
+        val out = mutableListOf<BlockedRow>()
+        conn
+            .createStatement()
+            .use { stmt ->
+                val rs = stmt.executeQuery("SELECT path, is_folder, name_block FROM alive_entries WHERE name_block IS NOT NULL ORDER BY path")
+                while (rs.next()) out += BlockedRow(rs.getString(1), rs.getInt(2) == 1, parseNameBlock(rs.getString(3)))
+            }
+        return out
+    }
+
+    /** The nearest proper ancestor folder of [pathRaw] that is blocked by name, or null. */
+    @Synchronized
+    fun blockedAncestor(pathRaw: String): String? {
+        val path = PathNormalizer.nfc(pathRaw)
+        conn
+            .prepareStatement(
+                "SELECT path FROM alive_entries WHERE name_block IS NOT NULL AND is_folder=1 " +
+                    "AND length(path) < length(?) AND substr(?, 1, length(path) + 1) = path || '/' " +
+                    "ORDER BY length(path) DESC LIMIT 1",
+            ).use { stmt ->
+                stmt.setString(1, path)
+                stmt.setString(2, path)
+                val rs = stmt.executeQuery()
+                return if (rs.next()) rs.getString(1) else null
+            }
+    }
+
+    private fun parseNameBlock(stored: String): NameBlock =
+        NameBlock(stored.substringBefore('|'), stored.substringAfter('|', "").ifEmpty { null })
+
+    /**
+     * The nearest proper ancestor folder of [pathRaw] whose own remote path differs from its path (a folder the drive
+     * refused under its local name, landed under a server name): its path and its remote path. Everything beneath such
+     * a folder lives beneath its remote path.
+     */
+    @Synchronized
+    fun remoteAncestor(pathRaw: String): Pair<String, String>? {
+        val path = PathNormalizer.nfc(pathRaw)
+        conn
+            .prepareStatement(
+                "SELECT path, remote_path FROM alive_entries WHERE remote_path IS NOT NULL AND is_folder=1 AND remote_path <> path " +
+                    "AND length(path) < length(?) AND substr(?, 1, length(path) + 1) = path || '/' " +
+                    "ORDER BY length(path) DESC LIMIT 1",
+            ).use { stmt ->
+                stmt.setString(1, path)
+                stmt.setString(2, path)
+                val rs = stmt.executeQuery()
+                return if (rs.next()) rs.getString(1) to rs.getString(2) else null
+            }
+    }
+
+    /** Every alive folder with a remote path of its own, as (path, remote path): see [remoteAncestor]. */
+    @Synchronized
+    fun foldersWithRemotePath(): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        conn
+            .createStatement()
+            .use { stmt ->
+                val rs =
+                    stmt.executeQuery(
+                        "SELECT path, remote_path FROM alive_entries WHERE remote_path IS NOT NULL AND is_folder=1 AND remote_path <> path",
+                    )
+                while (rs.next()) out += rs.getString(1) to rs.getString(2)
+            }
+        return out
+    }
+
+    /**
+     * A remote item moved: every alive row whose remote path is [oldRemote] or lies beneath it follows to [newRemote],
+     * and a remote path that equals its row's path again is dropped (NULL = "the remote path is the path"). Rows with
+     * no remote path of their own are untouched: for them the move changed nothing the row records.
+     */
+    @Synchronized
+    fun rebaseRemotePaths(
+        oldRemoteRaw: String,
+        newRemoteRaw: String,
+    ) {
+        val oldRemote = PathNormalizer.nfc(oldRemoteRaw).trimEnd('/')
+        val newRemote = PathNormalizer.nfc(newRemoteRaw).trimEnd('/')
+        if (oldRemote == newRemote) return
+        batch {
+            conn
+                .prepareStatement(
+                    "UPDATE sync_entries SET remote_path = ? || substr(remote_path, length(?) + 1) " +
+                        "WHERE status='EXISTS' AND remote_path IS NOT NULL AND (remote_path = ? OR substr(remote_path, 1, length(?) + 1) = ? || '/')",
+                ).use { stmt ->
+                    stmt.setString(1, newRemote)
+                    stmt.setString(2, oldRemote)
+                    stmt.setString(3, oldRemote)
+                    stmt.setString(4, oldRemote)
+                    stmt.setString(5, oldRemote)
+                    stmt.executeUpdate()
+                }
+            conn.createStatement().use { stmt ->
+                stmt.executeUpdate("UPDATE sync_entries SET remote_path = NULL WHERE status='EXISTS' AND remote_path IS NOT NULL AND remote_path = path")
+            }
+        }
+    }
+
+    /**
+     * Gives every alive row at or beneath [pathRaw] that has no remote path of its own the one that follows from
+     * [remoteRaw], the remote path of [pathRaw] itself (rows beneath a folder that lives under a server name must name
+     * it, see [remoteAncestor]). A no-op when the two are equal.
+     */
+    @Synchronized
+    fun assignRemotePaths(
+        pathRaw: String,
+        remoteRaw: String,
+    ) {
+        val path = PathNormalizer.nfc(pathRaw).trimEnd('/')
+        val remote = PathNormalizer.nfc(remoteRaw).trimEnd('/')
+        if (path == remote) return
+        beginWrite()
+        conn
+            .prepareStatement(
+                "UPDATE sync_entries SET remote_path = ? || substr(path, length(?) + 1) " +
+                    "WHERE status='EXISTS' AND remote_path IS NULL AND (path = ? OR substr(path, 1, length(?) + 1) = ? || '/')",
+            ).use { stmt ->
+                stmt.setString(1, remote)
+                stmt.setString(2, path)
+                stmt.setString(3, path)
+                stmt.setString(4, path)
+                stmt.setString(5, path)
+                stmt.executeUpdate()
             }
     }
 

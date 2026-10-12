@@ -26,6 +26,8 @@ dependencies {
     testImplementation(libs.ktor.client.mock)
     testImplementation(project(":app:sync"))
     testImplementation(project(":app:engine-core"))
+    // The mount front-end, for the test that runs OneDriveProvider under HydrationImpl against a fake drive.
+    testImplementation(project(":app:hydration"))
 }
 
 tasks.test {

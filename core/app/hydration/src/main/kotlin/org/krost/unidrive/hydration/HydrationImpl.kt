@@ -297,6 +297,9 @@ class HydrationImpl(
         /** #728: cache files one `alive_entries` query classifies in an eviction pass. */
         const val EVICTION_DISPOSITION_BATCH: Int = 128
 
+        /** How many blocked entries `daemon.status` lists (the rest are counted): the cap of the collision paths there is 50 as well. */
+        const val BLOCKED_ITEMS_CAP: Int = 50
+
         /** #658: a status request re-reads the upload queue from state.db when the last reading is older than this. */
         const val UPLOAD_SNAPSHOT_TTL_MS: Long = 1_000
 
@@ -679,6 +682,22 @@ class HydrationImpl(
                     ok = false,
                     error = HydrationError.Conflict,
                 )
+            } catch (e: org.krost.unidrive.NameRefusedException) {
+                // The drive refuses this entry by its name, whatever its content: a retry would be refused the same way,
+                // and so would a replay until the sibling is gone. The row is marked blocked with the reason, the local
+                // file stays where it is, and only the next start asks again.
+                runCatching { stateDb.markNameBlocked(path, e.reason, e.sibling) }
+                val err = HydrationError.NameRefused(e.reason, e.sibling)
+                _events.emit(HydrationEvent.Failed(path, err, retryScheduled = false))
+                log.warn("upload of {} refused by the drive by its name, blocked ({}): {}", path, err.message, e.message ?: "name refused")
+                return HydrationEvent.Completed(path = path, handleId = handleId, direction = HydrationEvent.Completed.Direction.UPLOAD, ok = false, error = err)
+            } catch (e: BlockedByParentException) {
+                // A folder above was refused by name and does not exist on the drive: nothing was asked, nothing to retry.
+                runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
+                val err = HydrationError.BlockedByParent(e.parent)
+                _events.emit(HydrationEvent.Failed(path, err, retryScheduled = false))
+                log.info("upload of {} not attempted: {}", path, err.message)
+                return HydrationEvent.Completed(path = path, handleId = handleId, direction = HydrationEvent.Completed.Direction.UPLOAD, ok = false, error = err)
             } catch (e: org.krost.unidrive.PermanentUploadFailureException) {
                 // #493: the provider refused the request itself; the same bytes and the same call would be refused again,
                 // so the retry ladder would only hold a transfer slot through its whole backoff schedule.
@@ -884,6 +903,15 @@ class HydrationImpl(
         // it probes is remembered, so the rows that share an ancestor — and the rows whose cache copy is gone —
         // do not pay for the same walk (and its internally thrown Windows probes) again.
         val pass = CachePaths.Pass(mount.hydrationCacheDir())
+        // Folders the drive refused by name are asked again before their files: one that is accepted now unblocks the
+        // files below it, whose uploads are replayed below.
+        try {
+            mount.retryBlockedFolders()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.warn("retry of the blocked folders failed: {}", e.message)
+        }
         for (path in stateDb.pendingUploadPaths()) {
             // #678: the walk between records is blocking file-system work with no suspension
             // point, so a stop is only honoured if the loop itself checks for it.
@@ -1321,6 +1349,29 @@ class HydrationImpl(
         val inFlight: Int,
         val failed: Int,
         val oldestPendingAgeMs: Long?,
+        val blocked: BlockedUploads = BlockedUploads(),
+    )
+
+    /**
+     * Entries the drive refuses by their NAME (it compares the name as equal to a sibling's), whatever the bytes: the
+     * entries blocked by name themselves (`similar_name`) and everything waiting for a blocked folder above it
+     * (`blocked_by_parent`). They are also counted in [UploadHealth.pending] and [UploadHealth.failed] when they are files
+     * with bytes to upload; this is the breakdown a front-end words as "N items not uploaded: the drive treats these names
+     * as identical". [count] is all of them, [items] the first [BLOCKED_ITEMS_CAP] by path, [more] the rest.
+     */
+    data class BlockedUploads(
+        val count: Int = 0,
+        val items: List<BlockedItem> = emptyList(),
+    ) {
+        val more: Int get() = count - items.size
+    }
+
+    /** One blocked entry: [sibling] is set for `similar_name` when known, [parent] for `blocked_by_parent`. */
+    data class BlockedItem(
+        val path: String,
+        val reason: String,
+        val sibling: String?,
+        val parent: String?,
     )
 
     /** One read of the rows and slots; [oldestSinceMs] is the stamp [UploadHealth.oldestPendingAgeMs] is measured from. */
@@ -1330,9 +1381,32 @@ class HydrationImpl(
         val failed: Int,
         val oldestSinceMs: Long?,
         val takenAtMs: Long,
+        val blocked: BlockedUploads,
     ) {
         fun health(nowMs: Long) =
-            UploadHealth(pending, inFlight, failed, oldestSinceMs?.let { (nowMs - it).coerceAtLeast(0) })
+            UploadHealth(pending, inFlight, failed, oldestSinceMs?.let { (nowMs - it).coerceAtLeast(0) }, blocked)
+    }
+
+    // The entries blocked by name and those below a blocked folder, read from the rows (nothing is kept in memory:
+    // a restart does not lose a block, and a row that is deleted or uploaded drops out by itself).
+    private fun takeBlocked(): BlockedUploads {
+        val direct = stateDb.blockedRows()
+        if (direct.isEmpty()) return BlockedUploads()
+        val items = LinkedHashMap<String, BlockedItem>()
+        for (b in direct) {
+            if (mount.isExcludedPath(b.path) || mount.isOutOfScope(b.path)) continue
+            items[PathNormalizer.nfc(b.path)] = BlockedItem(b.path, b.block.reason, b.block.sibling, parent = null)
+        }
+        for (b in direct) {
+            if (!b.isFolder) continue
+            for (e in stateDb.getEntriesByPrefix(b.path.trimEnd('/') + "/")) {
+                // A row with a remote id reached the drive some other way and is not waiting for the folder.
+                if (e.remoteId != null || mount.isExcludedPath(e.path) || mount.isOutOfScope(e.path)) continue
+                items.putIfAbsent(PathNormalizer.nfc(e.path), BlockedItem(e.path, BLOCKED_BY_PARENT, sibling = null, parent = b.path))
+            }
+        }
+        val sorted = items.values.sortedBy { it.path }
+        return BlockedUploads(sorted.size, sorted.take(BLOCKED_ITEMS_CAP))
     }
 
     private fun takeUploadSnapshot(): UploadSnapshot {
@@ -1354,7 +1428,7 @@ class HydrationImpl(
             if (mount.isExcludedPath(path) || mount.isOutOfScope(path)) continue
             if (pendingPaths.add(PathNormalizer.nfc(path))) since(slot.enqueuedAtMs)
         }
-        return UploadSnapshot(pendingPaths.size, uploadsInFlight.get(), failed, oldestSinceMs, System.currentTimeMillis())
+        return UploadSnapshot(pendingPaths.size, uploadsInFlight.get(), failed, oldestSinceMs, System.currentTimeMillis(), takeBlocked())
     }
 
     /**
@@ -1520,6 +1594,9 @@ class HydrationImpl(
         val normalised = prefix.trimEnd('/').let { if (it == "") "" else it }
         return try {
             val rows = stateDb.listDirectChildren(normalised)
+            val blockedRows = stateDb.blockedRows()
+            val blockedByPath = blockedRows.associate { PathNormalizer.nfc(it.path) to it.block.reason }
+            val blockedFolders = blockedRows.filter { it.isFolder }.map { it.path.trimEnd('/') + "/" }
             ListResult.Ok(
                 rows.map { e ->
                     // Clamp to >= 0: a stale / i32-overflowed remoteSize (e.g. a multi-GB
@@ -1556,6 +1633,9 @@ class HydrationImpl(
                         pendingUpload = pendingUpload,
                         hasError = e.lastErrorAt != null,
                         excluded = mount.isExcludedPath(e.path),
+                        blocked =
+                            blockedByPath[PathNormalizer.nfc(e.path)]
+                                ?: BLOCKED_BY_PARENT.takeIf { e.remoteId == null && blockedFolders.any { f -> e.path.startsWith(f) } },
                     )
                 },
             )
@@ -1594,6 +1674,24 @@ class HydrationImpl(
             _events.emit(HydrationEvent.Hydrated(normalised, bytes = 0L))
             MkdirResult.Ok
         }.getOrElse { e ->
+            // The drive refuses the folder by its name, or a folder above it: the folder is accepted here, so the client
+            // can fill it, and reported as blocked; its subtree waits for it (see MountEngine.recordBlockedFolder).
+            val blockedBy: HydrationError? =
+                when (e) {
+                    is org.krost.unidrive.NameRefusedException -> HydrationError.NameRefused(e.reason, e.sibling)
+                    is BlockedByParentException -> HydrationError.BlockedByParent(e.parent)
+                    else -> null
+                }
+            if (blockedBy != null) {
+                mount.recordBlockedFolder(
+                    normalised,
+                    (e as? org.krost.unidrive.NameRefusedException)?.reason ?: BLOCKED_BY_PARENT,
+                    (e as? org.krost.unidrive.NameRefusedException)?.sibling,
+                )
+                _events.emit(HydrationEvent.Failed(normalised, blockedBy, retryScheduled = false))
+                log.warn("mkdir of {} refused by the drive by its name, kept locally and blocked: {}", normalised, blockedBy.message)
+                return@getOrElse MkdirResult.Ok
+            }
             val msg = e.message ?: ""
             // Provider-side parent-missing detection by substring. Different
             // providers word it differently:

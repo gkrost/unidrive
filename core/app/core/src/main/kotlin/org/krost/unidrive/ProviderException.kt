@@ -120,6 +120,30 @@ open class PermanentUploadFailureException(
     requestId: String? = null,
 ) : ProviderException(message, cause, requestId)
 
+/**
+ * The provider refuses this entry because of its NAME, not its content or the request: the drive treats the
+ * name as identical to a sibling's although the two differ (OneDrive's uniqueness check ignores some
+ * characters, so a second sibling that differs from an existing one only in such characters is refused with
+ * 409 nameAlreadyExists). The same name will be refused again whatever the bytes, so this is a
+ * [PermanentUploadFailureException]: no retry ladder. It is raised only after the provider's own way round
+ * (landing the entry under a disambiguated server name, [CloudItem.nameOverridden]) was refused too.
+ *
+ * [reason] is a stable token ([SIMILAR_NAME]); [sibling] is the name of the conflicting sibling when the
+ * provider could tell which one it is, else null.
+ */
+open class NameRefusedException(
+    message: String,
+    val reason: String = SIMILAR_NAME,
+    val sibling: String? = null,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : PermanentUploadFailureException(message, cause, requestId) {
+    companion object {
+        /** The drive compares this name as equal to a sibling's. */
+        const val SIMILAR_NAME = "similar_name"
+    }
+}
+
 /** A remote item changed after the caller captured its write token. */
 open class RemoteConflictException(
     message: String,
