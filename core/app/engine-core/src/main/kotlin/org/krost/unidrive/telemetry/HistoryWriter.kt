@@ -51,6 +51,9 @@ internal class HistoryWriter(
     val stats: HistoryStats
         get() = HistoryStats(written.get(), dropped.get(), dropped.get() > 0, queue.size)
 
+    /** The live tail: what the writer committed, numbered, for the listeners. */
+    val tail = HistoryTail(profile)
+
     fun start() = thread.start()
 
     /** Hot path: hands the snapshot to the queue; a full queue drops it and counts it. */
@@ -157,6 +160,7 @@ internal class HistoryWriter(
             store.upsert(rows)
             written.addAndGet(rows.size.toLong())
             writtenSincePrune += rows.size
+            tail.publish(rows)
             recordGapIfAny()
         } catch (e: SQLException) {
             writeFailed(rows.size, e)
