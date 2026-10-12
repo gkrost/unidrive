@@ -520,6 +520,10 @@ A **row** (every member always present; a value that was not measured or does no
 
 Each subscriber has a bounded queue (256 snapshots). When one falls behind, the oldest queued snapshots are dropped, and the next line is `history.lost` with the number dropped, the shape of `hydration.subscribe`'s `lost`: the client then re-reads from the top with `history.list` (from its last durable position) and never assumes an uninterrupted tail. `seq` numbers the committed snapshots in commit order for the daemon's life (it restarts at 0 with the daemon, as does the connection). `tail_seq`, in both replies, is the last number committed **before** the reply was made: a client that subscribes first and lists second applies exactly the events whose `seq` is above the list's `tail_seq`, which can neither lose a row between the two nor lay an older snapshot over a newer one. A subscribed connection is not closed for being idle.
 
+### 4.9 `metrics.query`
+
+READ class. The per-minute roll-ups of this daemon's provider request attempts (counts, outcome classes, header and total time p50/p95, bytes), read from the profile's `telemetry.db`. A mount daemon records them; a mirror daemon answers `recording:false` and an empty series. No data is an empty series with `has_data:false`, never zeros. The request, the reply, what an attempt is, the retention windows and the byte budget shared with the transfer history are in `request-metrics.md`.
+
 ## 5. Invariants and failure modes
 
 ### 5.1 Invariants

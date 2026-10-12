@@ -1,0 +1,2 @@
+{"verb":"metrics.query","from_ms":1700000040000,"to_ms":1700003640000}
+{"ok":true,"recording":false,"from_ms":1700000040000,"to_ms":1700003640000,"step_ms":60000,"has_data":false,"truncated":false,"incomplete_since_ms":null,"oldest_minute_ms":null,"endpoint_classes":[],"series":[]}

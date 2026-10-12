@@ -19,6 +19,8 @@ import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.http.InFlightDedup
+import org.krost.unidrive.http.RequestMetricsSink
+import org.krost.unidrive.http.RequestMetricsTap
 import org.krost.unidrive.http.UploadProgress
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.UploadWatchdogException
@@ -71,8 +73,10 @@ class InternxtApiService(
     // The socket timeout of the listings, whose answers need minutes on a large account. A parameter so that
     // loopback tests can run with a small one.
     private val listingSocketTimeoutMs: Long = LISTING_SOCKET_TIMEOUT_MS,
+    // The seam the daemon attaches its request-attempt recorder to; no sink, no metrics (see attachRequestMetrics).
+    private val requestMetrics: RequestMetricsTap = RequestMetricsTap(),
     // Tests hand in a client on a MockEngine; production builds the default one.
-    private val httpClient: HttpClient = defaultHttpClient(),
+    private val httpClient: HttpClient = defaultHttpClient(requestMetrics),
     // The limits of the shard PUT's write-progress watchdog (#571). A parameter so that loopback tests can run on a
     // scale of milliseconds.
     private val shardPutWatchdog: UploadWatchdogLimits = UploadWatchdogLimits.DEFAULT,
@@ -81,6 +85,10 @@ class InternxtApiService(
     private val connectOutageBudgetMs: Long = CONNECT_OUTAGE_BUDGET_MS,
 ) : AutoCloseable {
     private val log = LoggerFactory.getLogger(InternxtApiService::class.java)
+
+    fun attachRequestMetrics(sink: RequestMetricsSink?) {
+        requestMetrics.sink = sink
+    }
 
     companion object {
         /** Total backoff a connect failure inside an enumeration may wait before the call fails ([EnumerationOutageRetry]). */
@@ -94,16 +102,25 @@ class InternxtApiService(
         /** Safety bound of one paged per-folder stream (10,000 pages are 10M items at the cursor page size of 1000). */
         internal const val MAX_LISTING_PAGES: Int = 10_000
 
-        private fun defaultHttpClient(): HttpClient =
-            HttpClient {
+        internal fun defaultHttpClient(
+            tap: RequestMetricsTap,
+            engine: io.ktor.client.engine.HttpClientEngine? = null,
+        ): HttpClient {
+            val configure: io.ktor.client.HttpClientConfig<*>.() -> Unit = {
                 install(HttpTimeout) {
                     connectTimeoutMillis = HttpDefaults.CONNECT_TIMEOUT_MS
                     socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
                     requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
                 }
-                // UD-255: per-request correlation id + DEBUG req/response logging.
-                install(org.krost.unidrive.http.RequestId)
+                // UD-255: per-request correlation id + DEBUG req/response logging; the attempt metrics ride on it.
+                install(org.krost.unidrive.http.RequestId) {
+                    metrics = tap
+                    provider = "internxt"
+                    endpoints = InternxtEndpoints.classifier
+                }
             }
+            return if (engine != null) HttpClient(engine, configure) else HttpClient(configure)
+        }
 
         private val TRANSIENT_STATUSES = setOf(429, 500, 502, 503, 504)
 

@@ -603,6 +603,12 @@ class DaemonRuntime(
                 server.registerHandler("daemon.pause") { _, json -> pauseHandler.pause(json) }
                 server.registerHandler("daemon.resume") { _, _ -> pauseHandler.resume() }
 
+                // metrics.query (#654): the per-minute roll-ups of the provider's request attempts. A mount profile with an open
+                // history records them; a mirror daemon (no history) answers "not recording", never zeros.
+                val requestMetrics = transferHistory?.requestMetrics()?.also { provider.attachRequestMetrics(it) }
+                val metricsHandler = MetricsRpcHandler(requestMetrics)
+                server.registerHandler("metrics.query") { _, json -> metricsHandler.query(json) }
+
                 // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every
                 // OS (Windows has no SIGTERM; Process.destroy() there is TerminateProcess, which
                 // skips the shutdown path entirely). Acks first, then runs the same path as a

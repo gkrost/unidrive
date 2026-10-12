@@ -30,9 +30,9 @@ class TransferHandle internal constructor(
     @Synchronized
     fun started() {
         if (finished || startedNanos != null) return
-        val now = history.nanoNow()
+        val now = history.nanoNow
         startedNanos = now
-        row = row.copy(startedAt = history.wallNow(), queueWaitMs = nanosToMs(now - queuedNanos))
+        row = row.copy(startedAt = history.wallNow, queueWaitMs = nanosToMs(now - queuedNanos))
         history.enqueue(row)
     }
 
@@ -70,12 +70,12 @@ class TransferHandle internal constructor(
         require(result != TransferResult.RUNNING) { "a finished transfer is not running" }
         if (finished) return
         finished = true
-        val nowNanos = history.nanoNow()
+        val nowNanos = history.nanoNow
         val started = startedNanos
         val made = if (attempted) 1 else 0
         row =
             row.copy(
-                finishedAt = history.wallNow(),
+                finishedAt = history.wallNow,
                 transferMs = started?.let { nanosToMs(nowNanos - it) },
                 bytesDone = bytesDone ?: row.bytesDone,
                 result = result,
@@ -115,14 +115,15 @@ class TransferHistory private constructor(
     private val nanoClock: () -> Long,
     private val store: TelemetryStore,
     private val writer: HistoryWriter,
+    private val config: HistoryConfig,
 ) : AuditSink,
     AutoCloseable {
     val stats: HistoryStats
         get() = writer.stats
 
-    internal fun wallNow(): Long = clock()
+    internal val wallNow: Long get() = clock()
 
-    internal fun nanoNow(): Long = nanoClock()
+    internal val nanoNow: Long get() = nanoClock()
 
     /** An operation entered the transfer machinery: the clock for its queue wait starts now. */
     fun begin(
@@ -184,6 +185,19 @@ class TransferHistory private constructor(
 
     internal fun enqueue(row: TransferRow) = writer.offer(row)
 
+    private var metrics: RequestMetricsRecorder? = null
+
+    /**
+     * The request-attempt recorder on this history's file, started on first use and closed with the history. It
+     * shares the history's byte budget ([HistoryConfig.maxBytes]) and gives way to it first.
+     */
+    @Synchronized
+    fun requestMetrics(metricsConfig: RequestMetricsConfig = RequestMetricsConfig()): RequestMetricsRecorder =
+        metrics ?: RequestMetricsRecorder(profile, metricsConfig, config.maxBytes, clock, store).also {
+            it.start()
+            metrics = it
+        }
+
     /**
      * A reader on its own read-only connection to this history's file (never the writer's). The caller owns it and
      * closes it; an open that fails surfaces on its first read.
@@ -215,14 +229,18 @@ class TransferHistory private constructor(
 
     internal fun fileBytes(): Long = store.fileBytes()
 
+    internal fun attemptCount(): Int = store.attemptCount()
+
     /** Test seam: the process dies; nothing more is written and nothing is finished. */
     internal fun abandon() {
+        synchronized(this) { metrics?.abandon() }
         writer.abandon()
         store.close()
     }
 
     /** Writes what is queued, stops the writer and closes the file. */
     override fun close() {
+        synchronized(this) { metrics?.close() }
         if (writer.close()) store.close()
     }
 
@@ -244,7 +262,7 @@ class TransferHistory private constructor(
             val store = TelemetryStore.open(dbPath, afterOpen)
             val writer = HistoryWriter(profile, config, clock, store)
             writer.start()
-            return TransferHistory(profile, clock, nanoClock, store, writer)
+            return TransferHistory(profile, clock, nanoClock, store, writer, config)
         }
     }
 }

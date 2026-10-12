@@ -1,10 +1,13 @@
 package org.krost.unidrive.http
 
+import io.ktor.client.plugins.api.Send
 import io.ktor.client.plugins.api.createClientPlugin
 import io.ktor.client.request.HttpRequestBuilder
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentLength
 import io.ktor.util.AttributeKey
+import kotlinx.coroutines.Job
 import org.slf4j.LoggerFactory
 import java.util.UUID
 
@@ -38,10 +41,82 @@ fun HttpRequestBuilder.requestId(): String? = attributes.getOrNull(RequestIdKey)
  * ```
  * HttpClient { install(RequestId) }
  * ```
+ * To also report every attempt (see [RequestAttempt]) to whatever the daemon attaches to [RequestIdConfig.metrics]:
+ * ```
+ * HttpClient { install(RequestId) { metrics = tap; provider = "x"; endpoints = classifier } }
+ * ```
+ * With no sink on the tap, the metrics part costs one volatile read per request.
  */
+@Suppress("TooGenericExceptionCaught") // the failure is classified, recorded and rethrown unchanged
 val RequestId =
-    createClientPlugin("UnidriveRequestId") {
+    createClientPlugin("UnidriveRequestId", ::RequestIdConfig) {
         val log = LoggerFactory.getLogger("org.krost.unidrive.http.RequestId")
+        val metrics = pluginConfig.metrics
+        val provider = pluginConfig.provider
+        val endpoints = pluginConfig.endpoints
+        val retries = RetryTracker()
+
+        // Attempt metrics. The Send hook wraps one trip to the engine: it sees the failure of a request that never
+        // got a response, and the response whose body is consumed later (its job completes then). Redirects and
+        // provider-level retries are further requests, each its own attempt.
+        on(Send) { request ->
+            val sink = metrics?.sink ?: return@on proceed(request)
+            val startedAtMs = System.currentTimeMillis()
+            val startNanos = System.nanoTime()
+            val method = request.method.value
+            val endpointClass = endpoints.classify(method, request.url.host, "/" + request.url.encodedPathSegments.joinToString("/"))
+            val retryKey = RetryTracker.keyOf(method + ' ' + request.url.buildString())
+            val retryNo = retries.retryNo(retryKey, startNanos)
+
+            fun report(
+                outcome: AttemptOutcome,
+                headersMs: Long?,
+                bytesUp: Long?,
+                bytesDown: Long?,
+                throttled: Boolean,
+            ) {
+                val endNanos = System.nanoTime()
+                retries.ended(retryKey, outcome.retryable, endNanos)
+                // The sink promises not to throw; a broken one must still never fail the request that was measured.
+                runCatching {
+                    sink.record(
+                        RequestAttempt(
+                            startedAtMs = startedAtMs,
+                            provider = provider,
+                            endpointClass = endpointClass,
+                            method = method,
+                            outcome = outcome,
+                            headersMs = headersMs,
+                            totalMs = nanosToMs(endNanos - startNanos),
+                            bytesUp = bytesUp,
+                            bytesDown = bytesDown,
+                            retryNo = retryNo,
+                            throttled = throttled,
+                        ),
+                    )
+                }
+            }
+
+            val call =
+                try {
+                    proceed(request)
+                } catch (e: Throwable) {
+                    report(AttemptOutcome.ofFailure(e), headersMs = null, bytesUp = null, bytesDown = null, throttled = false)
+                    throw e
+                }
+            val headersMs = nanosToMs(System.nanoTime() - startNanos)
+            val response = call.response
+            val status = response.status.value
+            val throttled = status == HttpStatusCode.TooManyRequests.value || response.headers.contains(HttpHeaders.RetryAfter)
+            val bytesUp = call.request.content.contentLength
+            fun finish(cause: Throwable?) {
+                val outcome = if (cause == null) AttemptOutcome.ofStatus(status) else AttemptOutcome.ofFailure(cause)
+                report(outcome, headersMs, bytesUp, if (cause == null) response.contentLength() else null, throttled)
+            }
+            val job = response.coroutineContext[Job]
+            if (job == null) finish(null) else job.invokeOnCompletion { finish(it) }
+            call
+        }
 
         onRequest { request, _ ->
             val id = UUID.randomUUID().toString().take(8)
@@ -91,6 +166,18 @@ val RequestId =
             }
         }
     }
+
+/** Settings of [RequestId]; every one is optional. */
+class RequestIdConfig {
+    /** Where attempts are reported once the tap has a sink; null for a client that reports nothing. */
+    var metrics: RequestMetricsTap? = null
+
+    /** The provider id written into every attempt. */
+    var provider: String = "unknown"
+
+    /** Names the endpoints of this client's API; the default hides every path ([EndpointClassifier.OPAQUE]). */
+    var endpoints: EndpointClassifier = EndpointClassifier.OPAQUE
+}
 
 /**
  * UD-773: format the `up=N dn=M` segment for the RequestId close line.

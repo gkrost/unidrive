@@ -1,5 +1,6 @@
 package org.krost.unidrive.telemetry
 
+import org.krost.unidrive.http.RequestAttempt
 import org.krost.unidrive.io.OwnerOnly
 import org.slf4j.LoggerFactory
 import java.io.IOException
@@ -18,9 +19,10 @@ import java.sql.SQLException
  * Journal mode is WAL with `synchronous = NORMAL`: the history is not a durability guarantee (a power
  * cut may lose the last few rows, and the sync state never depends on it).
  *
- * The connection is used by one writer thread; every method is synchronized so a test or a reader of
- * the same instance can take the turn between batches.
+ * The one connection is shared by the history writer thread, the request-metrics writer thread and readers;
+ * every method is synchronized, so each takes its turn between the others' batches.
  */
+@Suppress("TooManyFunctions") // the one connection of telemetry.db: every table's statements go through its lock
 internal class TelemetryStore private constructor(
     val dbPath: Path,
     private val afterOpen: (Connection) -> Unit,
@@ -87,6 +89,8 @@ internal class TelemetryStore private constructor(
             // CREATE ... IF NOT EXISTS, so an existing file gets it at its next open without a schema version of its own.
             st.execute("CREATE INDEX IF NOT EXISTS idx_transfers_time ON transfers($SORT_TIME, operation_id)")
             st.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID")
+            // Schema step 2: the request-attempt tables. A file at step 1 gains them; nothing of step 1 changes.
+            if (version < ATTEMPTS_SCHEMA_VERSION) AttemptTables.create(c)
             st.execute("PRAGMA user_version = $SCHEMA_VERSION")
         }
     }
@@ -192,6 +196,12 @@ internal class TelemetryStore private constructor(
             }
         var guard = 0
         while (liveBytes(c) > maxBytes && guard++ < MAX_PRUNE_ROUNDS) {
+            // The byte budget is shared with the request metrics, which give way first: raw attempts, then roll-ups.
+            val shed = AttemptTables.shed(c)
+            if (shed > 0) {
+                removed += shed
+                continue
+            }
             val rowCount = c.createStatement().use { st -> st.executeQuery("SELECT COUNT(*) FROM transfers").use { it.next(); it.getInt(1) } }
             val n =
                 c.prepareStatement(
@@ -206,6 +216,70 @@ internal class TelemetryStore private constructor(
         }
         if (removed > 0) shrinkFile(c, maxBytes)
         return removed
+    }
+
+    /** Inserts the attempts of one profile in one transaction. */
+    @Synchronized
+    fun insertAttempts(
+        profile: String,
+        attempts: Collection<RequestAttempt>,
+    ) {
+        if (attempts.isEmpty()) return
+        inTransaction { AttemptTables.insert(it, profile, attempts) }
+    }
+
+    /** Recomputes the roll-ups of [minutes] from the raw rows. */
+    @Synchronized
+    fun rollUp(minutes: Collection<Long>) {
+        if (minutes.isEmpty()) return
+        inTransaction { AttemptTables.rollUp(it, minutes) }
+    }
+
+    /** Minutes with raw rows that no roll-up covers yet (after a crash). */
+    @Synchronized
+    fun unrolledMinutes(): Set<Long> = AttemptTables.unrolledMinutes(connection())
+
+    @Synchronized
+    fun readRollups(query: RollupQuery): RollupResult = AttemptTables.readRollups(connection(), query)
+
+    @Synchronized
+    fun attemptCount(): Int = AttemptTables.count(connection(), "request_attempts")
+
+    /**
+     * Retention of the request metrics: raw rows started before [rawCutoffMs], roll-ups before [rollupCutoffMs], then, while
+     * the file is over [maxBytes], the oldest tenth of the raw rows and then of the roll-ups. Transfer rows are not touched
+     * here; their own [prune] also asks the metrics to give way first. Returns the rows removed.
+     */
+    @Synchronized
+    fun pruneMetrics(
+        rawCutoffMs: Long,
+        rollupCutoffMs: Long,
+        maxBytes: Long,
+    ): Int {
+        val c = connection()
+        var removed = AttemptTables.deleteOlder(c, rawCutoffMs, rollupCutoffMs)
+        var guard = 0
+        while (liveBytes(c) > maxBytes && guard++ < MAX_PRUNE_ROUNDS) {
+            val shed = AttemptTables.shed(c)
+            if (shed == 0) break
+            removed += shed
+        }
+        if (removed > 0) shrinkFile(c, maxBytes)
+        return removed
+    }
+
+    private fun inTransaction(block: (Connection) -> Unit) {
+        val c = connection()
+        c.autoCommit = false
+        try {
+            block(c)
+            c.commit()
+        } catch (e: SQLException) {
+            runCatching { c.rollback() }
+            throw e
+        } finally {
+            runCatching { c.autoCommit = true }
+        }
     }
 
     // Deleted rows leave free pages inside the file; a VACUUM gives them back when the file is still too big.
@@ -240,7 +314,8 @@ internal class TelemetryStore private constructor(
     }
 
     companion object {
-        const val SCHEMA_VERSION = 1
+        const val SCHEMA_VERSION = 2
+        private const val ATTEMPTS_SCHEMA_VERSION = 2
 
         /** The instant a transfer sorts by: when it finished, or, while it has not, when it was queued. */
         const val SORT_TIME = "COALESCE(finished_at, queued_at)"

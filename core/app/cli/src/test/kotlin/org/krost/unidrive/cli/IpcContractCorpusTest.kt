@@ -81,7 +81,7 @@ class IpcContractCorpusTest {
     // daemon.shutdown is listed last because it stops the daemon the other verbs are replayed against.
     private val daemonVerbs =
         listOf(
-            "daemon.status", "daemon.pause", "daemon.resume", "sync.subscribe", "refresh.run", "sync.enumerate",
+            "daemon.status", "daemon.pause", "daemon.resume", "metrics.query", "sync.subscribe", "refresh.run", "sync.enumerate",
             "history.list", "history.subscribe", "ignore.explain", "daemon.shutdown",
         )
 

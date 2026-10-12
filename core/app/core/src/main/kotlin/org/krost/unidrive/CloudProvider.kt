@@ -6,6 +6,13 @@ interface CloudProvider {
     val id: String
     val displayName: String
 
+    /**
+     * Hands the provider's HTTP client the place to report its request attempts to (see
+     * [org.krost.unidrive.http.RequestMetricsSink]); null detaches it. Only a daemon that records metrics calls this; a
+     * provider without an HTTP client of its own (local files) ignores it. The sink never blocks and never throws.
+     */
+    fun attachRequestMetrics(sink: org.krost.unidrive.http.RequestMetricsSink?) {}
+
     /** Optional read-only stored-object audit surface; null when this provider cannot verify objects without downloading. */
     val remoteObjectAuditor: RemoteObjectAuditor? get() = null
 

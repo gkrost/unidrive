@@ -1,0 +1,10 @@
+{"verb":"metrics.query","from_ms":1700000000000,"to_ms":1700003600000}
+{"ok":true,"recording":true,"from_ms":1700000000000,"to_ms":1700003600000,"step_ms":60000,"has_data":false,"truncated":false,"incomplete_since_ms":null,"oldest_minute_ms":null,"endpoint_classes":[],"series":[]}
+{"verb":"metrics.query","from_ms":1700003600000,"to_ms":1700000000000}
+{"ok":false,"error":"invalid_range"}
+{"verb":"metrics.query","from_ms":"yesterday"}
+{"ok":false,"error":"invalid_range"}
+{"verb":"metrics.query","from_ms":1700000000000,"to_ms":1700003600000,"limit":0}
+{"ok":false,"error":"invalid_limit"}
+{"verb":"metrics.query","from_ms":1700000000000,"to_ms":1700003600000,"endpoint_class":7}
+{"ok":false,"error":"invalid_endpoint_class"}

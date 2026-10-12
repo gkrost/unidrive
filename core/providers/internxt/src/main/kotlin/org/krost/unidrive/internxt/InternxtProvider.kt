@@ -168,6 +168,8 @@ class InternxtProvider(
         authService.logout()
     }
 
+    override fun attachRequestMetrics(sink: org.krost.unidrive.http.RequestMetricsSink?) = api.attachRequestMetrics(sink)
+
     override fun close() {
         notificationsClient?.disconnect()
         notificationsClient = null
