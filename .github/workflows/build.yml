@@ -199,6 +199,6 @@ jobs:
           {
             echo "### Ignore matcher against git ${{ matrix.git }}"
             echo '```'
-            cat ignore-oracle.txt ignore-benchmark.txt 2>/dev/null || echo "no report written"
+            cat ignore-oracle.txt ignore-benchmark.txt ignore-discovery-benchmark.txt 2>/dev/null || echo "no report written"
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
