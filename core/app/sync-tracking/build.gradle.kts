@@ -8,15 +8,11 @@ kotlin {
 
 dependencies {
     implementation(project(":app:core"))
-    // The CliExtension SPI this module implements; the CLI loads it at runtime (#560).
-    implementation(project(":app:cli-spi"))
-    // TrackingEngine uses the sync engine's types, and the SyncConfig returned
-    // by CliServices.loadSyncConfig() lives in :app:sync.
+    // TrackingEngine reuses the sync engine's Reconciler, ConflictLog and TrashManager.
     implementation(project(":app:sync"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.sqlite.jdbc)
-    implementation(libs.picocli)
     implementation(libs.logback.classic)
 
     testImplementation(kotlin("test"))

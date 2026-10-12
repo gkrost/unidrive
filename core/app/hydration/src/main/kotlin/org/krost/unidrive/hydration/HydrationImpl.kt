@@ -209,10 +209,10 @@ class HydrationImpl(
     // their path's turn, the daemon-wide budget, or a retry backoff).
     private val uploadsInFlight = AtomicInteger(0)
 
-    // #658: the last measured size of the cache directory (epoch ms of the measurement), null = never
-    // measured. Written by every pass that walks the cache; read by [cacheHealth].
-    @Volatile private var cacheMeasuredBytes: Long? = null
-    @Volatile private var cacheMeasuredAtMs: Long = 0L
+    // #658: false until a cache walk has been reconciled into [cacheBytes] (the accounting starts empty,
+    // so before that its total says nothing). Thereafter the health view reads the running total and
+    // walks reconcile it periodically.
+    @Volatile private var cacheSeeded = false
     private val cacheMeasuring = AtomicBoolean(false)
 
     // Waiting-slot budget for the upload queue. Acquired by the submitting
@@ -293,9 +293,6 @@ class HydrationImpl(
 
         /** #728: cache files one `alive_entries` query classifies in an eviction pass. */
         const val EVICTION_DISPOSITION_BATCH: Int = 128
-
-        /** #658: a status request re-walks the cache directory when the last measurement is older than this. */
-        const val CACHE_MEASUREMENT_TTL_MS: Long = 10_000
 
         /** #658: a status request re-reads the upload queue from state.db when the last reading is older than this. */
         const val UPLOAD_SNAPSHOT_TTL_MS: Long = 1_000
@@ -1190,7 +1187,6 @@ class HydrationImpl(
         val job = coroutineContext[Job]
         val files = listCacheFiles { job?.ensureActive() }
         val before = files.sumOf { it.size }
-        recordCacheSize(before) // #658: the health view reads what the last walk found
         var total = before
         val evicted = HashSet<String>()
         if (cacheMaxBytes > 0 && before > cacheMaxBytes) {
@@ -1208,9 +1204,9 @@ class HydrationImpl(
                 total -= evictDisposable(batch, rows, total - cacheMaxBytes, evicted)
             }
         }
-        recordCacheSize(total)
         lastWalkAtMs.set(System.currentTimeMillis())
         reconcileAccounting(files, evicted)
+        cacheSeeded = true // #658: only now does the running total vouch for the cache (not while the pass is still evicting)
         return CacheEvictionReport(cacheMaxBytes, before, total, evicted.size)
     }
 
@@ -1384,24 +1380,25 @@ class HydrationImpl(
     )
 
     /** What is known now, without touching the file system. See [requestCacheMeasurement]. */
-    fun cacheHealth(): CacheHealth = CacheHealth(cacheMeasuredBytes, cacheMaxBytes.takeIf { it > 0 })
-
-    private fun recordCacheSize(bytes: Long) {
-        cacheMeasuredBytes = bytes
-        cacheMeasuredAtMs = System.currentTimeMillis()
-    }
+    fun cacheHealth(): CacheHealth = CacheHealth(if (cacheSeeded) cacheBytes.get() else null, cacheMaxBytes.takeIf { it > 0 })
 
     /**
-     * Walks the cache directory off the caller's thread to refresh [cacheHealth], unless a walk is
-     * already running or the last measurement is younger than [staleAfterMs]. Fire and forget: a
-     * status request calls this and answers with what it has, so a large cache never delays a reply.
+     * Seeds cache accounting with one off-thread walk. Later cache changes update the running total,
+     * and eviction passes reconcile it periodically. Fire and forget: status answers with what it
+     * has, so a large cache never delays a reply.
      */
-    fun requestCacheMeasurement(staleAfterMs: Long = CACHE_MEASUREMENT_TTL_MS) {
-        if (System.currentTimeMillis() - cacheMeasuredAtMs < staleAfterMs) return
+    fun requestCacheMeasurement() {
+        if (cacheSeeded) return
         if (!cacheMeasuring.compareAndSet(false, true)) return
         recoveryUploadScope.launch {
             try {
-                recordCacheSize(withContext(Dispatchers.IO) { listCacheFiles().sumOf { it.size } })
+                evictionMutex.withLock {
+                    if (cacheSeeded) return@withLock
+                    val files = withContext(Dispatchers.IO) { listCacheFiles() }
+                    reconcileAccounting(files, emptySet())
+                    lastWalkAtMs.set(System.currentTimeMillis())
+                    cacheSeeded = true
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

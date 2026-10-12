@@ -20,7 +20,6 @@ com.squareup.okio:okio:3.16.0=runtimeClasspath
 com.squareup.okio:okio:3.18.1=testRuntimeClasspath
 dev.drewhamilton.poko:poko-annotations-jvm:0.17.1=detekt
 dev.drewhamilton.poko:poko-annotations:0.17.1=detekt
-info.picocli:picocli:4.7.7=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 io.github.davidburstrom.contester:contester-breakpoint:0.2.0=detekt
 io.github.detekt.sarif4k:sarif4k-jvm:0.6.0=detekt
 io.github.detekt.sarif4k:sarif4k:0.6.0=detekt

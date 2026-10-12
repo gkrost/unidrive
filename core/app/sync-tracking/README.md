@@ -316,8 +316,8 @@ core/app/sync-tracking/
     TrackingSet.kt          # interface + SqliteTrackingSet impl (tracking.db)
     BatchGuard.kt           # max delete ratio (spec Amendment 3)
     TrackingEngine.kt       # orchestrator
-    TrackingCli.kt          # picocli @Command tree + CliExtension entry
-  src/main/resources/META-INF/services/org.krost.unidrive.cli.ext.CliExtension
+  (the `unidrive ts` picocli commands and their CliExtension registration live in :app:cli,
+   core/app/cli/src/main/kotlin/org/krost/unidrive/tracking/TrackingCli.kt)
   src/test/kotlin/org/krost/unidrive/tracking/
     FakeTrackingProvider.kt              # in-memory CloudProvider for tests
     TrackingReconcilerTest.kt            # case-table unit tests + BatchGuard

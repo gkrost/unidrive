@@ -7,14 +7,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 /**
- * Unit tests for [NotificationsClient]'s pure seams — loopback elision and
- * malformed-frame fallthrough. We do NOT exercise the socket.io transport
- * itself; that's a non-deterministic Internxt-side surface.
- *
- * The frame-handling contract mirrors drive-desktop's `processWebSocketEvent`:
- * frames whose `clientId` equals our own are dropped (our own mutation
- * echoing back); anything else (including malformed or schema-incomplete
- * payloads) triggers exactly one wake hint.
+ * Frame handling treats product identities shared by multiple installations and malformed
+ * frames as wake hints. Transport reconnection is covered separately.
  */
 class NotificationsClientTest {
     private val ownClientName = "unidrive"
@@ -22,13 +16,12 @@ class NotificationsClientTest {
     private fun newClient(callback: () -> Unit): NotificationsClient =
         NotificationsClient(
             notificationsUrl = "https://example.invalid/socket.io",
-            ownClientName = ownClientName,
             tokenSupplier = { error("must not be called in pure-handler tests") },
             onRemoteChange = callback,
         )
 
     @Test
-    fun `loopback frame from our own client is dropped`() {
+    fun `frame from another unidrive installation triggers a wake hint`() {
         val hits = AtomicInteger(0)
         val client = newClient { hits.incrementAndGet() }
         val frame =
@@ -38,7 +31,7 @@ class NotificationsClientTest {
                 put("email", "test@example.com")
             }
         client.handleIncomingFrame(frame)
-        assertEquals(0, hits.get(), "loopback frame must not trigger a wake hint")
+        assertEquals(1, hits.get(), "shared product identity must not suppress another device")
     }
 
     @Test
@@ -102,13 +95,13 @@ class NotificationsClientTest {
     }
 
     @Test
-    fun `map frame with clientId equal to ours is dropped`() {
+    fun `map frame with shared client name triggers a wake hint`() {
         // Future-proof path: if socket.io's payload type ever shifts to a Map,
-        // loopback elision must still work.
+        // shared product identity must still trigger a hint.
         val hits = AtomicInteger(0)
         val client = newClient { hits.incrementAndGet() }
         client.handleIncomingFrame(mapOf("clientId" to ownClientName, "event" to "FILE_CREATED"))
-        assertEquals(0, hits.get())
+        assertEquals(1, hits.get())
     }
 
     @Test
