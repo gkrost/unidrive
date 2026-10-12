@@ -426,6 +426,13 @@ class IpcContractCorpusTest {
                             remoteModifiedEpochMillis = null, remoteId = null, etag = null,
                             pendingUpload = false, hasError = false, excluded = true,
                         ),
+                        // The drive refuses the name (it compares it as equal to a sibling's): never
+                        // uploaded, flagged with the reason.
+                        ListResult.Entry(
+                            "/docs/blocked.txt", 5, FIXED_MTIME_MS, isHydrated = true, isFolder = false,
+                            remoteModifiedEpochMillis = null, remoteId = null, etag = null,
+                            pendingUpload = true, hasError = true, blocked = "similar_name",
+                        ),
                     ),
                 )
             } else {
