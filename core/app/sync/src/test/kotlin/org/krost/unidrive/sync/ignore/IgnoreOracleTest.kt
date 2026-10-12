@@ -21,7 +21,27 @@ internal fun matcherFor(
     return IgnoreMatcher(layers)
 }
 
+/**
+ * The same files found by discovery: an [IgnoreTree] over an in-memory source, with no content defaults (the corpus
+ * pins git, which has none). The corpus names its files `.gitignore`; with [fileName] `.unidrive.ignore` they are
+ * renamed, and the answers must be the same apart from the file name.
+ */
+internal fun treeFor(
+    files: Map<String, String>,
+    options: IgnoreOptions,
+    fileName: String,
+): IgnoreTree {
+    val renamed = files.mapKeys { (path, _) -> path.removeSuffix(IgnoreTree.GIT_FILE) + fileName }
+    val settings = IgnoreSettings(honorGitignore = fileName == IgnoreTree.GIT_FILE, contentDefaults = emptyList(), options = options)
+    return IgnoreTree(MemoryIgnoreSource(renamed), settings)
+}
+
 internal fun describe(v: IgnoreVerdict): String = v.rule?.let { "${it.source}:${it.line}:${it.text}" } ?: "-"
+
+internal fun describe(
+    v: IgnoreExplanation,
+    fileName: String = IgnoreTree.GIT_FILE,
+): String = v.rule?.let { "${it.source.removeSuffix(fileName)}${IgnoreTree.GIT_FILE}:${it.line}:${it.text}" } ?: "-"
 
 internal fun describe(a: GitAnswer): String = if (a.matched) "${a.source}:${a.line}:${a.pattern}" else "-"
 
@@ -46,6 +66,7 @@ class IgnoreOracleTest {
         var cases = 0
         var runs = 0
         var verdicts = 0
+        var treeVerdicts = 0
         var nfcRuns = 0
         val skipped = ArrayList<String>()
         var unaskable = 0
@@ -70,6 +91,17 @@ class IgnoreOracleTest {
                         diffs.add("${case.resource} / ${case.name} / ignorecase=$ignoreCase / '${show(a.path)}': git=${describe(a)} ours=${describe(ours)}")
                     }
                 }
+                // The discovery layer over the same files, as .gitignore (opt-in) and renamed to .unidrive.ignore.
+                for (fileName in listOf(IgnoreTree.GIT_FILE, IgnoreTree.UNIDRIVE_FILE)) {
+                    val tree = treeFor(case.files, IgnoreOptions(ignoreCase = ignoreCase), fileName)
+                    for (a in answers) {
+                        val ours = tree.explain(a.path)
+                        treeVerdicts++
+                        if (describe(ours, fileName) != describe(a) || ours.ignored != (a.matched && !a.pattern.startsWith("!"))) {
+                            diffs.add("${case.resource} / ${case.name} / ignorecase=$ignoreCase / tree $fileName / '${show(a.path)}': git=${describe(a)} ours=${describe(ours, fileName)}")
+                        }
+                    }
+                }
 
                 // NFC option: same answers as git has for the NFC-normalised rules and paths.
                 val nfcFiles = case.files.mapValues { IgnoreCorpus.nfc(it.value) }
@@ -77,17 +109,23 @@ class IgnoreOracleTest {
                 val changes = nfcFiles != case.files || nfcPaths != case.paths
                 val reference = if (changes) (ask(oracle, case, nfcFiles, nfcPaths, ignoreCase, harnessErrors) ?: continue).also { nfcRuns++ } else answers
                 val nfcMatcher = matcherFor(case.files, IgnoreOptions(ignoreCase = ignoreCase, normalizeNfc = true))
+                val nfcTree = treeFor(case.files, IgnoreOptions(ignoreCase = ignoreCase, normalizeNfc = true), IgnoreTree.UNIDRIVE_FILE)
                 for ((i, a) in reference.withIndex()) {
                     val ours = nfcMatcher.explain(case.paths[i])
                     if (describe(ours) != describe(a)) {
                         diffs.add("${case.resource} / ${case.name} / ignorecase=$ignoreCase / nfc / '${show(case.paths[i])}': git(NFC inputs)=${describe(a)} ours=${describe(ours)}")
+                    }
+                    val viaTree = nfcTree.explain(case.paths[i])
+                    if (describe(viaTree, IgnoreTree.UNIDRIVE_FILE) != describe(a)) {
+                        diffs.add("${case.resource} / ${case.name} / ignorecase=$ignoreCase / nfc tree / '${show(case.paths[i])}': git(NFC inputs)=${describe(a)} ours=${describe(viaTree, IgnoreTree.UNIDRIVE_FILE)}")
                     }
                 }
             }
         }
         val summary =
             "git ${oracle.versionText}: $cases cases, $runs case x ignorecase runs ($nfcRuns extra NFC runs), " +
-                "$verdicts path verdicts compared ($unaskable not askable of this git on this OS), ${diffs.size} differences, ${skipped.size} cases skipped for git version"
+                "$verdicts path verdicts compared, $treeVerdicts more through IgnoreTree discovery " +
+                "($unaskable not askable of this git on this OS), ${diffs.size} differences, ${skipped.size} cases skipped for git version"
         println(summary)
         skipped.forEach { println("  skipped: $it") }
         val report = Paths.get("build", "reports", "ignore-oracle.txt")
