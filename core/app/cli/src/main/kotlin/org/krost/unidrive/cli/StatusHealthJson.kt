@@ -6,6 +6,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import org.krost.unidrive.hydration.HydrationImpl
 import org.krost.unidrive.hydration.PauseGate
+import org.krost.unidrive.sync.ignore.HeldBackDir
 
 /**
  * The health objects of the `daemon.status` reply (#658; docs/dev/specs/unidrive-daemon-design.md §4.3).
@@ -97,3 +98,33 @@ internal fun CredentialHealthMonitor.Reading.toJson(nowMs: Long): JsonObject =
         put("expires_in_ms", expiresInMs(nowMs))
         put("checked_at_ms", checkedAtMs)
     }
+
+/**
+ * `ignore` in `daemon.status` (#660): the folders whose uploads are held back because a rule file in them cannot be
+ * read (fail closed). `held_back.count` counts the folders found so far: a folder's rules are read when something below
+ * it is written or asked about, so a folder nothing was written to is not known yet. `items` is capped
+ * ([HELD_BACK_ITEMS_CAP]) and `more` counts the rest; each item names the folder, the rule file and why it cannot be read.
+ */
+internal fun ignoreHealthJson(heldBack: List<HeldBackDir>): JsonObject =
+    buildJsonObject {
+        put(
+            "held_back",
+            buildJsonObject {
+                put("count", heldBack.size)
+                put("more", (heldBack.size - HELD_BACK_ITEMS_CAP).coerceAtLeast(0))
+                putJsonArray("items") {
+                    for (h in heldBack.take(HELD_BACK_ITEMS_CAP)) {
+                        add(
+                            buildJsonObject {
+                                put("dir", h.dir)
+                                put("file", h.file)
+                                put("reason", h.reason)
+                            },
+                        )
+                    }
+                }
+            },
+        )
+    }
+
+internal const val HELD_BACK_ITEMS_CAP = 20

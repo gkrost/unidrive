@@ -441,8 +441,10 @@ class HydrationImpl(
             return OpenResult.Failed(HydrationError.InvalidPath)
         }
         touch(path)
+        // #660: a rule file of the ignore rules takes effect for the next decision, this file's own included.
+        mount.ignoreRuleFileWritten(path)
 
-        // Excluded paths (exclude_patterns) are keep-local: the write is
+        // Excluded paths (exclude_patterns, ignore rules) are keep-local: the write is
         // accepted — the editor's bytes are real local content — but the
         // upload never runs. Refusing would break the editors and tools that
         // legitimately create *.tmp / ~$ scratch files through the mount;
@@ -1675,7 +1677,7 @@ class HydrationImpl(
                         // the predicate (remoteId == null) cannot see.
                         pendingUpload = pendingUpload,
                         hasError = e.lastErrorAt != null,
-                        excluded = mount.isExcludedPath(e.path),
+                        excluded = mount.isExcludedPath(e.path, e.isFolder),
                         blocked =
                             blockedByPath[PathNormalizer.nfc(e.path)]
                                 ?: BLOCKED_BY_PARENT.takeIf { e.remoteId == null && blockedFolders.any { f -> e.path.startsWith(f) } },

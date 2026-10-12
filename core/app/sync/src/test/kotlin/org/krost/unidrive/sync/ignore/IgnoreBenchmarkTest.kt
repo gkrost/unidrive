@@ -205,7 +205,8 @@ class IgnoreBenchmarkTest {
         files[".unidrive.ignore"] = rootRules.joinToString("\n", postfix = "\n")
         for (p in 0 until 2_000) files["services/svc$p/.unidrive.ignore"] = projectRules.joinToString("\n", postfix = "\n")
         val src = MemoryIgnoreSource(files)
-        val tree = IgnoreTree(src)
+        // Uncapped: the walks measure discovery and the cache, not the trim of the cache (IgnoreTreeTest pins that).
+        val tree = IgnoreTree(src, IgnoreSettings(maxCachedDirs = Int.MAX_VALUE))
         val target = 1_000_000
 
         // Warm-up on a separate tree, so the measured first scan is cold for its own caches but not for the JIT.
@@ -256,7 +257,7 @@ class IgnoreBenchmarkTest {
                 appendLine("discovery: root file ${rootRules.size} rules + one file per project ${projectRules.size} rules + ${IgnoreDefaults.CONTENT.size} content defaults; JDK ${System.getProperty("java.version")}, ${Runtime.getRuntime().availableProcessors()} cpus")
                 appendLine("generator only: ${baseTree.entries} paths in $tBase ms")
                 appendLine("same rules in one flat matcher, no discovery: ${flatTree.entries} paths, ${flatTree.pruned} directories pruned, $tFlat ms")
-                appendLine("first scan (cold caches): ${first.entries} paths, ${first.pruned} directories pruned, $projects projects, $readsFirst rule files parsed, $probesFirst probes, $tFirst ms")
+                appendLine("first scan (cold caches): ${first.entries} paths, ${first.pruned} directories pruned, $projects projects, $readsFirst rule files parsed, $probesFirst probes, ${tree.cachedDirs} directories cached, $tFirst ms")
                 appendLine("second scan (revalidate, nothing changed): $readsSecond rule files parsed, $tSecond ms")
                 appendLine("third scan (one project file changed): $readsThird rule files parsed, ${third.pruned} directories pruned, $tThird ms")
                 appendLine("matcher + discovery time (minus generator): first ${tFirst - tBase} ms, second ${tSecond - tBase} ms, third ${tThird - tBase} ms")

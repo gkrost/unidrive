@@ -4,8 +4,9 @@
 rule file), `IgnoreMatcher` (layers, ancestor rule, `explain`), `GlobPattern` (one compiled pattern) and
 `IgnoreTree` (discovery of the rule files of a sync root, layering with the defaults, caching; its precedence is in
 `docs/dev/specs/ignore-layering-design.md`). It is a clean-room implementation: written from the published `gitignore`
-documentation and glob(7), with `git check-ignore` used only as a black box (the oracle below). Nothing in the engine
-calls it yet; the existing `Reconciler.matchesGlob` is untouched.
+documentation and glob(7), with `git check-ignore` used only as a black box (the oracle below). The mount's upload
+path asks it (`UploadIgnore`, see the layering document); the existing `Reconciler.matchesGlob` is untouched and keeps
+serving `exclude_patterns`.
 
 ## The oracle
 

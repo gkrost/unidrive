@@ -65,6 +65,15 @@
             "type": "integer",
             "minimum": 0
           },
+          "honor_gitignore": {
+            "description": "Also read `.gitignore` files as ignore rules for uploads, beside `.unidrive.ignore`. Default false.",
+            "type": "boolean"
+          },
+          "ignore_rules": {
+            "description": "The account's own ignore rules for uploads, in git's syntax, applied at the root: below every `.unidrive.ignore` (and `.gitignore` with honor_gitignore), above the built-in defaults. An ignored file is never uploaded; cloud items stay visible. Separate from exclude_patterns, which keep their glob syntax.",
+            "type": "array",
+            "items": { "type": "string" }
+          },
           "daemon_poll_seconds": {
             "description": "How often `unidrive daemon run` polls the cloud for changes made elsewhere (web UI, another device, another profile on the same account), in seconds. The first poll runs at daemon start; after a provider failure the interval backs off (up to 10 min). Each poll is an incremental delta from the stored cursor. 0 turns polling off. Default 60. `daemon run --poll-interval` overrides it.",
             "type": "integer",

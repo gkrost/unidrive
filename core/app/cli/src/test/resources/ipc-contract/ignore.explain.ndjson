@@ -1,0 +1,12 @@
+{"verb":"ignore.explain"}
+{"ok":false,"error":"missing_path"}
+{"verb":"ignore.explain","path":"/work/../secret"}
+{"ok":false,"error":"invalid_path"}
+{"verb":"ignore.explain","path":"/work","is_dir":"yes"}
+{"ok":false,"error":"invalid_is_dir"}
+{"verb":"ignore.explain","path":"/notes/todo.txt"}
+{"ok":true,"path":"/notes/todo.txt","excluded":false,"ignored":false,"layer":null,"file":null,"line":null,"pattern":null,"decided_at":null,"reason":null,"exclude_pattern":null}
+{"verb":"ignore.explain","path":"/work/proj/.git/config"}
+{"ok":true,"path":"/work/proj/.git/config","excluded":true,"ignored":true,"layer":"default","file":null,"line":1,"pattern":".git","decided_at":"/work/proj/.git","reason":null,"exclude_pattern":null}
+{"verb":"ignore.explain","path":"/.unidrive-trash","is_dir":true}
+{"ok":true,"path":"/.unidrive-trash","excluded":true,"ignored":true,"layer":"operational","file":null,"line":1,"pattern":"/.unidrive-trash","decided_at":"/.unidrive-trash","reason":null,"exclude_pattern":null}

@@ -3,6 +3,7 @@ package org.krost.unidrive.sync.ignore
 import java.io.IOException
 import java.nio.file.NoSuchFileException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /** The built-in rules, in git syntax. */
@@ -40,6 +41,8 @@ object IgnoreDefaults {
  * @property contentDefaults the built-in content defaults ([IgnoreDefaults.CONTENT]).
  * @property options case folding and NFC, for every layer.
  * @property maxRuleFileBytes a larger rule file is not read; everything below its directory is held back.
+ * @property maxCachedDirs the most directories whose rule files are kept in memory. Past it the least recently used
+ *   are forgotten (and probed again at their next use); a held-back directory is never forgotten.
  */
 data class IgnoreSettings(
     val honorGitignore: Boolean = false,
@@ -47,6 +50,19 @@ data class IgnoreSettings(
     val contentDefaults: List<String> = IgnoreDefaults.CONTENT,
     val options: IgnoreOptions = IgnoreOptions(),
     val maxRuleFileBytes: Long = 1024L * 1024L,
+    val maxCachedDirs: Int = 20_000,
+)
+
+/**
+ * A directory whose contents are held back because its rule file could not be read ([IgnoreLayer.UNREADABLE]).
+ *
+ * @property dir the directory, relative to the sync root ("" for the root).
+ * @property file the rule file, relative to the sync root.
+ */
+data class HeldBackDir(
+    val dir: String,
+    val file: String,
+    val reason: String,
 )
 
 /** Where the deciding rule came from, lowest precedence last. */
@@ -105,6 +121,11 @@ class IgnoreTree(
     companion object {
         const val UNIDRIVE_FILE = IgnoreRules.DEFAULT_SOURCE
         const val GIT_FILE = ".gitignore"
+        private const val TRIM_SLACK_DIVISOR = 8
+    }
+
+    init {
+        require(settings.maxCachedDirs >= 1) { "maxCachedDirs must be at least 1, got ${settings.maxCachedDirs}" }
     }
 
     /** The layers that apply below one directory, and whether that directory's rule files hold everything back. */
@@ -119,13 +140,16 @@ class IgnoreTree(
         var forceReload = false
         var probes: List<RuleFileProbe> = emptyList()
         var layers: List<IgnoreRules> = emptyList()
-        var heldBack: IgnoreRule? = null
+
+        @Volatile var heldBack: IgnoreRule? = null
         var chain: Chain? = null
         var chainParent: Chain? = null
 
         @Volatile var memo: Chain? = null
 
         @Volatile var memoEpoch = -1L
+
+        @Volatile var lastUsed = 0L
     }
 
     private val fileNames = if (settings.honorGitignore) listOf(UNIDRIVE_FILE, GIT_FILE) else listOf(UNIDRIVE_FILE)
@@ -138,6 +162,8 @@ class IgnoreTree(
     private val nodes = ConcurrentHashMap<String, DirNode>()
     private val statEpoch = AtomicLong(0)
     private val chainEpoch = AtomicLong(0)
+    private val useClock = AtomicLong(0)
+    private val trimming = AtomicBoolean(false)
 
     /** True when [path] is excluded, directly or through an excluded ancestor directory. */
     fun isIgnored(
@@ -154,7 +180,7 @@ class IgnoreTree(
         isDir: Boolean = false,
     ): IgnoreExplanation {
         if (path.isEmpty() || path == "/") return IgnoreExplanation(false, null, null, "")
-        if (maybeOperational(path)) {
+        if (path.startsWith(IgnoreDefaults.OPERATIONAL_PREFIX, ignoreCase = true)) {
             val op = operational.explain(path, isDir)
             if (op.ignored) return wrap(op)
         }
@@ -183,7 +209,7 @@ class IgnoreTree(
         isDir: Boolean = false,
     ): IgnoreExplanation {
         if (path.isEmpty() || path == "/") return IgnoreExplanation(false, null, null, "")
-        if (maybeOperational(path)) {
+        if (path.startsWith(IgnoreDefaults.OPERATIONAL_PREFIX, ignoreCase = true)) {
             val op = operational.explainEntry(path, isDir)
             if (op.ignored) return wrap(op)
         }
@@ -212,13 +238,57 @@ class IgnoreTree(
         chainEpoch.incrementAndGet()
     }
 
-    private fun maybeOperational(path: String): Boolean = path.startsWith(IgnoreDefaults.OPERATIONAL_PREFIX, ignoreCase = true)
+    /**
+     * The directories held back now by a rule file that could not be read, sorted. Each one's rule files are probed
+     * again first when a scan started since ([revalidate]): a file that became readable releases its directory.
+     */
+    fun heldBack(): List<HeldBackDir> {
+        val result = ArrayList<HeldBackDir>()
+        for ((dir, node) in nodes) {
+            if (node.heldBack == null) continue
+            chain(dir)
+            node.heldBack?.let { result.add(HeldBackDir(dir, it.source, it.text)) }
+        }
+        return result.sortedBy { it.dir }
+    }
+
+    /** How many directories' rule files are in memory now (at most [IgnoreSettings.maxCachedDirs] after a trim). */
+    internal val cachedDirs: Int get() = nodes.size
 
     private fun chain(dir: String): Chain {
         val epoch = chainEpoch.get()
-        nodes[dir]?.let { n -> if (n.memoEpoch == epoch) n.memo?.let { return it } }
+        nodes[dir]?.let { n ->
+            if (n.memoEpoch == epoch) {
+                n.memo?.let {
+                    n.lastUsed = useClock.incrementAndGet()
+                    return it
+                }
+            }
+        }
         val parent = if (dir.isEmpty()) base else chain(dir.substringBeforeLast('/', ""))
         return chainFor(dir, parent, epoch)
+    }
+
+    /**
+     * Keeps the cache within [IgnoreSettings.maxCachedDirs]: past it, the least recently used directories are
+     * forgotten down to seven eighths of the cap, so a trim runs once per many new directories. A held-back directory
+     * stays (it is what `heldBack` reports). A forgotten directory is probed and parsed again at its next use; the
+     * chains are rebuilt, since one may have been built over a forgotten one.
+     */
+    private fun trimIfNeeded() {
+        val cap = settings.maxCachedDirs
+        if (nodes.size <= cap || !trimming.compareAndSet(false, true)) return
+        try {
+            var excess = nodes.size - (cap - cap / TRIM_SLACK_DIVISOR)
+            val oldestFirst = nodes.entries.filter { it.value.heldBack == null }.sortedBy { it.value.lastUsed }
+            for ((dir, node) in oldestFirst) {
+                if (excess <= 0) break
+                if (nodes.remove(dir, node)) excess--
+            }
+            chainEpoch.incrementAndGet()
+        } finally {
+            trimming.set(false)
+        }
     }
 
     /** The chain below [dir], whose parent directory's chain is [parent]. */
@@ -227,7 +297,14 @@ class IgnoreTree(
         parent: Chain,
         epoch: Long,
     ): Chain {
-        val node = nodes.computeIfAbsent(dir) { DirNode() }
+        var created = false
+        val node =
+            nodes.computeIfAbsent(dir) {
+                created = true
+                DirNode()
+            }
+        node.lastUsed = useClock.incrementAndGet()
+        if (created) trimIfNeeded()
         if (node.memoEpoch == epoch && node.chainParent === parent) node.memo?.let { return it }
         synchronized(node) {
             val changed = refresh(node, dir)
@@ -326,16 +403,17 @@ class IgnoreTree(
         lines: List<String>,
         source: String,
     ): IgnoreRules = IgnoreRules.parse(lines.joinToString("\n"), source = source, options = settings.options)
+}
 
-    private fun wrap(v: IgnoreVerdict): IgnoreExplanation {
-        val r = v.rule ?: return IgnoreExplanation(v.ignored, null, null, v.decidedAt)
-        val layer =
-            when (r.source) {
-                IgnoreDefaults.OPERATIONAL_SOURCE -> IgnoreLayer.OPERATIONAL
-                IgnoreDefaults.DEFAULT_SOURCE -> IgnoreLayer.DEFAULT
-                IgnoreDefaults.ACCOUNT_SOURCE -> IgnoreLayer.ACCOUNT
-                else -> if (r.source.endsWith(GIT_FILE)) IgnoreLayer.GITIGNORE else IgnoreLayer.UNIDRIVE_IGNORE
-            }
-        return IgnoreExplanation(v.ignored, r, layer, v.decidedAt)
-    }
+/** The tree's answer for a verdict of the matcher: the layer is named after the rule's source. */
+private fun wrap(v: IgnoreVerdict): IgnoreExplanation {
+    val r = v.rule ?: return IgnoreExplanation(v.ignored, null, null, v.decidedAt)
+    val layer =
+        when (r.source) {
+            IgnoreDefaults.OPERATIONAL_SOURCE -> IgnoreLayer.OPERATIONAL
+            IgnoreDefaults.DEFAULT_SOURCE -> IgnoreLayer.DEFAULT
+            IgnoreDefaults.ACCOUNT_SOURCE -> IgnoreLayer.ACCOUNT
+            else -> if (r.source.endsWith(IgnoreTree.GIT_FILE)) IgnoreLayer.GITIGNORE else IgnoreLayer.UNIDRIVE_IGNORE
+        }
+    return IgnoreExplanation(v.ignored, r, layer, v.decidedAt)
 }

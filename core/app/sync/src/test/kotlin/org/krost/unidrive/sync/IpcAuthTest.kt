@@ -328,7 +328,7 @@ class IpcAuthTest {
         val read =
             setOf(
                 "daemon.status", "hydration.list", "hydration.last_synced", "hydration.subscribe", "sync.subscribe", "hydration.open_read",
-                "history.list", "history.subscribe", "metrics.query",
+                "history.list", "history.subscribe", "metrics.query", "ignore.explain",
             )
         val write =
             setOf(
