@@ -641,6 +641,50 @@ class ReconcilerTest {
     }
 
     @Test
+    fun `case collisions remain refused during pending upload recovery`() {
+        val paths = setOf("/Report.pdf", "/report.pdf")
+        for (path in paths) {
+            Files.writeString(syncRoot.resolve(path.removePrefix("/")), path)
+            db.upsertEntry(dbEntry(path, isHydrated = true).copy(remoteId = null, remoteHash = null, remoteSize = 0))
+        }
+        val normal = reconciler.reconcile(emptyMap(), emptyMap())
+        val streaming = reconciler.finalizeStreaming(emptyList(), emptyMap(), emptyMap())
+        for (actions in listOf(normal, streaming)) {
+            assertTrue(actions.none { it is SyncAction.Upload })
+            assertEquals(paths, actions.filterIsInstance<SyncAction.Conflict>().map { it.path }.toSet())
+        }
+    }
+
+    @Test
+    fun `a pending upload that case-collides with an already synced path is refused, the synced one is left alone`() {
+        Files.writeString(syncRoot.resolve("report.pdf"), "local bytes")
+        db.upsertEntry(dbEntry("/Report.pdf", isHydrated = true))
+        db.upsertEntry(dbEntry("/report.pdf", isHydrated = true).copy(remoteId = null, remoteHash = null, remoteSize = 0))
+
+        val normal = reconciler.reconcile(emptyMap(), emptyMap())
+        val streaming = reconciler.finalizeStreaming(emptyList(), emptyMap(), emptyMap())
+
+        for (actions in listOf(normal, streaming)) {
+            assertTrue(actions.none { it is SyncAction.Upload }, "no upload to the case-folded remote path: $actions")
+            assertEquals(listOf("/report.pdf"), actions.filterIsInstance<SyncAction.Conflict>().map { it.path })
+        }
+    }
+
+    @Test
+    fun `a lone pending upload is still recovered`() {
+        Files.writeString(syncRoot.resolve("solo.pdf"), "local bytes")
+        db.upsertEntry(dbEntry("/solo.pdf", isHydrated = true).copy(remoteId = null, remoteHash = null, remoteSize = 0))
+
+        val normal = reconciler.reconcile(emptyMap(), emptyMap())
+        val streaming = reconciler.finalizeStreaming(emptyList(), emptyMap(), emptyMap())
+
+        for (actions in listOf(normal, streaming)) {
+            assertEquals(listOf("/solo.pdf"), actions.filterIsInstance<SyncAction.Upload>().map { it.path })
+            assertTrue(actions.none { it is SyncAction.Conflict })
+        }
+    }
+
+    @Test
     fun `actions sorted folders first then files`() {
         val remoteChanges =
             mapOf(

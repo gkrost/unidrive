@@ -3181,8 +3181,24 @@ open class SyncEngine(
         return null
     }
 
-    private suspend fun applyConflict(action: SyncAction.Conflict) {
+    // Internal for the refused-case-collision test.
+    internal suspend fun applyConflict(action: SyncAction.Conflict) {
         log.warn("Conflict on ${action.path}: local=${action.localState}, remote=${action.remoteState}")
+
+        // The reconciler refuses a case collision (two local paths that differ only by case) as a
+        // conflict with local NEW, remote unchanged and no remote item. Nothing is transferred under
+        // either policy: last-writer-wins would take the missing remote mtime as "local wins" and
+        // upload, and on a case-insensitive remote the second member overwrites the first's content.
+        if (action.remoteItem == null && action.localState == ChangeState.NEW && action.remoteState == ChangeState.UNCHANGED) {
+            conflictLog?.record(
+                path = action.path,
+                localState = action.localState.name,
+                remoteState = action.remoteState.name,
+                policy = action.policy.name,
+                loserFile = null,
+            )
+            return
+        }
 
         when (action.policy) {
             ConflictPolicy.KEEP_BOTH -> {
