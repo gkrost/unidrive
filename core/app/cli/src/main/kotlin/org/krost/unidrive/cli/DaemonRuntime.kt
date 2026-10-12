@@ -21,6 +21,7 @@ import org.krost.unidrive.sync.ProcessLock
 import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
+import org.krost.unidrive.telemetry.TransferHistory
 import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.nio.file.Files
@@ -90,6 +91,14 @@ class DaemonRuntime(
     private val afterProfileLockAcquired: () -> Unit = {},
 ) {
     private val log = LoggerFactory.getLogger(DaemonRuntime::class.java)
+
+    /**
+     * #652: how the transfer history file is opened; a seam for tests, which need an open to fail on demand (and to
+     * keep hold of the history to see it closed). Default retention (90 days or 200 MB) applies until the config keys
+     * exist.
+     */
+    internal var openHistory: (profile: String, file: Path) -> TransferHistory =
+        { profile, file -> TransferHistory.open(profile, file) }
 
     /** #655: the last quota snapshot served in daemon.status (`quota`); null = nothing fetched yet. */
     internal data class QuotaSnapshot(
@@ -188,6 +197,8 @@ class DaemonRuntime(
             // The engine's two hooks into the hydration layer (see HydrationLink). Declared outside the
             // try below: its finally joins the hydration uploads through it.
             val hydrationLink = HydrationLink()
+            // #652: opened with the mount's hydration layer, closed (flushed) after its uploads have been joined.
+            var transferHistory: TransferHistory? = null
             // Coroutine-debug probes (gkrost/unidrive#613 ask 1): with UNIDRIVE_COROUTINE_DEBUG=1 the
             // daemon captures suspension stacks at start and dumps every live coroutine when a
             // coroutine-dump.trigger file appears in the profile folder — a hung upload becomes one
@@ -237,6 +248,9 @@ class DaemonRuntime(
                 val pause = mount.pause
                 val wrongModeReply = """{"ok":false,"error":"wrong_mode"}"""
                 val mountMode = profileMode == ProfileMode.MOUNT
+                // #652: a mount profile records its transfers; a failure to open the history is logged once and the daemon
+                // runs without it. Mirror mode records none (its transfers are the sync pass's).
+                transferHistory = if (mountMode) openTransferHistory() else null
                 // #560 U6 (cutover): the hydration runtime exists only on a mount profile. A mirror
                 // daemon constructs no hydration layer and keeps no cache — its local bytes live in
                 // the sync root its reconcile owns, and every hydration verb gets wrong_mode below.
@@ -249,6 +263,7 @@ class DaemonRuntime(
                             db!!,
                             recoveryUploadScope = hydrationUploadScope(profileName),
                             cacheMaxBytes = hydrationCacheMaxBytes,
+                            history = transferHistory,
                         )
                     } else {
                         null
@@ -582,7 +597,12 @@ class DaemonRuntime(
                 server.close()
                 ipcServer = null
                 serveJob.cancelAndJoin()
-                hydrationLink.hydration?.shutdownUploads()
+                try {
+                    hydrationLink.hydration?.shutdownUploads()
+                } finally {
+                    // #652: after the uploads are joined (their last rows are queued by then), before state.db closes.
+                    closeTransferHistory(transferHistory)
+                }
             }
         } catch (e: Exception) {
             // An IPC startup refusal is already reported as its one line.
@@ -633,6 +653,30 @@ class DaemonRuntime(
         val pidPart = if (holder != null) " (PID ${holder.pid})" else ""
         System.err.println("$holderDesc$pidPart.")
         exitProcess(1)
+    }
+
+    /**
+     * #652: opens this mount profile's transfer history, or returns null after one WARN line: the history is never a
+     * reason to refuse to serve, so every failure to open it (a file that cannot be restricted to the owner, a damaged
+     * or newer database, a full disk) leaves the daemon running without one.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private fun openTransferHistory(): TransferHistory? =
+        try {
+            openHistory(profileName, dbPath.resolveSibling(HISTORY_FILE_NAME))
+        } catch (e: Exception) {
+            log.warn("transfer history unavailable for profile '{}' ({}: {}); the daemon runs without it", profileName, e.javaClass.simpleName, e.message)
+            null
+        }
+
+    /** #652: writes what is queued and closes the history file. Bounded by the history's own close; never throws. */
+    @Suppress("TooGenericExceptionCaught")
+    private fun closeTransferHistory(history: TransferHistory?) {
+        try {
+            history?.close()
+        } catch (e: Exception) {
+            log.warn("closing the transfer history of profile '{}' failed: {}", profileName, e.message)
+        }
     }
 
     private fun cleanup() {
@@ -776,6 +820,9 @@ class DaemonRuntime(
 
     companion object {
         const val SHUTDOWN_DEADLINE_MS: Long = 10_000
+
+        /** #652: the transfer history's file, in the profile's state folder next to state.db. */
+        const val HISTORY_FILE_NAME = "telemetry.db"
 
         /**
          * The scope the mount's hydration uploads and replays run in. It carries the `profile` MDC key

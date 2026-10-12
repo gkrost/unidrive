@@ -108,6 +108,26 @@ class TransferHistoryTest {
     }
 
     @Test
+    fun `a transfer refused before any request made no attempt and a conflict is its own result`() {
+        val history = open()
+        val refused = history.begin(TransferDirection.UPLOAD, "/r/refused.bin")
+        refused.finish(TransferResult.FAILED, errorClass = "refused_earlier", attempted = false)
+        val conflicted = history.begin(TransferDirection.UPLOAD, "/r/conflict.bin")
+        assertFalse(conflicted.hasStarted)
+        conflicted.started()
+        assertTrue(conflicted.hasStarted)
+        conflicted.finish(TransferResult.CONFLICT, errorClass = "RemoteConflictException")
+        assertTrue(history.flush())
+
+        val byPath = history.rows().associateBy { it.path }
+        assertEquals(0, byPath.getValue("/r/refused.bin").attempts)
+        assertNull(byPath.getValue("/r/refused.bin").startedAt)
+        assertEquals(TransferResult.CONFLICT, byPath.getValue("/r/conflict.bin").result)
+        assertEquals(1, byPath.getValue("/r/conflict.bin").attempts)
+        assertEquals(TransferResult.CONFLICT, TransferResult.ofWire("conflict"))
+    }
+
+    @Test
     fun `a failed attempt followed by a success is one row with two attempts`() {
         val history = open()
         val handle = history.begin(TransferDirection.UPLOAD, "/r/retry.bin", bytesTotal = 10)

@@ -376,6 +376,8 @@ internal class HydrationTestEnv(
     /** #658: the cache budget in bytes; 0 = unlimited. */
     val cacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
     providerId: String = "fake-hydration",
+    /** #652: the transfer history the hydration layer records into; null = none. */
+    history: org.krost.unidrive.telemetry.TransferHistory? = null,
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
@@ -426,6 +428,7 @@ internal class HydrationTestEnv(
             uploadProgressMinIntervalMs = uploadProgressMinIntervalMs,
             failedReplayDelayMs = failedReplayDelayMs,
             cacheMaxBytes = cacheMaxBytes,
+            history = history,
         )
     }
 
@@ -449,6 +452,32 @@ internal class HydrationTestEnv(
                     isPinned = false,
                     isHydrated = false,
                     lastSynced = Instant.now(),
+                ),
+            )
+        }
+
+        /**
+         * A file in the cloud and in step with it, as [MinimalFakeProvider.getMetadata] reports it (one byte): a write of
+         * the same [content] is the identical-bytes case, which uploads nothing. Seed the remote content too.
+         */
+        fun insertCloudInStepRow(path: String, content: String = "x") {
+            val bytes = content.toByteArray()
+            require(bytes.size == 1) { "the fake provider reports a one-byte cloud copy" }
+            db.upsertEntry(
+                SyncEntry(
+                    path = path,
+                    remoteId = "id-$path",
+                    remoteHash = null,
+                    remoteSize = 1L,
+                    remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                    localMtime = 1_000L,
+                    localSize = 1L,
+                    isFolder = false,
+                    isPinned = false,
+                    isHydrated = true,
+                    lastSynced = Instant.now(),
+                    localHash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) },
+                    cacheBacked = true,
                 ),
             )
         }
