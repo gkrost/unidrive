@@ -14,6 +14,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -760,23 +761,23 @@ class DaemonRuntimeTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        awaitDaemonSocket(socketPath)
+        awaitDaemonSocket(socketPath, daemonJob)
 
         val channel = connect()
         try {
             channel.configureBlocking(false)
             // Subscribe via hydration.subscribe (the verb the co-daemon issues on mount).
             channel.write(ByteBuffer.wrap(("""{"verb":"hydration.subscribe"}""" + "\n").toByteArray()))
-            // First line is the subscribe ok-reply; the view.invalidated event follows
-            // post-reply once the auto-enumerate mutates state.db.
-            val collected = readUntil(channel, "view.invalidated", timeoutMs = 10_000)
-            assertTrue(
-                collected.contains("\"event\":\"view.invalidated\""),
-                "expected a view.invalidated push after subscribe-triggered enumerate; got: $collected",
-            )
-            assertTrue(
-                collected.contains("/remote-new.txt"),
-                "view.invalidated must name the newly-enumerated path; got: $collected",
+            // The subscribe ok-reply and the view.invalidated event (pushed once the auto-enumerate has mutated
+            // state.db) are awaited as COMPLETE lines under the shared budget (IPC_STEP_BUDGET_MS, a ceiling and not
+            // a pace). The event used to be found as a substring of whatever had been read so far, which can stop in
+            // the middle of its line, and under a 10 s ceiling that named nothing when it ran out.
+            val (reply, event) = awaitViewInvalidated(channel)
+            assertTrue(reply.contains("\"ok\":true"), "subscribe must succeed; got: $reply")
+            assertEquals(
+                listOf("/remote-new.txt"),
+                Json.parseToJsonElement(event).jsonObject.getValue("paths").jsonArray.map { it.jsonPrimitive.content },
+                "view.invalidated must name the newly-enumerated path; got: $event",
             )
         } finally {
             channel.close()
@@ -784,6 +785,19 @@ class DaemonRuntimeTest {
 
         runtime.close()
         daemonJob.join()
+    }
+
+    /** The subscribe reply and the view.invalidated line that follows it, each a complete line. */
+    private suspend fun awaitViewInvalidated(channel: SocketChannel): Pair<String, String> {
+        val (reply, event) =
+            awaitIpcLines(
+                channel,
+                "hydration.subscribe reply and the view.invalidated push of the subscribe-triggered enumerate",
+                IPC_STEP_BUDGET_MS,
+                { !it.contains("\"event\"") },
+                { it.contains("\"event\":\"view.invalidated\"") },
+            )
+        return reply to event
     }
 
     @Test
@@ -839,8 +853,8 @@ class DaemonRuntimeTest {
         try {
             channel.configureBlocking(false)
             channel.write(ByteBuffer.wrap(("""{"verb":"hydration.subscribe"}""" + "\n").toByteArray()))
-            val collected = readUntil(channel, "view.invalidated", timeoutMs = 10_000)
-            assertTrue(collected.contains("\"event\":\"view.invalidated\""), "a full-scope subscribe enumerates; got: $collected")
+            // Fails with the step and every line seen when the push never comes (shared budget, complete lines).
+            awaitViewInvalidated(channel)
             delay(500) // a second, unwanted enumerate would have started by now
             assertEquals(1, provider.deltaCalls.get(), "exactly one enumerate per subscribe")
         } finally {
@@ -872,7 +886,7 @@ class DaemonRuntimeTest {
         channel.configureBlocking(false)
         try {
             channel.write(ByteBuffer.wrap(("""{"verb":"daemon.status"}""" + "\n").toByteArray()))
-            val reply = readUntil(channel, "\"ok\"", timeoutMs = 5_000L)
+            val reply = awaitIpcLine(channel, "daemon.status reply") { !it.contains("\"event\"") }
             assertTrue(reply.contains("\"ok\":true"), "expected ok:true; got: $reply")
             assertTrue(
                 reply.contains("\"protocol_version\":${DaemonRuntime.IPC_PROTOCOL_VERSION}"),
