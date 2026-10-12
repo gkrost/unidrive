@@ -48,6 +48,9 @@ class RefreshRpcHandler(
     // Whether a hydration upload of the path is queued or in flight (HydrationImpl.hasUploadSlot, late-bound
     // by the daemon wiring). A reset keeps the row of such a path.
     private val uploadInFlight: (path: String) -> Boolean = { false },
+    // #778: true while the daemon is paused. A refresh enumerates the cloud on either path, so it is refused
+    // as `paused` and nothing is reserved.
+    private val paused: () -> Boolean = { false },
     // Terminal-event sink. Defaults to the broadcast channel; injectable for tests.
     private val emit: (String) -> Unit = ipcServer::emit,
 ) {
@@ -66,6 +69,7 @@ class RefreshRpcHandler(
      * If accepted (ok:true), launches the refresh body as a child of [scope].
      */
     fun handle(@Suppress("UNUSED_PARAMETER") connectionId: String, jsonRequest: String): String {
+        if (paused()) return """{"ok":false,"error":"paused"}"""
         val jobId = UUID.randomUUID().toString()
         // Reserve the in-flight slot BEFORE launching: a placeholder job is swapped
         // in atomically, so a second concurrent request can never slip through the

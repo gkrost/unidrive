@@ -4,6 +4,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.krost.unidrive.hydration.HydrationImpl
+import org.krost.unidrive.hydration.PauseGate
 
 /**
  * The health objects of the `daemon.status` reply (#658; docs/dev/specs/unidrive-daemon-design.md §4.3).
@@ -30,6 +31,18 @@ internal fun HydrationImpl.CacheHealth.toJson(): JsonObject =
 internal fun providerHealthJson(lastContactMs: Long?): JsonObject =
     buildJsonObject {
         put("last_contact_ms", lastContactMs)
+    }
+
+/**
+ * `paused` (#778): present only while the daemon is paused. `since_ms` is epoch ms of the first request of the
+ * pause; `auto` says whether a rule of the client (true) or a person (false) paused. The same object is the
+ * reply of `daemon.pause` and the body of the `paused` event.
+ */
+internal fun PauseGate.State.toJson(): JsonObject =
+    buildJsonObject {
+        put("reason", reason)
+        put("since_ms", sinceMs)
+        put("auto", auto)
     }
 
 /**

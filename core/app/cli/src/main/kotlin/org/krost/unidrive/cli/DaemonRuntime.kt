@@ -14,6 +14,7 @@ import org.krost.unidrive.hydration.HydrationEvent
 import org.krost.unidrive.hydration.HydrationImpl
 import org.krost.unidrive.hydration.HydrationIpcHandler
 import org.krost.unidrive.hydration.MountEngine
+import org.krost.unidrive.hydration.serialiseHydrationEvent
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.ProcessLock
@@ -231,6 +232,9 @@ class DaemonRuntime(
                 // enumeration: one of each per daemon). The engine itself stays for the refresh.run
                 // fallback (RefreshRpcHandler, U4). See MountEngine for who owns what.
                 val mount = MountEngine.over(engine)
+                // #778: the pause (daemon.pause / daemon.resume); the uploads and downloads of the mount consult it
+                // through the front-end, the enumeration and the refresh through the handlers below.
+                val pause = mount.pause
                 val wrongModeReply = """{"ok":false,"error":"wrong_mode"}"""
                 val mountMode = profileMode == ProfileMode.MOUNT
                 // #560 U6 (cutover): the hydration runtime exists only on a mount profile. A mirror
@@ -260,7 +264,7 @@ class DaemonRuntime(
                 // remote→state.db refresh for mount view consumers. Constructed before the
                 // hydration verbs so the subscribe-triggered enumerate (below) can reuse its
                 // shared in-flight guard.
-                val enumerateHandler = EnumerateRpcHandler(mount, serveScope, server::emit)
+                val enumerateHandler = EnumerateRpcHandler(mount, serveScope, server::emit, paused = { pause.isPaused })
 
                 // refresh.run handler (spec §4.2). Pass serveScope so refresh
                 // jobs are cancelled when the daemon shuts down. Pass db so
@@ -281,6 +285,7 @@ class DaemonRuntime(
                         mountClientConnected = { profileMode == ProfileMode.MOUNT },
                         // A reset keeps the rows of uploads still under way (same hook the enumeration's reap uses).
                         uploadInFlight = { path -> hydration?.hasUploadSlot(path) ?: false },
+                        paused = { pause.isPaused },
                     )
 
                 // The remote poll (#463), mount-only; built here, started below (see there). The backoff
@@ -295,6 +300,7 @@ class DaemonRuntime(
                             consecutiveFailuresAtStart =
                                 db!!.getSyncState(SyncEngine.ENUMERATE_FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0,
                             isBusy = { refreshHandler.isInFlight() },
+                            awaitResumed = { pause.awaitResumed() },
                         )
                     } else {
                         null
@@ -504,7 +510,7 @@ class DaemonRuntime(
                     // expired; no client asking means no provider call. Failure keeps the
                     // last value with stale=true and the error named; unknowns are null —
                     // never zero, never a division by a missing total.
-                    if (providerHasQuota) maybeTriggerQuotaRefresh(clientCount, serveScope)
+                    if (providerHasQuota) maybeTriggerQuotaRefresh(clientCount, serveScope, paused = pause.isPaused)
                     val quotaJson =
                         if (!providerHasQuota) {
                             null
@@ -525,8 +531,22 @@ class DaemonRuntime(
                         (quotaJson?.let { ",\"quota\":$it" } ?: "") +
                         healthJson +
                         ",\"provider_health\":$providerHealth" +
+                        // paused (#778): present only while the daemon is paused; uploads and quota above keep reporting.
+                        (pause.current?.let { ",\"paused\":${it.toJson()}" } ?: "") +
                         "}"
                 }
+
+                // daemon.pause / daemon.resume (#778): the daemon holds its pause in memory only. A pause stops every
+                // upload, cloud download and cloud enumeration from starting (local writes stay queued, reported as
+                // waiting); a transfer already running is judged by the in-flight rule. The change goes to the
+                // subscribers of both streams: sync.subscribe (every mode) and hydration.subscribe (mount).
+                val pauseHandler =
+                    PauseRpcHandler(pause) { event ->
+                        runCatching { server.emit(serialiseHydrationEvent(event)) }
+                        hydrationIpc?.dispatchEvent(event)
+                    }
+                server.registerHandler("daemon.pause") { _, json -> pauseHandler.pause(json) }
+                server.registerHandler("daemon.resume") { _, _ -> pauseHandler.resume() }
 
                 // daemon.shutdown verb: graceful stop over IPC, signal-free and identical on every
                 // OS (Windows has no SIGTERM; Process.destroy() there is TerminateProcess, which
@@ -636,6 +656,8 @@ class DaemonRuntime(
     private fun maybeTriggerQuotaRefresh(
         clientCount: Int,
         scope: kotlinx.coroutines.CoroutineScope,
+        // #778: no fetch while the daemon is paused; the snapshot is still marked stale once its TTL has expired.
+        paused: Boolean = false,
     ) {
         if (quotaRefreshMs <= 0 || clientCount <= 0) return
         val snap = quotaSnapshot
@@ -647,6 +669,7 @@ class DaemonRuntime(
             // value as fresh while the refetch is in flight.
             quotaSnapshot = snap.copy(stale = true)
         }
+        if (paused) return
         if (!quotaRefreshInFlight.compareAndSet(false, true)) return
         scope.launch {
             try {

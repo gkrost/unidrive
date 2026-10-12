@@ -4,3 +4,5 @@
 {"ok":false,"error":"unknown_path"}
 {"verb":"hydration.open_read","handle_id":"h-1","path":"/docs/../report.txt"}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.open_read","handle_id":"h-1","path":"/paused/cold.txt"}
+{"ok":false,"error":"paused"}

@@ -1,0 +1,10 @@
+{"verb":"daemon.pause"}
+{"ok":false,"error":"missing_reason"}
+{"verb":"daemon.pause","reason":"Not A Word!","auto":false}
+{"ok":false,"error":"invalid_reason"}
+{"verb":"daemon.pause","reason":"user","auto":"yes"}
+{"ok":false,"error":"invalid_auto"}
+{"verb":"daemon.pause","reason":"user","auto":false}
+{"ok":true,"paused":{"reason":"user","since_ms":1700000000000,"auto":false}}
+{"verb":"daemon.pause","reason":"metered","auto":true}
+{"ok":true,"paused":{"reason":"metered","since_ms":1700000000000,"auto":true}}

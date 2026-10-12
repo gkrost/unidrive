@@ -30,6 +30,9 @@ class EnumerateRpcHandler(
     private val engine: EnumerationEntryPoint,
     private val scope: CoroutineScope,
     private val emit: (String) -> Unit,
+    // #778: true while the daemon is paused. No cloud enumeration starts then: the verb is refused as `paused`
+    // and the poll's guarded run is skipped.
+    private val paused: () -> Boolean = { false },
 ) {
     private val log = LoggerFactory.getLogger(EnumerateRpcHandler::class.java)
 
@@ -38,6 +41,7 @@ class EnumerateRpcHandler(
     data class EnumerateJob(val id: String, val job: Job)
 
     fun handle(@Suppress("UNUSED_PARAMETER") connectionId: String, jsonRequest: String): String {
+        if (paused()) return PAUSED_REPLY
         val jobId = UUID.randomUUID().toString()
         // Reserve the in-flight slot BEFORE launching (BACKLOG-64 defensive note):
         // a placeholder job is swapped in atomically; if another enumeration already
@@ -117,6 +121,7 @@ class EnumerateRpcHandler(
      * RPC reply).
      */
     suspend fun runGuarded(reset: Boolean): EnumerateResult? {
+        if (paused()) return null
         val jobId = UUID.randomUUID().toString()
         val placeholder = EnumerateJob(jobId, Job())
         if (!inFlight.compareAndSet(null, placeholder)) return null
@@ -137,6 +142,8 @@ class EnumerateRpcHandler(
     }
 
     companion object {
+        private const val PAUSED_REPLY = """{"ok":false,"error":"paused"}"""
+
         private val RESET_TRUE_REGEX = Regex("\"reset\"\\s*:\\s*true")
     }
 }

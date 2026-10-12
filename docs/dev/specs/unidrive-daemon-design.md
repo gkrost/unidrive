@@ -353,6 +353,8 @@ A running enumeration is answered from memory, never from state.db, so a status 
 
 `uploads` is read from state.db at most once per second, and a status request waits for that read for 100 ms at most (1 s for the very first one): an enumeration's save holds the database for as long as it takes, and the reply serves the previous reading (its `oldest_pending_age_ms` carried forward to now) instead of stalling behind it.
 
+**The `paused` object** (additive; see §4.7) is present only while the daemon is paused: `"paused": {"reason": "metered", "since_ms": 1700000000000, "auto": true}`. A status line must show it instead of "up to date". `capabilities` lists `pause` on an engine that has the verbs.
+
 ### 4.4 `sync.subscribe` (existing, unchanged semantics)
 
 The verb stays registered on the daemon's `IpcServer` with the same `scheduleAfterReply` post-reply hook mechanism (β) the `SyncCommand` uses today. On the daemon side, the only events emitted are refresh-progress events (the daemon has no reconcile loop). On the `SyncCommand` side today, the same verb emits sync-progress events. Both implementations honor the same subscriber-set contract; the event source differs by which IPC server the client connects to.
@@ -372,6 +374,51 @@ Backwards-compat for legacy pid-only sidecars stays unchanged: `<pid>\n` (no mod
 ### 4.6 Path normalisation
 
 Unchanged from existing IPC contract. The new verbs follow the same conventions as the existing ones (`trimEnd('/')` per spec `hydration-namespace-verbs-design.md` §3.1, paths are absolute starting with `/`, empty path or `/` means root).
+
+### 4.7 `daemon.pause`, `daemon.resume` and the paused state
+
+A client knows *when* data should stop moving (a metered connection, power saver, a person's click); only the engine can make the transfers wait. The state is held by the daemon in memory only: a restarted daemon runs, and the client re-applies its rules (a manual pause is remembered by the client). Both verbs are in the admin class ([ipc-authentication.md](ipc-authentication.md) §4: full scope, a `read` connection gets `forbidden`) and exist in both profile modes.
+
+```json
+{"verb": "daemon.pause", "reason": "metered", "auto": true}
+{"ok": true, "paused": {"reason": "metered", "since_ms": 1700000000000, "auto": true}}
+
+{"verb": "daemon.resume"}
+{"ok": true}
+```
+
+| member | meaning |
+|---|---|
+| `reason` | a short machine word the client turns into text (`metered`, `power_saver`, `user`): 1 to 32 characters of `a-z`, `0-9` and `_`. Required |
+| `auto` | true when a rule of the client paused, false when a person did. Optional, default false; anything but a JSON boolean is refused |
+
+A refused request answers `{"ok":false,"error":"<token>"}` and changes nothing: `missing_reason` (no `reason` member), `invalid_reason` (not a string, empty, longer than 32 or outside that character set), `invalid_auto`. Unknown members are ignored; a timed pause (`until`) is not part of this and would be one more optional member.
+
+**Idempotence.** `daemon.pause` while paused keeps the first `since_ms` (the pause began then) and takes the new `reason` and `auto`; the reply carries the resulting object. `daemon.resume` while running is a no-op success. Neither a repeated identical pause nor a resume of a running daemon is announced as an event.
+
+**Events** (one line each, to every `sync.subscribe` subscriber and, on a mount profile, every `hydration.subscribe` subscriber, whatever its scope):
+
+```json
+{"event": "paused", "reason": "metered", "since_ms": 1700000000000, "auto": true}
+{"event": "resumed"}
+```
+
+`paused` is sent when a pause begins and when a pause that is already in force changes its `reason` or `auto`; `resumed` when a pause ends. The user notification is the client's job.
+
+**What a pause does.**
+
+| subject | while paused |
+|---|---|
+| uploads | no upload starts. A write made meanwhile is accepted into the queue (its row, `pending_upload: true`, counted in `uploads.pending`) and waits: no failure is stamped (`uploads.failed` and `hydration.list`'s `error` stay as they were), `queued` is announced, and the upload runs after the resume. The start-up replay waits the same way. Waiting does not hold the queue's back-pressure: `open_write` is never held back at the queue depth for the length of a pause |
+| transfer in flight | judged once, when the pause begins. One whose estimated time remaining is **under 10 seconds** is left to finish; any other is aborted. The estimate is the bytes still to move divided by the rate since the transfer got its permit: for an upload from the provider's own progress reports `(done, total)`, for a download from the size of its staging file against the item's size. A transfer with no reading yet has no estimate and is aborted. An aborted upload goes back into the queue without counting a failed attempt (no `failed` event, no row stamp, the retry ladder is not advanced; `queued` is sent again) and keeps no permit or slot; an aborted download answers `paused` below |
+| cloud download | `hydration.open_read` and `hydration.hydrate` of a file that is not in the cache fail at once with `{"ok":false,"error":"paused"}` (the `failed` event, and for `open_read` the `completed` event, carry the token); nothing is started and nothing waits. A file already in the cache is served as usual. The engine cannot ask the user: the front-end asks whether the action may lift the pause, then calls `daemon.resume` and sends the request again |
+| cloud enumeration | the poll does not enumerate; its tick waits for the resume and runs at once when the pause ends. `sync.enumerate` and `refresh.run` answer `{"ok":false,"error":"paused"}`. An enumeration that is already running when the pause begins runs to its end |
+| quota | `daemon.status` keeps reporting the last snapshot (flagged `stale` once its TTL expired) and starts no fetch |
+| local writes, `hydration.list`, `daemon.status`, cache eviction | unaffected |
+
+The namespace verbs that act on the cloud synchronously (`hydration.mkdir`, `unlink`, `rmdir`, `rename`) have no queue to wait in; a pause does not hold them. (`hydration.create` is local until its upload.)
+
+**Stop while paused.** `daemon.shutdown` and the signal path behave as before: waiting uploads are cancelled with the serve scope, their rows stay never-uploaded (or keep the cache copy that differs from the row's baseline), and the next start replays them. Nothing is stamped failed.
 
 ## 5. Invariants and failure modes
 
