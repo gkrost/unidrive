@@ -24,7 +24,7 @@ Multi-platform cloud-sync core. Pure JVM, zero telemetry. Modular SPI for Intern
 
 ## Build
 
-JDK 21+ and Linux with `systemd --user` for the packaged daemon. Internxt uses the host's native credential store: Linux requires an unlocked Secret Service and `secret-tool` (`libsecret-tools`), Windows uses user-scoped DPAPI, and macOS uses the user's login Keychain. Unsupported platforms and unavailable or locked stores fail closed without writing plaintext credentials. The Gradle wrapper lives in `core/`.
+JDK 21+ and Linux with `systemd --user` for the packaged daemon. Internxt uses the host's native credential store: Linux requires an unlocked Secret Service and `secret-tool` (`libsecret-tools`), Windows uses user-scoped DPAPI, and macOS uses the user's login Keychain (macOS is not supported or tested in CI yet). Unsupported platforms and unavailable or locked stores fail closed without writing plaintext credentials. The Gradle wrapper lives in `core/`.
 
 ```bash
 cd core && ./gradlew :app:cli:shadowJar    # build fat JAR → core/app/cli/build/libs/unidrive-*.jar
