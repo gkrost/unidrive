@@ -4,6 +4,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudItem
@@ -187,9 +188,71 @@ class DaemonTransferHistoryTest {
         assertFalse(Files.exists(historyFile))
     }
 
+    @Test
+    fun `history list serves the rows the daemon recorded to a read-scope connection`() = runBlocking {
+        seedColdFile("/a.txt", size = 5)
+        val runtime = runtime(ProfileMode.MOUNT)
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+        try {
+            assertEquals("""{"ok":true}""", exchange("""{"verb":"hydration.hydrate","path":"/a.txt"}"""))
+            // The row is written behind a queue: wait for it to be readable instead of racing the writer thread.
+            val deadline = System.currentTimeMillis() + 10_000
+            var reply = Json.parseToJsonElement(exchange("""{"verb":"history.list"}""", IpcAuth.Scope.READ)).jsonObject
+            while (reply.getValue("rows").jsonArray.isEmpty() && System.currentTimeMillis() < deadline) {
+                delay(50)
+                reply = Json.parseToJsonElement(exchange("""{"verb":"history.list"}""", IpcAuth.Scope.READ)).jsonObject
+            }
+            assertEquals("true", reply.getValue("ok").toString())
+            val row = reply.getValue("rows").jsonArray.single().jsonObject
+            assertEquals("\"download\"", row.getValue("direction").toString())
+            assertEquals("\"/a.txt\"", row.getValue("path").toString())
+            assertEquals("\"success\"", row.getValue("result").toString())
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    @Test
+    fun `a read-scope connection may follow the history but not write`() = runBlocking {
+        val runtime = runtime(ProfileMode.MOUNT)
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+        try {
+            val subscribe = Json.parseToJsonElement(exchange("""{"verb":"history.subscribe"}""", IpcAuth.Scope.READ)).jsonObject
+            assertEquals("true", subscribe.getValue("ok").toString())
+            val forbidden = """{"ok":false,"error":"forbidden","scope":"read"}"""
+            assertEquals(forbidden, exchange("""{"verb":"hydration.hydrate","path":"/a.txt"}""", IpcAuth.Scope.READ))
+            assertEquals(forbidden, exchange("""{"verb":"daemon.pause","reason":"user"}""", IpcAuth.Scope.READ))
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    @Test
+    fun `a mount daemon whose history did not open answers history_unavailable, not an empty list`() = runBlocking {
+        Files.createDirectory(historyFile)
+        val runtime = runtime(ProfileMode.MOUNT)
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+        try {
+            val unavailable = """{"ok":false,"error":"history_unavailable","reason":"open_failed"}"""
+            assertEquals(unavailable, exchange("""{"verb":"history.list"}""", IpcAuth.Scope.READ))
+            assertEquals(unavailable, exchange("""{"verb":"history.subscribe"}""", IpcAuth.Scope.READ))
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
     /** One authenticated request/reply on a fresh connection. */
-    private suspend fun exchange(request: String): String {
-        val channel = IpcAuthClient.connect(IpcEndpoint(socketPath, tempDir, "test_profile"), IpcAuth.Scope.FULL)
+    private suspend fun exchange(
+        request: String,
+        scope: IpcAuth.Scope = IpcAuth.Scope.FULL,
+    ): String {
+        val channel = IpcAuthClient.connect(IpcEndpoint(socketPath, tempDir, "test_profile"), scope)
         try {
             channel.configureBlocking(false)
             channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))

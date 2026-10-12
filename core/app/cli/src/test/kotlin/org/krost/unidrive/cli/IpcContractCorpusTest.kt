@@ -35,6 +35,9 @@ import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
+import org.krost.unidrive.telemetry.TransferDirection
+import org.krost.unidrive.telemetry.TransferHistory
+import org.krost.unidrive.telemetry.TransferResult
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
@@ -77,7 +80,10 @@ class IpcContractCorpusTest {
     // enumeration; daemon.pause is followed by daemon.resume before any verb a paused daemon would refuse;
     // daemon.shutdown is listed last because it stops the daemon the other verbs are replayed against.
     private val daemonVerbs =
-        listOf("daemon.status", "daemon.pause", "daemon.resume", "sync.subscribe", "refresh.run", "sync.enumerate", "ignore.explain", "daemon.shutdown")
+        listOf(
+            "daemon.status", "daemon.pause", "daemon.resume", "sync.subscribe", "refresh.run", "sync.enumerate",
+            "history.list", "history.subscribe", "ignore.explain", "daemon.shutdown",
+        )
 
     @Test
     fun corpus_covers_every_daemon_ipc_verb() {
@@ -145,6 +151,11 @@ class IpcContractCorpusTest {
             // no `quota` field; the quota-present shape is pinned in DaemonRuntimeTest.
             providerHasQuota = false,
         )
+        // history.list's corpus is replayed against four rows with fixed ids and instants.
+        // A clock near the rows keeps the retention (90 days) from taking the old rows away from under the corpus.
+        runtime.openHistory = { profile, file ->
+            TransferHistory.open(profile, file, clock = { 1_700_000_100_000L }).also { seedHistoryCorpus(file) }
+        }
         val daemonJob = launch { runtime.start() }
         try {
             awaitDaemonSocket(socketPath)
@@ -349,6 +360,173 @@ class IpcContractCorpusTest {
         }
     }
 
+    /**
+     * `sessions/history-unavailable.ndjson`: a mirror profile records no transfer history, so both history verbs answer
+     * `history_unavailable` (never an empty list that reads as "no transfers").
+     */
+    @Test
+    fun history_verbs_on_a_mirror_daemon_match_corpus_over_live_socket() = runBlocking {
+        val pairs = loadSession("history-unavailable")
+        val tempDir = Files.createTempDirectory("ipc-contract-history-mirror")
+        val socketPath = tempDir.resolve("daemon.sock")
+        val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MIRROR,
+            profileName = "contract_profile",
+            lockFile = tempDir.resolve(".lock"),
+            dbPath = tempDir.resolve("state.db"),
+            syncRoot = tempDir.resolve("sync-root"),
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+            providerHasQuota = false,
+        )
+        val daemonJob = launch { runtime.start() }
+        try {
+            awaitDaemonSocket(socketPath)
+            for ((request, expectedReply) in pairs) {
+                val channel = IpcAuthClient.connect(IpcEndpoint(socketPath, tempDir, "contract_profile"), IpcAuth.Scope.FULL)
+                try {
+                    channel.configureBlocking(false)
+                    channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
+                    assertJsonMatches(
+                        expected = Json.parseToJsonElement(expectedReply),
+                        actual = Json.parseToJsonElement(readFirstLine(channel, timeoutMs = 5_000)),
+                        at = "history-unavailable: reply to $request",
+                    )
+                } finally {
+                    channel.close()
+                }
+            }
+        } finally {
+            runtime.close()
+            daemonJob.join()
+            runCatching { tempDir.toFile().deleteRecursively() }
+        }
+    }
+
+    /**
+     * `events/history.row.ndjson`: the line a `history.subscribe` subscriber is pushed for a transfer the daemon's own
+     * history records. Its operation id and instants are the run's, so the fixture's stand in for them (after a check
+     * that each is a number) before the comparison.
+     * (`events/history.lost.ndjson` is pinned in HistoryRpcHandlerTest, where a subscriber can be made to fall behind.)
+     */
+    @Test
+    fun history_row_event_matches_corpus_over_live_socket() = runBlocking {
+        val expectedRow = Json.parseToJsonElement(loadEventLine("history.row")) as JsonObject
+        val tempDir = Files.createTempDirectory("ipc-contract-history-event")
+        val socketPath = tempDir.resolve("daemon.sock")
+        var history: TransferHistory? = null
+        val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
+            profileName = "contract_profile",
+            lockFile = tempDir.resolve(".lock"),
+            dbPath = tempDir.resolve("state.db"),
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider() },
+            providerHasQuota = false,
+        )
+        runtime.openHistory = { profile, file -> TransferHistory.open(profile, file).also { history = it } }
+        val daemonJob = launch { runtime.start() }
+        try {
+            awaitDaemonSocket(socketPath)
+            val subscriber = IpcAuthClient.connect(IpcEndpoint(socketPath, tempDir, "contract_profile"), IpcAuth.Scope.READ)
+            try {
+                subscriber.configureBlocking(false)
+                subscriber.write(ByteBuffer.wrap(("""{"verb":"history.subscribe"}""" + "\n").toByteArray()))
+                readFirstLine(subscriber, timeoutMs = 5_000)
+                val handle = checkNotNull(history).begin(TransferDirection.UPLOAD, "/docs/new.txt", bytesTotal = 10)
+                handle.started()
+                handle.finish(TransferResult.SUCCESS, bytesDone = 10)
+                // started() and finish() are two snapshots and a batch may merge them: read until the finished one.
+                // readFirstLine drops what follows the first line of a read, so this reads whole lines itself.
+                val pending = StringBuilder()
+                var event: JsonObject
+                do {
+                    event = Json.parseToJsonElement(readLine(subscriber, pending, timeoutMs = 5_000)) as JsonObject
+                } while ((event.getValue("row") as JsonObject).getValue("result").let { (it as JsonPrimitive).content } != "success")
+                val row = event.getValue("row") as JsonObject
+                assertTrue((row.getValue("operation_id") as JsonPrimitive).content.isNotEmpty())
+                assertTrue((event.getValue("seq") as JsonPrimitive).content.toLong() > 0, "a tail event carries a positive commit sequence")
+                val expectedInner = expectedRow.getValue("row") as JsonObject
+                // The id and the instants are the run's: each must be a number, and the fixture's values stand in for them.
+                val runValues = listOf("queued_at_ms", "started_at_ms", "finished_at_ms", "queue_wait_ms", "transfer_ms")
+                for (key in runValues) {
+                    val value = row.getValue(key)
+                    assertTrue(value is JsonPrimitive && !value.isString && value !is JsonNull, "$key is a number, got $value")
+                }
+                val comparable =
+                    JsonObject(
+                        event + mapOf(
+                            "seq" to expectedRow.getValue("seq"),
+                            "row" to JsonObject(
+                                row + ("operation_id" to expectedInner.getValue("operation_id")) +
+                                    runValues.associateWith { expectedInner.getValue(it) },
+                            ),
+                        ),
+                    )
+                assertJsonMatches(expectedRow, comparable, "history.row event")
+            } finally {
+                subscriber.close()
+            }
+        } finally {
+            runtime.close()
+            daemonJob.join()
+            runCatching { tempDir.toFile().deleteRecursively() }
+        }
+    }
+
+    // The four transfers `history.list.ndjson` is written against, with the instants its rows carry.
+    private fun seedHistoryCorpus(file: Path) {
+        class Seed(
+            val id: Int,
+            val direction: String,
+            val path: String,
+            val queued: Long,
+            val started: Long?,
+            val finished: Long?,
+            val queueWait: Long?,
+            val transfer: Long?,
+            val bytesTotal: Long?,
+            val bytesDone: Long?,
+            val result: String,
+            val errorClass: String?,
+            val errorMessage: String?,
+            val attempts: Int?,
+        )
+        val seeds = listOf(
+            Seed(1, "upload", "/docs/a.txt", 1_700_000_000_000, 1_700_000_000_100, 1_700_000_002_000, 100, 1_900, 100, 100, "success", null, null, 1),
+            Seed(2, "download", "/docs/b.txt", 1_700_000_003_000, 1_700_000_003_100, 1_700_000_005_000, 100, 1_900, 2_048, 512, "failed", "network", "connection reset", 3),
+            Seed(3, "upload", "/photos/c.jpg", 1_700_000_010_000, 1_700_000_010_100, null, 100, null, 5_000, null, "running", null, null, null),
+            Seed(4, "upload", "/docs/d.txt", 1_700_000_019_900, null, 1_700_000_020_000, null, null, 7, null, "skipped", null, null, 0),
+        )
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$file").use { c ->
+            c.createStatement().use { it.execute("PRAGMA busy_timeout = 5000") }
+            c.prepareStatement(
+                "INSERT INTO transfers(operation_id, profile, direction, path, queued_at, started_at, finished_at, queue_wait_ms, " +
+                    "transfer_ms, bytes_total, bytes_done, result, error_class, error_message, attempts) " +
+                    "VALUES (?, 'contract_profile', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ).use { ps ->
+                for (s in seeds) {
+                    ps.setString(1, "00000000-0000-0000-0000-%012d".format(s.id))
+                    ps.setString(2, s.direction)
+                    ps.setString(3, s.path)
+                    ps.setLong(4, s.queued)
+                    ps.setObject(5, s.started)
+                    ps.setObject(6, s.finished)
+                    ps.setObject(7, s.queueWait)
+                    ps.setObject(8, s.transfer)
+                    ps.setObject(9, s.bytesTotal)
+                    ps.setObject(10, s.bytesDone)
+                    ps.setString(11, s.result)
+                    ps.setString(12, s.errorClass)
+                    ps.setString(13, s.errorMessage)
+                    ps.setObject(14, s.attempts)
+                    ps.executeUpdate()
+                }
+            }
+        }
+    }
+
     // ── corpus loading ───────────────────────────────────────────────────────
 
     private fun loadConnectionLine(token: String): String {
@@ -443,6 +621,23 @@ class IpcContractCorpusTest {
         val newline = collected.indexOf('\n')
         check(newline >= 0) { "no reply line within ${timeoutMs}ms; collected: $collected" }
         return collected.substring(0, newline)
+    }
+
+    /** The next complete line of [channel]; what a read returned beyond it stays in [pending] for the next call. */
+    private suspend fun readLine(channel: SocketChannel, pending: StringBuilder, timeoutMs: Long): String {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val newline = pending.indexOf('\n')
+            if (newline >= 0) {
+                val line = pending.substring(0, newline)
+                pending.delete(0, newline + 1)
+                return line
+            }
+            val buf = ByteBuffer.allocate(4096)
+            val n = channel.read(buf)
+            if (n > 0) pending.append(String(buf.array(), 0, buf.position())) else delay(20)
+        }
+        error("no line within ${timeoutMs}ms; collected: $pending")
     }
 
     /**

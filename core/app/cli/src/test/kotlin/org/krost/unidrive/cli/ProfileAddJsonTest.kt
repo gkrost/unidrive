@@ -228,6 +228,26 @@ class ProfileAddJsonTest {
     }
 
     @Test
+    fun `profile names that differ only by case are refused in JSON and console output`() {
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "Work", "--mode", "mount", "--option", "root_path=/x", "--json"))
+        val before = Files.readString(configFile)
+
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "work", "--mode", "mount", "--option", "root_path=/y", "--json"))
+        assertEquals("profile_exists", errorToken())
+        assertEquals(before, Files.readString(configFile))
+        assertEquals(
+            1,
+            Files.list(dir).use { paths -> paths.filter { it.fileName.toString().equals("work", ignoreCase = true) }.count() },
+            "the refused profile must not create a second case variant folder",
+        )
+
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "wORK", "--mode", "mount", "--option", "root_path=/y"))
+        assertEquals("", out.toString())
+        assertTrue("already exists" in err.toString(), err.toString())
+        assertEquals(before, Files.readString(configFile))
+    }
+
+    @Test
     fun `an unparsable config is refused without quoting it`() {
         Files.writeString(configFile, "[providers.x]\ntype = \"localfs\"\npassword = \"hunter2-secret\"\nbroken = = =\n")
 

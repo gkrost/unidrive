@@ -22,7 +22,7 @@ import java.sql.SQLException
  * the same instance can take the turn between batches.
  */
 internal class TelemetryStore private constructor(
-    private val dbPath: Path,
+    val dbPath: Path,
     private val afterOpen: (Connection) -> Unit,
 ) {
     private var conn: Connection? = null
@@ -83,6 +83,9 @@ internal class TelemetryStore private constructor(
             )
             st.execute("CREATE INDEX IF NOT EXISTS idx_transfers_queued ON transfers(queued_at)")
             st.execute("CREATE INDEX IF NOT EXISTS idx_transfers_running ON transfers(result) WHERE result = 'running'")
+            // The order history.list pages in (newest first, ties by id): a seek and a range scan, no sort of the table.
+            // CREATE ... IF NOT EXISTS, so an existing file gets it at its next open without a schema version of its own.
+            st.execute("CREATE INDEX IF NOT EXISTS idx_transfers_time ON transfers($SORT_TIME, operation_id)")
             st.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID")
             st.execute("PRAGMA user_version = $SCHEMA_VERSION")
         }
@@ -238,6 +241,9 @@ internal class TelemetryStore private constructor(
 
     companion object {
         const val SCHEMA_VERSION = 1
+
+        /** The instant a transfer sorts by: when it finished, or, while it has not, when it was queued. */
+        const val SORT_TIME = "COALESCE(finished_at, queued_at)"
         private const val MAX_PRUNE_ROUNDS = 64
         private const val PRUNE_FRACTION = 10
         private val log = LoggerFactory.getLogger(TelemetryStore::class.java)
@@ -276,7 +282,7 @@ internal class TelemetryStore private constructor(
 }
 
 /** Binds a [TransferRow] to the upsert statement and reads one back; the column order is [TelemetryStore]'s. */
-private object TransferRowCodec {
+internal object TransferRowCodec {
     fun bind(
         ps: PreparedStatement,
         r: TransferRow,
