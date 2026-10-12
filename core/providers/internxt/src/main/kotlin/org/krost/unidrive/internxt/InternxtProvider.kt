@@ -2423,8 +2423,10 @@ class InternxtProvider(
             val content = api.getFolderContents(currentUuid)
             // #402: fail closed on two live same-named child folders — a first-match
             // pick would be cached in folderCache and stick for the process lifetime,
-            // pinning every operation under this path to an arbitrary twin.
-            val children = content.children.filter { sanitizeName(it.plainName ?: it.name ?: "") == segment }
+            // pinning every operation under this path to an arbitrary twin. Non-live
+            // folders do not count: a trashed twin must neither be picked nor make a
+            // live folder ambiguous (the same rule as getMetadata and listChildren).
+            val children = content.children.filter { it.isLive() && sanitizeName(it.plainName ?: it.name ?: "") == segment }
             val child =
                 when (children.size) {
                     0 -> throw ProviderException("Folder not found: $segment in $path")
