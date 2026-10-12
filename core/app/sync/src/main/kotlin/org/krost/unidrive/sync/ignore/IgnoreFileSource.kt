@@ -6,7 +6,6 @@ import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.LinkOption
 import java.nio.file.NoSuchFileException
-import java.nio.file.NotDirectoryException
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.TimeUnit
@@ -66,10 +65,10 @@ class FileSystemIgnoreSource(
                 Files.readAttributes(file, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
             } catch (ignored: NoSuchFileException) {
                 return RuleFileProbe.Absent
-            } catch (ignored: NotDirectoryException) {
-                return RuleFileProbe.Absent
             } catch (e: IOException) {
-                return RuleFileProbe.Unreadable(e.toString())
+                // A path through a regular file (ENOTDIR on POSIX, a plain FileSystemException there): no such file.
+                val parentIsDir = Files.isDirectory(file.parent ?: root, LinkOption.NOFOLLOW_LINKS)
+                return if (parentIsDir) RuleFileProbe.Unreadable(e.toString()) else RuleFileProbe.Absent
             }
         return when {
             attrs.isSymbolicLink -> RuleFileProbe.NotFollowed("a symbolic link")
