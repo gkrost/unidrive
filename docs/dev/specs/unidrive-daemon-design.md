@@ -453,7 +453,62 @@ The namespace verbs that act on the cloud synchronously (`hydration.mkdir`, `unl
 
 **Stop while paused.** `daemon.shutdown` and the signal path behave as before: waiting uploads are cancelled with the serve scope, their rows stay never-uploaded (or keep the cache copy that differs from the row's baseline), and the next start replays them. Nothing is stamped failed.
 
-### 4.8 `metrics.query`
+### 4.8 `history.list` and `history.subscribe`: the transfer history
+
+A mount daemon keeps one row per logical transfer in `telemetry.db` beside `state.db` (what a front-end shows as its activity list). Both verbs are in the read class ([ipc-authentication.md](ipc-authentication.md) §4), so the observer token is enough; the engine has no verb that changes or exports history (a front-end writes its own exports). Paths and error messages in a row are sensitive, which is why the daemon offers no way to export or change them.
+
+**A daemon without history.** A mirror profile records none, and a mount daemon whose `telemetry.db` did not open (the daemon logged it once and runs on) has none. Both verbs then answer `{"ok":false,"error":"history_unavailable","reason":"mirror"}` or `"reason":"open_failed"`, and so does `history.list` when the file cannot be read (`"reason":"read_failed"`). Never an empty list: an empty `rows` means the history holds no matching transfer.
+
+**`history.list`.**
+
+```json
+{"verb": "history.list", "filters": {"direction": ["upload", "download"], "result": "failed", "path_prefix": "/docs/", "from_ms": 1700000000000, "to_ms": 1700086400000}, "limit": 100, "cursor": "<next_cursor of the previous reply>"}
+```
+
+| member | meaning |
+|---|---|
+| `filters` | optional object; every member optional, all combined with AND |
+| `filters.direction` | one value or an array: `upload`, `download`, `delete`, `rename`, `mkdir`, `other` |
+| `filters.result` | one value or an array: `running`, `success`, `failed`, `skipped`, `conflict`, `interrupted` |
+| `filters.path_prefix` | a plain, case-sensitive prefix of the path (a folder is asked for with its trailing slash); not a pattern |
+| `filters.from_ms`, `filters.to_ms` | the half-open range `[from_ms, to_ms)` of the instant a row sorts by (below); integers, `from_ms <= to_ms` |
+| `limit` | rows per reply, default 100, **at most 500** (a larger value is 500). A reply also stops at about 512 KiB of row data (the first row always goes in), so it can hold fewer rows than `limit`; `next_cursor` carries on |
+| `cursor` | the `next_cursor` of the previous reply; absent for the first page |
+
+```json
+{"ok": true, "rows": [ {row}, ... ], "next_cursor": "<opaque>" , "tail_seq": 42, "incomplete": false}
+```
+
+`next_cursor` is `null` when no row follows; otherwise it is a token to pass back unchanged, which a client must not parse. A refused request answers `{"ok":false,"error":"<token>"}` and changes nothing: `invalid_request` (not a JSON object), `invalid_filters`, `invalid_direction`, `invalid_result`, `invalid_path_prefix`, `invalid_time_range`, `invalid_limit`, `invalid_cursor`. Unknown members are ignored.
+
+A **row** (every member always present; a value that was not measured or does not apply is `null`, never `0`):
+
+| member | meaning |
+|---|---|
+| `operation_id` | the transfer's id: stable for its whole life, the key a client merges rows by |
+| `direction` | as in the filter |
+| `path` | the item's path as the mount sees it |
+| `queued_at_ms` | wall clock: the operation was handed to the transfer machinery |
+| `started_at_ms` | wall clock: a transfer permit was acquired; `null` while it still waits, and for a skip that never started |
+| `finished_at_ms` | wall clock: it ended; `null` while `running` |
+| `queue_wait_ms`, `transfer_ms` | the wait for a permit and the time transferring, each measured on a monotonic clock and never one number; `null` until known |
+| `bytes_total`, `bytes_done` | `bytes_done` is known only for a transfer that reached its end |
+| `result` | as in the filter. `interrupted` is a transfer that was cancelled, aborted by a pause or cut off by a crash |
+| `error_class`, `error_message` | the last failed attempt; sanitized (no URL, no secret) |
+| `attempts` | attempts made, `null` while none is counted |
+
+**Order and paging.** Rows come newest first by the instant they finished, or, while they have not, the instant they were queued; equal instants are ordered by `operation_id`, descending, so the order is total. The cursor is that pair (a keyset, never an offset), so rows that arrive while a client pages sort ahead of the cursor and move nothing behind it, and retention removing old rows leaves the pages that remain where they were; a cursor whose own row is gone still works. A transfer that finishes while a client pages moves from its queued position to its finished one: a client merges by `operation_id` and lets the newer snapshot win. The history serves at most the retention window (90 days or 200 MB by default), and `incomplete: true` says that rows are known to be missing from it (its writer dropped some under load or after a write failure), so a list is never presented as complete when it is not.
+
+**`history.subscribe`.** The reply is `{"ok":true,"tail_seq":42}`; from then on the connection also receives pushed lines, one per row snapshot committed to the file (a transfer is written when it starts, after each failed attempt and when it ends):
+
+```json
+{"event": "history.row", "seq": 43, "row": {row}}
+{"event": "history.lost", "since_last": 3}
+```
+
+Each subscriber has a bounded queue (256 snapshots). When one falls behind, the oldest queued snapshots are dropped, and the next line is `history.lost` with the number dropped, the shape of `hydration.subscribe`'s `lost`: the client then re-reads from the top with `history.list` (from its last durable position) and never assumes an uninterrupted tail. `seq` numbers the committed snapshots in commit order for the daemon's life (it restarts at 0 with the daemon, as does the connection). `tail_seq`, in both replies, is the last number committed **before** the reply was made: a client that subscribes first and lists second applies exactly the events whose `seq` is above the list's `tail_seq`, which can neither lose a row between the two nor lay an older snapshot over a newer one. A subscribed connection is not closed for being idle.
+
+### 4.9 `metrics.query`
 
 READ class. The per-minute roll-ups of this daemon's provider request attempts (counts, outcome classes, header and total time p50/p95, bytes), read from the profile's `telemetry.db`. A mount daemon records them; a mirror daemon answers `recording:false` and an empty series. No data is an empty series with `has_data:false`, never zeros. The request, the reply, what an attempt is, the retention windows and the byte budget shared with the transfer history are in `request-metrics.md`.
 

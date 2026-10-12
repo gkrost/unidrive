@@ -208,6 +208,7 @@ class DaemonRuntime(
             val hydrationLink = HydrationLink()
             // #652: opened with the mount's hydration layer, closed (flushed) after its uploads have been joined.
             var transferHistory: TransferHistory? = null
+            var historyRpc: HistoryRpcHandler? = null
             // Coroutine-debug probes (gkrost/unidrive#613 ask 1): with UNIDRIVE_COROUTINE_DEBUG=1 the
             // daemon captures suspension stacks at start and dumps every live coroutine when a
             // coroutine-dump.trigger file appears in the profile folder — a hung upload becomes one
@@ -452,6 +453,14 @@ class DaemonRuntime(
                     server.unregisterSyncSubscriber(connId)
                 }
 
+                // history.list / history.subscribe (#653): read verbs over the transfer history. A mirror daemon, or a mount
+                // daemon whose history did not open, answers history_unavailable (never an empty list).
+                historyRpc =
+                    HistoryRpcHandler(
+                        transferHistory,
+                        if (mountMode) HistoryRpcHandler.OPEN_FAILED else HistoryRpcHandler.MIRROR,
+                    ).also { it.register(server, serveScope) }
+
                 // refresh.run verb (spec §4.2); the handler is constructed above.
                 server.registerHandler("refresh.run") { connId, json ->
                     refreshHandler.handle(connId, json)
@@ -624,6 +633,7 @@ class DaemonRuntime(
                     hydrationLink.hydration?.shutdownUploads()
                 } finally {
                     // #652: after the uploads are joined (their last rows are queued by then), before state.db closes.
+                    historyRpc?.close()
                     closeTransferHistory(transferHistory)
                 }
             }

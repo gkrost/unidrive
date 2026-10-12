@@ -30,9 +30,9 @@ class TransferHandle internal constructor(
     @Synchronized
     fun started() {
         if (finished || startedNanos != null) return
-        val now = history.nanoNow()
+        val now = history.nanoNow
         startedNanos = now
-        row = row.copy(startedAt = history.wallNow(), queueWaitMs = nanosToMs(now - queuedNanos))
+        row = row.copy(startedAt = history.wallNow, queueWaitMs = nanosToMs(now - queuedNanos))
         history.enqueue(row)
     }
 
@@ -70,12 +70,12 @@ class TransferHandle internal constructor(
         require(result != TransferResult.RUNNING) { "a finished transfer is not running" }
         if (finished) return
         finished = true
-        val nowNanos = history.nanoNow()
+        val nowNanos = history.nanoNow
         val started = startedNanos
         val made = if (attempted) 1 else 0
         row =
             row.copy(
-                finishedAt = history.wallNow(),
+                finishedAt = history.wallNow,
                 transferMs = started?.let { nanosToMs(nowNanos - it) },
                 bytesDone = bytesDone ?: row.bytesDone,
                 result = result,
@@ -121,9 +121,9 @@ class TransferHistory private constructor(
     val stats: HistoryStats
         get() = writer.stats
 
-    internal fun wallNow(): Long = clock()
+    internal val wallNow: Long get() = clock()
 
-    internal fun nanoNow(): Long = nanoClock()
+    internal val nanoNow: Long get() = nanoClock()
 
     /** An operation entered the transfer machinery: the clock for its queue wait starts now. */
     fun begin(
@@ -197,6 +197,25 @@ class TransferHistory private constructor(
             it.start()
             metrics = it
         }
+
+    /**
+     * A reader on its own read-only connection to this history's file (never the writer's). The caller owns it and
+     * closes it; an open that fails surfaces on its first read.
+     */
+    fun openReader(): HistoryReader = HistoryReader(store.dbPath)
+
+    /** The number of the last row snapshot committed to the file (0 before any); see [addTailListener]. */
+    val tailSeq: Long
+        get() = writer.tail.seq
+
+    /**
+     * [listener] is called for every row snapshot committed to the file from now on, with the snapshot's number
+     * (rising, in commit order). It runs on the writer thread: it hands the row on and returns, it never blocks.
+     * Snapshots the history dropped (a full queue, a failed write) are not announced: the tail says what the file holds.
+     */
+    fun addTailListener(listener: (seq: Long, row: TransferRow) -> Unit) = writer.tail.add(listener)
+
+    fun removeTailListener(listener: (seq: Long, row: TransferRow) -> Unit) = writer.tail.remove(listener)
 
     /** Waits until everything queued so far is written (or dropped). For shutdown and tests, not the hot path. */
     fun flush(timeoutMs: Long = HistoryWriter.DEFAULT_WAIT_MS): Boolean = writer.flush(timeoutMs)

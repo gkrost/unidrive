@@ -388,6 +388,8 @@ class DaemonRuntimeTest {
                     """{"verb":"hydration.create","handle_id":"h4","path":"/startup/create.txt"}""",
                     """{"verb":"hydration.rename","old_path":"/startup/r1.txt","new_path":"/startup/r2.txt"}""",
                     """{"verb":"sync.subscribe"}""",
+                    """{"verb":"history.list"}""",
+                    """{"verb":"history.subscribe"}""",
                     """{"verb":"refresh.run"}""",
                     """{"verb":"sync.enumerate"}""",
                     """{"verb":"metrics.query"}""",

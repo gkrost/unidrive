@@ -89,7 +89,7 @@ Classified by the exact wire string; a verb that is not listed is `admin` (defau
 
 | Class | Verbs |
 |---|---|
-| read | `daemon.status`, `hydration.list`, `hydration.last_synced`, `hydration.subscribe`, `sync.subscribe`, `hydration.open_read`, `metrics.query` |
+| read | `daemon.status`, `hydration.list`, `hydration.last_synced`, `hydration.subscribe`, `sync.subscribe`, `hydration.open_read`, `history.list`, `history.subscribe`, `metrics.query` |
 | write | `hydration.hydrate`, `hydration.dehydrate`, `hydration.create`, `hydration.open_write`, `hydration.open_write_begin`, `hydration.close_handle`, `hydration.mkdir`, `hydration.unlink`, `hydration.rmdir`, `hydration.rename`, `hydration.cancel`, `sync.enumerate` |
 | admin | `daemon.shutdown`, `daemon.pause`, `daemon.resume`, `refresh.run` |
 

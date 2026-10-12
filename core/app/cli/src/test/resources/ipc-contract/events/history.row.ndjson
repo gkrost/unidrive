@@ -1,0 +1,1 @@
+{"event":"history.row","seq":7,"row":{"operation_id":"00000000-0000-0000-0000-000000000005","direction":"upload","path":"/docs/new.txt","queued_at_ms":1700000030000,"started_at_ms":1700000030100,"finished_at_ms":1700000031000,"queue_wait_ms":100,"transfer_ms":900,"bytes_total":10,"bytes_done":10,"result":"success","error_class":null,"error_message":null,"attempts":1}}
