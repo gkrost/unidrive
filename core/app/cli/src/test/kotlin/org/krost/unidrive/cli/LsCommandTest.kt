@@ -1,6 +1,5 @@
 package org.krost.unidrive.cli
 
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.krost.unidrive.Capability
@@ -211,7 +210,7 @@ class LsCommandTest {
         )
 
         val daemonJob = launch { runtime.start() }
-        awaitDaemonSocket(socketPath)
+        awaitDaemonSocket(socketPath, daemonJob)
 
         try {
             // Trigger the reactive enumerate so state.db is populated, then wait for
@@ -220,11 +219,10 @@ class LsCommandTest {
             IpcAuthClient.connect(endpoint(), IpcAuth.Scope.FULL).use { sub ->
                 sub.configureBlocking(false)
                 sub.write(ByteBuffer.wrap(("""{"verb":"hydration.subscribe"}""" + "\n").toByteArray()))
-                val collected = readUntil(sub, "view.invalidated", timeoutMs = 10_000)
-                assertTrue(
-                    collected.contains("view.invalidated"),
-                    "enumerate must complete and push view.invalidated; got: $collected",
-                )
+                // Complete lines under the shared budget; a stall names the step and every line seen.
+                awaitIpcLine(sub, "view.invalidated push of the subscribe-triggered enumerate") {
+                    it.contains("\"event\":\"view.invalidated\"")
+                }
             }
 
             // The mount-side view: query hydration.list directly.
@@ -250,22 +248,6 @@ class LsCommandTest {
             runtime.close()
             daemonJob.join()
         }
-    }
-
-    private suspend fun readUntil(channel: SocketChannel, needle: String, timeoutMs: Long): String {
-        val collected = StringBuilder()
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline && !collected.contains(needle)) {
-            val buf = ByteBuffer.allocate(4096)
-            val n = channel.read(buf)
-            if (n > 0) {
-                buf.flip()
-                collected.append(String(buf.array(), 0, buf.limit()))
-            } else {
-                delay(20)
-            }
-        }
-        return collected.toString()
     }
 
     private fun readOneLine(channel: SocketChannel): String {
