@@ -30,14 +30,23 @@ Plus mandatory client-side encryption between Drive metadata (carries the IV) an
 
 ## Robustness
 
-- **Auth refresh** is per-call: `AuthService.isJwtExpired()` is a pure JWT-payload decode + `exp` comparison; refresh is mutex-serialised with double-check. The refresh body is **not** `NonCancellable`-wrapped today (gap vs OneDrive). `getValidCredentials` does not proactively refresh on expiry — relies on server 401 + re-auth.
-- **Retry placement**: `authenticatedGet` (Drive reads) has an inline ladder `[2 s, 4 s, 8 s]` on 500/503/EOF. Cloudflare's origin errors (520 to 524, "the origin did not answer") end as the 503 the fallbacks act on: 520 to 523 go through the ladder, a 524 is one attempt (the gateway had waited about two minutes, a repeat gets the same 524); the gateway's status and body stay in the exception's cause, its `Retry-After` on the exception. **POST/PATCH/DELETE/PUT have no retry** — the first 500/503/network blip is fatal. Bridge calls have no retry at all.
-- **Retry-After**: not honoured anywhere. Header not read, no body parser, no `X-RateLimit-*` consumption. CLI 1.6+ confirms the server emits 429 on the Drive path; we treat it as fatal.
+- **Auth refresh** is per-call: `AuthService.getValidCredentials` refreshes when the JWT is within its refresh margin (a pure JWT-payload decode + `exp` comparison) or when forced. Refresh is mutex-serialised with double-check and runs `NonCancellable` (`RefreshableTokenLatch`). On Drive REST a 401 forces one refresh and one replay (`withAuthRetry`); a second 401 is an auth failure. Bridge calls use HTTP Basic and are not wrapped.
+- **Retry placement**: Drive reads (`authenticatedGet`) make up to three attempts, 2 s then 4 s apart, on 429/500/502/503/504 and on network errors. Drive mutations go through `retryOnTransient` (three attempts, same statuses, 1 s doubling). Cloudflare's origin errors (520 to 524, "the origin did not answer") end as the 503 the fallbacks act on: 520 to 523 go through the ladder, a 524 is one attempt (the gateway had waited about two minutes, a repeat gets the same 524); the gateway's status and body stay in the exception's cause, its `Retry-After` on the exception. The Bridge calls of an upload retry at the provider layer (`retryShardCommit`, with `indexBytes` pinned); the in-memory shard PUT uses `retryOnTransient`.
+- **Retry-After**: the HTTP header (delta-seconds or HTTP-date) wins over the JSON-body `retry_after`, which wins over the exponential default; every wait is clamped to 500 ms..60 s. A 429 or 503 is also recorded on the host's `HttpRetryBudget`. No `X-RateLimit-*` header is consumed.
 - **Timeouts**: the socket timeout is a read-idle timer (time since bytes were last *received*). Drive GETs run with 60 s; the listings whose cost grows with what they list, the account-wide `/files` and `/folders` (a page needs a minute or more on a large account), the cursor listings `/files/sync` and `/folders/sync`, and a folder's `/folders/content/{uuid}` (106 s for a flat folder of 29,000 files), run with 330 s and a request timeout a minute above it. The gateway answers a request that took about two minutes with a 524 of its own, so a folder needing more than that is out of reach of the content call.
 - **Unavailable account-wide listing**: when a gather ends in a 500/503 (or a gateway 520 to 524, which ends as a 503) on `/files` or `/folders`, `delta()` walks the folder tree instead; inside the walk a folder whose content ends that way is skipped and the gather is reported incomplete. If it was a full gather, the next full gathers within 30 minutes do not try the listings again but walk straight away (kept in the process: the first full gather after a restart pays one attempt); an incremental poll never reads or opens that window and keeps asking its cheap `updatedAt` listing.
-- **Concurrency**: no `HttpRetryBudget` wired. Parallelism is whatever `SyncEngine` issues (observed 6-wide). Official SDK runs 1-concurrent / 1000 ms global + 2-concurrent / 500 ms on the Drive API — the sensible target.
-- **Idempotency**: Drive POSTs are body-replay-safe (String). `finishUpload` is **not** idempotent — a network drop after server-side commit but before client reads the response will re-finish and produce an orphan `fileId`.
-- **HTML-body guard**: none. A captive-portal HTML response on the download path would XOR through AES-CTR and produce high-entropy bytes indistinguishable from real plaintext.
+- **Concurrency**: one `HttpRetryBudget` per host, acquired per HTTP attempt: Drive REST 2 concurrent with 500 ms spacing (1 s during a throttle storm), Bridge and CDN 4 concurrent with no spacing. These are unidrive's own caps, chosen to stay at or below what Internxt's desktop client uses (see *Vendor limits and signals*).
+- **Idempotency**: Drive POSTs are body-replay-safe (String). `finishUpload` is not idempotent on the server: after a lost response or a 409 `MissingUploadsError` the provider does not finish again but lists the parent folder and adopts the entry that matches name, type, size and a recency window (`commitWithRetry`); if none matches, the upload is refused. The server offers no `Idempotency-Key`, so some orphan shards stay unrecoverable client-side.
+- **HTML-body guard**: the download path rejects an HTML body (`assertNotHtml`) and verifies the shard SHA-256 when the drive reports one; otherwise a captive-portal page would run through AES-CTR and come out as bytes indistinguishable from plaintext.
+
+## Vendor limits and signals
+
+Internxt publishes no rate-limit numbers and no throttling contract that we found. **Published** below means visible in Internxt's open-source SDK, CLI or desktop client, or in their release notes; **observed** means seen in unidrive runs. The API documentation host could not be reached when this was last checked, so its text is not covered.
+
+- Published: the server answers 429. Internxt's CLI release notes list automatic retry for 429 ([releases](https://github.com/internxt/cli/releases)), and the SDK's opt-in `retryWithBackoff` ([source](https://github.com/internxt/sdk/blob/master/src/shared/http/retryWithBackoff.ts)) retries only 429, waits the `Retry-After` header read as integer seconds, caps the wait at 70 s, gives up after 5 retries, and rethrows at once when the header is missing. unidrive differs on purpose: it also accepts an HTTP-date, falls back to the JSON `retry_after` and then to exponential backoff, and retries 5xx.
+- Observed: Cloudflare-fronted error bodies can carry `"retry_after": <seconds>` instead of the header; both are read (`InternxtApiService.parseRetryAfter`).
+- Published, pacing: the SDK has no request limiter. Internxt's desktop client wraps its Drive API client in one: at last check 3 concurrent requests with a 333 ms minimum interval, 4 concurrent uploads and 1 concurrent download (`drive-desktop`, `src/apps/shared/HttpClient/client.ts` and `src/apps/main/auth/handlers.ts`). These are that client's own choices, not server limits, and they have changed over time. unidrive's Drive budget (2 concurrent, 500 ms) stays below the desktop client's.
+- Published, client identity: the SDK sends `internxt-client` and `internxt-version` on every call and `x-internxt-desktop-header` only when the host application supplies a token ([source](https://github.com/internxt/sdk/blob/master/src/shared/headers/index.ts)). Whether the gateway refuses unknown client names is unverified; see *Client headers* under Quirks.
 
 ## Encryption pipeline and the IV-pinning constraint
 
@@ -62,9 +71,9 @@ that window is returned as a conflict and leaves the cloud copy untouched.
 
 Mixing stages 1–3 (old IV) with stages 4–5 (new IV) is **silent corruption** — the bridge accepts the ciphertext but downloads decrypt against the new IV and produce garbage. There is no retry today; the moment one is added, this constraint binds. A unit test should freeze the IV across a forced retry.
 
-## Planned robustness work
+## Robustness design record
 
-Five items spec'd for the slim release, in landing order. Each tracks a BACKLOG entry — this section is the design summary, not a parallel todo list.
+The five pieces below have landed (status per capability in `BOOSTERS.md`); the section keeps the reasoning, including what an audit of Internxt's own sources refuted.
 
 1. **401 → refresh-and-replay** (mirror OneDrive's `GraphApiService` pattern). Add `forceRefresh: Boolean` to `AuthService.getValidCredentials`; introduce a `withAuthRetry` helper in `InternxtApiService` and wrap every authenticated method body. Replay once on 401; throw on the second. Composition order from outermost in: `retryOnTransient { withAuthRetry { budget.awaitSlot(); call(); budget.recordSuccess() } }`. Dedup fold is innermost. Lands first because items 2/4/5 wrap with `withAuthRetry`.
 2. **`HttpRetryBudget` wiring.** Two budgets — one per host — confirmed via drive-desktop source audit (not "global + Drive layered" as the BACKLOG once suggested):
@@ -92,7 +101,7 @@ Live `unidrive sync --dry-run` against the gateway has been seeing `GET /drive/f
 
 ## Delta path-collapse
 
-`InternxtProvider.buildFolderPath` returns an empty string when an item's `parentUuid` is missing from the in-memory `folderMap`. Items with missing parents currently re-emerge at the root, orphaning subtrees and producing duplicate `remote_id` rows in `state.db`. This is the highest-severity correctness bug on the provider — first item in `BACKLOG.md`.
+`InternxtProvider.buildFolderPath` returns null when an item's `parentUuid` is missing from the in-memory `folderMap`. Delta drops such an item and leaves the gather incomplete rather than re-emitting it at the root, which would orphan subtrees and duplicate `remote_id` rows (`docs/audits/internxt-phantom-investigation.md`).
 
 ## Request-id correlation
 
