@@ -343,7 +343,7 @@ A running enumeration is answered from memory, never from state.db, so a status 
 | field | meaning |
 |---|---|
 | `uploads` | mount profiles only; absent on a mirror profile (no hydration layer) and until the upload queue has been read once after the start |
-| `uploads.pending` | paths whose bytes are not in the cloud yet and that an upload will take: every never-uploaded (`local:`) row, plus every path holding an upload slot (a dirty overwrite of an uploaded row has no such row). Queued, in flight and failed-awaiting-replay all count, **including the start-up replay's own uploads**. **Keep-local (`exclude_patterns`) rows and rows outside `sync_path` are not counted**: no upload will ever take them. `0` means nothing is waiting; a client that wants "everything is uploaded" also checks that `uploads` is present |
+| `uploads.pending` | paths whose bytes are not in the cloud yet and that an upload will take: every never-uploaded (`local:`) row, plus every path holding an upload slot (a dirty overwrite of an uploaded row has no such row). Queued, in flight and failed-awaiting-replay all count, **including the start-up replay's own uploads**. **Keep-local rows (`exclude_patterns`, ignore rules) and rows outside `sync_path` are not counted**: no upload will ever take them. `0` means nothing is waiting; a client that wants "everything is uploaded" also checks that `uploads` is present |
 | `uploads.in_flight` | transfer attempts that hold a transfer permit right now (a subset of `pending`); a path waiting for its turn, for the transfer budget or in a retry backoff is pending but not in flight |
 | `uploads.failed` | never-uploaded rows with a failed attempt on record (a subset of `pending`); a daemon restart replays them |
 | `uploads.oldest_pending_age_ms` | how long the oldest pending path has been waiting (ms), `null` when nothing is pending. A never-uploaded row waits since it was written, a dirty overwrite since its upload was submitted, so a stalled upload's age keeps growing from one status reply to the next |
@@ -368,6 +368,18 @@ A running enumeration is answered from memory, never from state.db, so a status 
 The value is the provider factory's offline check (`ProviderFactory.checkCredentialHealth`: token files and their expiry, no network call and no vault prompt), the same one `status` and `doctor` print. It never runs inside a status request: the daemon runs it once at start and again, off the request path, at most once per minute while status requests keep coming, and every reply serves the last result. Before the first result the state is `unknown`, never `ok`. A client shows "sign in again" for `expired`, `missing`, and `expiring` when `expires_in_ms` is small; `unknown` is "not known", not a problem.
 
 A provider that rejects the credentials turns the state to `expired` without waiting for the next check: an enumeration or a download or upload that fails with an authentication error (a provider raises it only after its own token refresh has failed) newer than the last time the provider answered. A later success clears it. `missing` is not overridden by a rejection. Other operations (deletes, renames, folder creation) do not feed this signal yet.
+
+**The `ignore` object** (additive; the protocol version does not change) is present where the ignore rules apply
+to uploads (a mount profile; docs/dev/specs/ignore-layering-design.md). `held_back` lists the folders whose uploads wait
+because a rule file in them cannot be read (unreadable, larger than 1 MiB, or in the cloud but never downloaded here):
+the rules fail closed, and this is where that is visible. `count` counts the folders found so far: a folder's rules are
+read when something below it is written or asked about, so a folder nothing was written to is not known yet. `items` is
+capped at 20, `more` counts the rest. A folder is released, and leaves the list, once its rule file can be read.
+
+```json
+{"ignore": {"held_back": {"count": 1, "more": 0, "items": [
+  {"dir": "/work", "file": "/work/.unidrive.ignore", "reason": "java.nio.file.AccessDeniedException: ..."}]}}}
+```
 
 **The `paused` object** (additive; see §4.7) is present only while the daemon is paused: `"paused": {"reason": "metered", "since_ms": 1700000000000, "auto": true}`. A status line must show it instead of "up to date". `capabilities` lists `pause` on an engine that has the verbs.
 

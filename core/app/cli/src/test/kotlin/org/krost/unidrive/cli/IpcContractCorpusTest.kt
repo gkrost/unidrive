@@ -82,7 +82,7 @@ class IpcContractCorpusTest {
     private val daemonVerbs =
         listOf(
             "daemon.status", "daemon.pause", "daemon.resume", "sync.subscribe", "refresh.run", "sync.enumerate",
-            "history.list", "history.subscribe", "daemon.shutdown",
+            "history.list", "history.subscribe", "ignore.explain", "daemon.shutdown",
         )
 
     @Test

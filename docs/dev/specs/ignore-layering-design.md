@@ -3,8 +3,8 @@
 `org.krost.unidrive.sync.ignore.IgnoreTree` puts together the ignore rules of one sync root. The pattern matcher
 underneath (`IgnoreMatcher`) and its conformance with git are described in
 `core/app/sync/src/main/kotlin/org/krost/unidrive/sync/ignore/DEVIATIONS.md`. This document fixes which rules apply to
-a path and which one wins. Nothing in the engine calls `IgnoreTree` yet; the upload path moves to it one call site at a
-time, in a later change.
+a path and which one wins, and where the engine asks. The mount's upload path asks `IgnoreTree` (see "The upload
+path" below); the mirror's scan and plan do not yet.
 
 ## What ignoring means (owner decisions)
 
@@ -90,10 +90,54 @@ on `explainEntry`. The report gives the first scan, a second after `revalidate()
 again), a third after one project file changed (exactly one parsed again), and the same rules in one flat matcher as
 the baseline.
 
+- **The cache is capped** (`IgnoreSettings.maxCachedDirs`, 20,000 directories): past it the least recently used
+  directories are forgotten, down to seven eighths of the cap, and probed and parsed again at their next use. A
+  held-back directory is never forgotten, so the count `daemon.status` reports does not drift down.
+
+## The upload path
+
+`UploadIgnore` is the tree as the upload path asks it: with the engine's logical paths (`/a/b`), revalidated at most
+every 5 s (so an edited, added or removed rule file applies without a restart), with case folding where the file
+system folds case (Windows, macOS) and NFC names.
+
+**The account's keys.** `honor_gitignore` (default off) and `ignore_rules` (git syntax, the account layer) in the
+profile's section of `config.toml`.
+
+**`exclude_patterns` stay as they are.** They keep their glob syntax and meaning (`Reconciler.matchesGlob`) and are
+not translated: they are asked beside the ignore rules, and no rule file overrides them. Only the built-in default
+list (`SyncConfig.DEFAULT_EXCLUDE_PATTERNS`) gives way to its git-syntax twin, the content defaults, where the ignore
+rules are on: that is what makes `.git` overridable. A one-time `migrate` of a profile's patterns into `ignore_rules`,
+with a dry run that shows the differences, is a later item.
+
+**The mount** (`RemoteOperationGuard.isExcludedPath`, the keep-local rule): an ignored path is treated as an excluded
+one, everywhere the mount asks.
+
+- A write through the mount is accepted and kept in the cache, never uploaded; the reply and the events say
+  `excluded`. `hydration.list` flags the row `excluded` (computed when listed, so a rule change shows at the next
+  listing without rewriting rows). A cloud item below an ignored folder stays listed and downloads as before.
+- A local-only ignored file is not a leftover: the start-up replay does not take it, the cache eviction never touches
+  it (it has no cloud copy), `daemon.status` does not count it as pending, and it stays in place across restarts.
+- A file the cloud already holds and that is edited while it is ignored keeps the cloud's version as its baseline: its
+  cache copy is not evicted, and the edit uploads at the next start once the path is no longer ignored. Holding back
+  only delays.
+- Rule files are read from the hydration cache (`CacheIgnoreSource`), never downloaded for it. A rule file the cloud
+  holds that the cache does not (never opened here) holds its folder back until it is opened; a rule file's cache copy
+  is never evicted. A rule file written through the mount, or downloaded, applies to the next decision.
+- A rename of a synced file onto an ignored name is refused (`excluded`), as for an excluded name: it would take the
+  file out of sync for good.
+
+**Never silent.** A held-back folder is logged as a WARN (at most once per rule file every 15 minutes), counted in
+`daemon.status` (`ignore.held_back`), and `ignore.explain` names its rule file and the reason.
+
+**`ignore.explain`** (a read verb; fixture `ipc-contract/ignore.explain.ndjson`) answers why a path is or is not
+uploaded, from the daemon's own rules: the deciding layer, rule file, line and pattern, the path it matched, the reason
+of a held-back folder, and the first matching `exclude_patterns` entry. An IPC verb rather than a CLI command: the
+answer must be the one the upload path acts on, from the same rule files read at the same moment, and a front-end
+needs it while the daemon runs. A mirror daemon answers `wrong_mode` until the mirror's upload planning asks the rules.
+
 ## Not decided here
 
-- **How `exclude_patterns` maps onto the layers.** The config patterns use the old glob (`Reconciler.matchesGlob`),
-  not git syntax, and the default list `SyncConfig.DEFAULT_EXCLUDE_PATTERNS` is matched without the ancestor rule on
-  remote paths. `IgnoreDefaults.CONTENT` is the same default set in git syntax (`IgnoreTreeTest` compares the two under
-  a walk). Profiles without ignore files must keep today's behaviour when the upload path moves.
-- Live reload, the IPC verbs and the mount write path are later items of the ignore epic.
+- The mirror's scan and upload planning (`LocalScanner`, `Reconciler`) move to the rules in a later change, with the
+  same keys and the same `exclude_patterns` rule.
+- Live reload by a file watcher, a rules snapshot for clients and the `unidrive ignore check` command are later
+  items of the ignore epic.

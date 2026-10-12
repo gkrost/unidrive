@@ -211,7 +211,7 @@ class IpcAuth(
             buildMap {
                 listOf(
                     "daemon.status", "hydration.list", "hydration.last_synced", "hydration.subscribe",
-                    "sync.subscribe", "hydration.open_read", "history.list", "history.subscribe",
+                    "sync.subscribe", "hydration.open_read", "history.list", "history.subscribe", "ignore.explain",
                 ).forEach { put(it, VerbClass.READ) }
                 listOf(
                     "hydration.hydrate", "hydration.dehydrate", "hydration.create", "hydration.open_write",

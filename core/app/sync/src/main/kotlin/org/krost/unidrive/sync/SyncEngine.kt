@@ -35,6 +35,9 @@ import java.time.Instant
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.regex.PatternSyntaxException
 
+// The constructor lists the engine's seams one by one; its baseline entry quoted the whole parameter list, so it is
+// suppressed here instead.
+@Suppress("LongParameterList")
 open class SyncEngine(
     private val provider: CloudProvider,
     private val db: StateDatabase,
@@ -129,6 +132,10 @@ open class SyncEngine(
     // type. Defaults to [providerId] so callers that don't set it keep the
     // pre-existing layout; the CLI sync/daemon paths pass profile.name.
     private val cacheKey: String = providerId,
+    // #660: the ignore rules of the mount's uploads, read from the hydration cache (rule files, the account's
+    // rules, the overridable content defaults). Null = off: the built-in default excludes stay plain exclude
+    // patterns, as before. The mirror's scan and plan do not use them (yet).
+    private val mountIgnore: org.krost.unidrive.sync.ignore.IgnoreSettings? = null,
     // Called once after enumerateRemoteIntoState mutates state.db with the set of
     // changed paths (upserted + reaped; full=false), and once after
     // applyScopeTransition reshapes the tracked set (full=true — narrowing untracks
@@ -180,6 +187,21 @@ open class SyncEngine(
         placeholder.onFileKeptAside = { path, copy -> recordFileKeptAside(path, copy) }
     }
 
+    /**
+     * #660: the mount's ignore rules, or null when [mountIgnore] is off. A rule file is read from the hydration
+     * cache, never downloaded for it: one the cloud holds (a file row with a remote id) that the cache does not
+     * holds its folder back until it is opened.
+     */
+    val uploadIgnore: org.krost.unidrive.sync.ignore.UploadIgnore? =
+        mountIgnore?.let { settings ->
+            org.krost.unidrive.sync.ignore.UploadIgnore(
+                org.krost.unidrive.sync.ignore.CacheIgnoreSource(
+                    hydrationCacheRoot(cacheRoot ?: defaultHydrationCacheRoot(), cacheKey),
+                ) { path -> db.getEntry(path)?.let { !it.isFolder && it.remoteId != null } == true },
+                settings,
+            )
+        }
+
     // #560 U2: scope, excludes and the transfer budget live in :app:engine-core's
     // RemoteOperationGuard, shared by the sync pass and the mount front-end (MountEngine,
     // through [mountWiring], #560 U3).
@@ -196,12 +218,20 @@ open class SyncEngine(
         org.krost.unidrive.engine.RemoteOperationGuard(
             standingScope = standingScope,
             syncPaths = syncPaths,
-            excludePatterns = effectiveExcludePatterns,
+            // #660: with the ignore rules on, the built-in defaults are theirs (overridable, `!.git`); the
+            // profile's own exclude_patterns stay plain patterns, exactly as before.
+            excludePatterns =
+                if (uploadIgnore == null) {
+                    effectiveExcludePatterns
+                } else {
+                    effectiveExcludePatterns.filterNot { it in SyncConfig.DEFAULT_EXCLUDE_PATTERNS }
+                },
             maxConcurrentTransfers =
                 org.krost.unidrive.ProviderRegistry
                     .getMetadata(providerId)
                     ?.maxConcurrentTransfers ?: 4,
             matchesGlob = { path, pattern -> Reconciler.matchesGlob(path, pattern) },
+            ignore = uploadIgnore,
         )
 
     // Remote paths state.db tracks: the standing scope plus any per-run --sync-path,

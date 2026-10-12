@@ -42,3 +42,10 @@ sync_root = "~/Internxt"
 # daemon_poll_seconds = 60
 
 # exclude_patterns = ["/dev/git/**"]
+
+# Ignore rules for uploads, in git's syntax: `.unidrive.ignore` files anywhere in the tree, then these
+# account rules, then the built-in defaults (.git, .svn, OS and editor junk). An ignored file is never
+# uploaded; it stays where it is, and cloud items stay visible. `!.git` in a `.unidrive.ignore` brings a
+# repository's .git back. exclude_patterns above keep their own syntax and are not overridden by any rule.
+# honor_gitignore = false      # also read .gitignore files
+# ignore_rules = ["node_modules/", "*.log"]
