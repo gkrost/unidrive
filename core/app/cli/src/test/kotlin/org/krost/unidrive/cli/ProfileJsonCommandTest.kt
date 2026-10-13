@@ -96,6 +96,95 @@ class ProfileJsonCommandTest {
         password = "hunter2-secret"
         """.trimIndent() + "\n"
 
+    // -- profile default -------------------------------------------------------------
+
+    private val oddConfig =
+        "# my config\r\n[general]\r\n  poll_interval   =   60 # keep\r\ndefault_profile=\"work\"\r\nother = 1\r\n\r\n" +
+            "[providers.work]\r\ntype = \"localfs\"\r\nroot_path = \"/w\"\r\n\r\n[providers.other]\r\ntype = \"localfs\"\r\nroot_path   =   \"/o\" # c\r\n"
+
+    @Test
+    fun `default changes only the default_profile line and reports the previous one`() {
+        writeConfig(oddConfig)
+
+        assertEquals(0, run("profile", "default", "other", "--json"), stderr())
+
+        val r = json()
+        assertTrue(r.getValue("ok").jsonPrimitive.boolean)
+        assertEquals("other", r.getValue("default_profile").jsonPrimitive.content)
+        assertEquals("work", r.getValue("previous").jsonPrimitive.content)
+        assertEquals(oddConfig.replace("default_profile=\"work\"", "default_profile = \"other\""), config())
+    }
+
+    @Test
+    fun `default sets the key when none exists and clear removes it, keeping every other line`() {
+        val text = "# c\n[general]\n  poll_interval   =   60\n\n[providers.work]\ntype = \"localfs\"\nroot_path = \"/w\" # i\n"
+        writeConfig(text)
+
+        assertEquals(0, run("profile", "default", "work", "--json"), stderr())
+        assertEquals(JsonNull, json().getValue("previous"))
+        assertEquals(text.replace("[general]\n", "[general]\ndefault_profile = \"work\"\n"), config())
+
+        assertEquals(0, run("profile", "default", "--clear", "--json"), stderr())
+        val r = json()
+        assertTrue(r.getValue("ok").jsonPrimitive.boolean)
+        assertEquals(JsonNull, r.getValue("default_profile"))
+        assertEquals("work", r.getValue("previous").jsonPrimitive.content)
+        assertEquals(text, config())
+
+        assertEquals(0, run("profile", "default", "--clear", "--json"), "clearing nothing is not an error")
+        assertEquals(JsonNull, json().getValue("previous"))
+        assertEquals(text, config())
+    }
+
+    @Test
+    fun `default clear keeps CRLF and the other sections byte for byte`() {
+        writeConfig(oddConfig)
+
+        assertEquals(0, run("profile", "default", "--clear", "--json"), stderr())
+
+        assertEquals(oddConfig.replace("default_profile=\"work\"\r\n", ""), config())
+    }
+
+    @Test
+    fun `default refuses an unknown or invalid name and changes nothing`() {
+        writeConfig(twoProfiles)
+        val before = config()
+
+        assertEquals(1, run("profile", "default", "nope", "--json"))
+        assertFalse(json().getValue("ok").jsonPrimitive.boolean)
+        assertEquals("profile_not_found", json().getValue("error").jsonPrimitive.content)
+
+        assertEquals(1, run("profile", "default", "../etc", "--json"))
+        assertEquals("invalid_profile_name", json().getValue("error").jsonPrimitive.content)
+
+        assertEquals(1, run("profile", "default", "--json"))
+        assertEquals("missing_value", json().getValue("error").jsonPrimitive.content)
+
+        assertEquals(1, run("profile", "default", "work", "--clear", "--json"))
+        assertEquals("invalid_value", json().getValue("error").jsonPrimitive.content)
+
+        assertEquals(before, config())
+    }
+
+    @Test
+    fun `default without a config is refused and starts nothing`() {
+        assertEquals(1, run("profile", "default", "work", "--json"))
+        assertEquals("config_not_found", json().getValue("error").jsonPrimitive.content)
+        assertEquals(emptyList(), Files.list(dir).use { s -> s.map { it.fileName.toString() }.toList() })
+    }
+
+    @Test
+    fun `default in plain mode prints the result and a refusal goes to stderr`() {
+        writeConfig(twoProfiles)
+
+        assertEquals(0, run("profile", "default", "old"))
+        assertTrue("old" in stdout(), stdout())
+
+        assertEquals(1, run("profile", "default", "nope"))
+        assertEquals("", stdout())
+        assertTrue("nope" in stderr(), stderr())
+    }
+
     // -- profile list --json -----------------------------------------------------
 
     @Test

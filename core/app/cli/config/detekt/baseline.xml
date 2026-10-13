@@ -53,6 +53,7 @@
     <ID>SwallowedException:Main.kt$Main$e: javax.crypto.AEADBadTagException</ID>
     <ID>SwallowedException:ProfileCreate.kt$ProfileCreator$e: Exception</ID>
     <ID>SwallowedException:ProfileCreate.kt$ProfileCreator$e: IOException</ID>
+    <ID>SwallowedException:ProfileDefaultCommand.kt$ProfileDefaultCommand$e: IOException</ID>
     <ID>SwallowedException:ProfileSettings.kt$ProfileSetCommand$e: IOException</ID>
     <ID>SwallowedException:ProfileSettings.kt$ProfileSettings$e: IllegalArgumentException</ID>
     <ID>SwallowedException:RelocateCommand.kt$RelocateCommand$e: Exception</ID>
