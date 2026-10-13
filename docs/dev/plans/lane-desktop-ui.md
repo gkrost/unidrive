@@ -278,7 +278,7 @@ Re-read against the open issues and PRs; the section above is the previous wave.
 - **Size:** M. The client's Sign in works unchanged after it.
 
 **M4: #816 and #817, account lifecycle follow-ups.**
-- #816: `profile remove` refuses while a **stopped** profile's state still has pending uploads; a `failed` count is reported apart from pending.
+- #816: `profile remove` refuses a **stopped** profile whose state.db (opened read-only) still has uploads on their way (`pending - failed > 0`), with the error token `uploads_pending` and the counts `pending` and `failed` in the refusal; failed uploads alone do not block. `--force-pending` proceeds anyway. A state.db that exists but cannot be read is refused with `state_unreadable`; a missing one has nothing pending.
 - #817: a non-interactive way to set or clear the default profile.
 - **Size:** S each.
 
