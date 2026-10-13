@@ -4,6 +4,7 @@
          JVM that picked it up appended thousands of test lines to the deployed daemon's log.
          Logback prefers logback-test.xml over logback.xml when both are on the classpath. -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
         <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
             <level>WARN</level>
         </filter>

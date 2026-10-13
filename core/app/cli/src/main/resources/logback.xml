@@ -10,6 +10,9 @@
          a run of dashes matching the scan-slot convention (XML comments forbid the
          two-dash sequence, so it can only be written outside this comment). -->
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <!-- stderr, never stdout: commands with a machine-readable JSON output print
+             exactly one document on stdout, and a log line in front of it breaks the parse. -->
+        <target>System.err</target>
         <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
             <level>WARN</level>
         </filter>

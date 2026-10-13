@@ -15,8 +15,19 @@ import java.nio.file.Path
  *    backslash or quote cannot break the TOML grammar.
  */
 
-/** Validate profile name: TOML bare key (letters, digits, hyphens, underscores). */
-fun isValidProfileName(name: String): Boolean = name.isNotBlank() && name.matches(Regex("[a-zA-Z0-9_-]+"))
+/** Windows device names cannot be profile folders, even when followed by an extension. */
+fun isReservedProfileName(name: String): Boolean {
+    val baseName = name.substringBefore('.').trimEnd(' ', '.')
+    return baseName.equals("CON", ignoreCase = true) ||
+        baseName.equals("PRN", ignoreCase = true) ||
+        baseName.equals("AUX", ignoreCase = true) ||
+        baseName.equals("NUL", ignoreCase = true) ||
+        baseName.matches(Regex("(?i)(COM|LPT)[1-9]"))
+}
+
+/** Validate profile name: TOML bare key (letters, digits, hyphens, underscores), not a Windows device name. */
+fun isValidProfileName(name: String): Boolean =
+    name.isNotBlank() && name.matches(Regex("[a-zA-Z0-9_-]+")) && !isReservedProfileName(name)
 
 /**
  * Escape characters that are special inside TOML basic strings. Every other control character

@@ -198,6 +198,7 @@ class ProfileAddJsonTest {
                 listOf("--type", "localfs", "--option", "root_path=/x") to "missing_mode",
                 listOf("--type", "localfs", "--mode", "both", "--option", "root_path=/x") to "invalid_mode",
                 listOf("--type", "localfs", "--mode", "mount", "--name", "a.b", "--option", "root_path=/x") to "invalid_profile_name",
+                listOf("--type", "localfs", "--mode", "mount", "--name", "CON.txt", "--option", "root_path=/x") to "reserved_profile_name",
                 listOf("--type", "localfs", "--mode", "mount", "--sync-root", "/r", "--option", "root_path=/x") to "sync_root_not_allowed",
                 listOf("--type", "localfs", "--mode", "mount") to "missing_option",
                 listOf("--type", "localfs", "--mode", "mount", "--option", "root_path=/x", "--option", "colour=blue") to "unknown_option",

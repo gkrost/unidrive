@@ -3,12 +3,15 @@ package org.krost.unidrive.cli
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assume.assumeTrue
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.ProcessLock
+import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
+import org.krost.unidrive.sync.model.SyncEntry
 import picocli.CommandLine
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
@@ -17,6 +20,7 @@ import java.net.UnixDomainSocketAddress
 import java.nio.channels.ServerSocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Instant
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -101,12 +105,41 @@ class ProfileRemoveTest {
     /** A profile folder with state, a credential file holding [secret], IPC tokens and a local root with a user file. */
     private fun populate() {
         Files.createDirectories(goneDir)
-        Files.writeString(goneDir.resolve("state.db"), "db")
+        writeState()
         Files.writeString(goneDir.resolve("credentials.json"), """{"refresh_token":"$secret"}""")
         Files.writeString(goneDir.resolve(IpcAuth.TOKEN_FILE), "tok-full")
         Files.writeString(goneDir.resolve(IpcAuth.READ_TOKEN_FILE), "tok-read")
         Files.createDirectories(mirrorRoot)
         Files.writeString(mirrorRoot.resolve("my-document.txt"), "precious")
+    }
+
+    /** A real, empty state.db (the removal opens it read-only, so a stand-in text file would be unreadable). */
+    private fun writeState(vararg rows: Pair<String, Boolean>) {
+        Files.createDirectories(goneDir)
+        val db = StateDatabase(goneDir.resolve("state.db"))
+        db.initialize()
+        try {
+            for ((path, failed) in rows) {
+                db.upsertEntry(
+                    SyncEntry(
+                        path = path,
+                        remoteId = "local:$path",
+                        remoteHash = null,
+                        remoteSize = 0,
+                        remoteModified = null,
+                        localMtime = 1L,
+                        localSize = 1L,
+                        isFolder = false,
+                        isPinned = false,
+                        isHydrated = true,
+                        lastSynced = Instant.parse("2000-01-01T00:00:00Z"),
+                    ),
+                )
+                if (failed) db.markUploadFailed(path, Instant.parse("2000-01-02T00:00:00Z"))
+            }
+        } finally {
+            db.close()
+        }
     }
 
     private fun run(vararg args: String): Int {
@@ -430,7 +463,7 @@ class ProfileRemoveTest {
         )
         Files.createDirectories(mountRoot.resolve("sub"))
         Files.writeString(mountRoot.resolve("sub").resolve("pending-upload.bin"), "bytes")
-        Files.writeString(goneDir.resolve("state.db"), "db")
+        writeState()
         Files.writeString(goneDir.resolve("token.json"), """{"access_token":"$secret"}""")
         Files.createDirectories(goneDir.resolve("journal"))
         Files.writeString(goneDir.resolve("journal").resolve("failures.jsonl"), "x")
@@ -520,5 +553,115 @@ class ProfileRemoveTest {
 
         assertNoSecret()
         assertEquals("config_invalid", errorToken())
+    }
+
+    // ── uploads still on their way ──────────────────────────────────────────
+
+    @Test
+    fun `uploads on their way refuse a stopped profile with both counts`() {
+        populate()
+        writeState("/a.txt" to false, "/b.txt" to false, "/c.txt" to true)
+
+        assertEquals(1, run("profile", "remove", "gone", "--yes", "--json"))
+
+        assertEquals("uploads_pending", errorToken())
+        assertEquals(3, json().getValue("pending").jsonPrimitive.int)
+        assertEquals(1, json().getValue("failed").jsonPrimitive.int)
+        assertNothingRemoved()
+    }
+
+    @Test
+    fun `only pending uploads refuse`() {
+        populate()
+        writeState("/a.txt" to false)
+
+        assertEquals(1, run("profile", "remove", "gone", "--yes", "--json"))
+
+        assertEquals("uploads_pending", errorToken())
+        assertEquals(1, json().getValue("pending").jsonPrimitive.int)
+        assertEquals(0, json().getValue("failed").jsonPrimitive.int)
+        assertNothingRemoved()
+    }
+
+    @Test
+    fun `failed uploads alone do not block the removal`() {
+        populate()
+        writeState("/a.txt" to true, "/b.txt" to true)
+
+        assertEquals(0, run("profile", "remove", "gone", "--yes", "--json"), stderr())
+
+        assertTrue(json().getValue("ok").jsonPrimitive.boolean)
+        assertFalse("gone" in profiles())
+    }
+
+    @Test
+    fun `force-pending removes a profile with uploads on their way`() {
+        populate()
+        writeState("/a.txt" to false, "/c.txt" to true)
+
+        assertEquals(0, run("profile", "remove", "gone", "--yes", "--json", "--force-pending"), stderr())
+
+        assertTrue(json().getValue("ok").jsonPrimitive.boolean)
+        assertFalse("gone" in profiles())
+        assertFalse(Files.exists(goneDir))
+    }
+
+    @Test
+    fun `the human form names the counts and the override`() {
+        populate()
+        writeState("/a.txt" to false)
+
+        assertEquals(1, run("profile", "remove", "gone", "--yes"))
+
+        assertTrue("--force-pending" in stderr(), stderr())
+        assertTrue("1 pending" in stderr(), stderr())
+        assertNothingRemoved()
+    }
+
+    @Test
+    fun `a state db that cannot be read is refused`() {
+        populate()
+        Files.writeString(goneDir.resolve("state.db"), "this is not a database, and it is long enough to be read as one header")
+
+        assertEquals(1, run("profile", "remove", "gone", "--yes", "--json"))
+
+        assertEquals("state_unreadable", errorToken())
+        assertNothingRemoved()
+    }
+
+    @Test
+    fun `a profile without a state db has nothing pending`() {
+        populate()
+        Files.delete(goneDir.resolve("state.db"))
+
+        assertEquals(0, run("profile", "remove", "gone", "--yes", "--json"), stderr())
+
+        assertFalse("gone" in profiles())
+    }
+
+    @Test
+    fun `the pending check reads the state db read-only`() {
+        populate()
+        writeState("/a.txt" to false)
+        val db = goneDir.resolve("state.db")
+        val before = Files.readAllBytes(db)
+
+        assertEquals(1, run("profile", "remove", "gone", "--yes", "--json"))
+
+        assertEquals("uploads_pending", errorToken())
+        assertTrue(before.contentEquals(Files.readAllBytes(db)), "state.db must be byte-identical")
+        assertFalse(Files.exists(goneDir.resolve("state.db-wal")), "no -wal file may appear")
+        assertFalse(Files.exists(goneDir.resolve("state.db-journal")), "no journal may appear")
+    }
+
+    @Test
+    fun `a running daemon is still refused as before, pending or not`() {
+        populate()
+        writeState("/a.txt" to false)
+        fakeDaemonLock()
+
+        assertEquals(1, run("profile", "remove", "gone", "--yes", "--json"))
+
+        assertEquals("daemon_running", errorToken())
     }
 }

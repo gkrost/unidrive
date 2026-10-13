@@ -18,6 +18,15 @@ import picocli.CommandLine.ParentCommand
 import java.io.IOException
 import java.util.concurrent.Callable
 
+private const val MAX_AUTH_FAILURE_MESSAGE_LENGTH = 512
+
+private fun boundedAuthFailureMessage(message: String): String {
+    if (message.length <= MAX_AUTH_FAILURE_MESSAGE_LENGTH) return message
+    var end = MAX_AUTH_FAILURE_MESSAGE_LENGTH
+    if (Character.isHighSurrogate(message[end - 1]) && Character.isLowSurrogate(message[end])) end--
+    return message.substring(0, end)
+}
+
 /*
  * The non-interactive halves of `unidrive auth`, for scripts and front-ends: JSON on stdout, no
  * console, no prompt, no daemon started. Secrets never travel through the argument list: the
@@ -158,7 +167,16 @@ class AuthCompleteCommand : Callable<Int> {
                             put("status", "pending")
                             put("retry_after_seconds", o.retryAfterSeconds)
                         }
-                    is CompleteAuthResult.Failure -> throw LifecycleError("auth_failed", o.message)
+                    is CompleteAuthResult.Failure -> {
+                        val token =
+                            when (o.reason) {
+                                CompleteAuthResult.Reason.EXPIRED -> "flow_expired"
+                                CompleteAuthResult.Reason.UNKNOWN_HANDLE -> "unknown_handle"
+                                CompleteAuthResult.Reason.ACCESS_DENIED -> "access_denied"
+                                null -> "auth_failed"
+                            }
+                        throw LifecycleError(token, boundedAuthFailureMessage(o.message))
+                    }
                 }
             }
         }

@@ -174,6 +174,27 @@ class OneDriveInteractiveAuthContractTest {
         }
     }
 
+    private fun deviceCodeThenAccessDeniedEngine(): MockEngine {
+        var call = 0
+        return MockEngine { _ ->
+            call += 1
+            when (call) {
+                1 ->
+                    respond(
+                        content = ByteReadChannel(deviceCodeResponseBody()),
+                        status = HttpStatusCode.OK,
+                        headers = headersOf("Content-Type" to listOf("application/json")),
+                    )
+                else ->
+                    respond(
+                        content = ByteReadChannel("""{"error":"access_denied"}"""),
+                        status = HttpStatusCode.BadRequest,
+                        headers = headersOf("Content-Type" to listOf("application/json")),
+                    )
+            }
+        }
+    }
+
     /** /devicecode succeeds; /token returns 200 with a body that fails JSON
      *  deserialisation → SerializationException escapes pollOnceForToken
      *  and is caught by the generic exception arm in completeInteractiveAuth. */
@@ -322,11 +343,25 @@ class OneDriveInteractiveAuthContractTest {
 
             assertTrue(outcome is CompleteAuthResult.Failure)
             assertTrue(outcome.message.contains("expired", ignoreCase = true))
+            assertEquals(CompleteAuthResult.Reason.EXPIRED, outcome.reason)
 
             // Handle now unknown.
             val second = factory.completeInteractiveAuth(tmpProfileDir, begin.continuationHandle)
             assertTrue(second is CompleteAuthResult.Failure)
             assertTrue(second.message.contains("Unknown or expired"))
+            assertEquals(CompleteAuthResult.Reason.UNKNOWN_HANDLE, second.reason)
+        }
+
+    @Test
+    fun complete_access_denied_has_a_stable_reason() =
+        runBlocking {
+            val factory = factoryWithEngine(deviceCodeThenAccessDeniedEngine())
+            val begin = factory.beginInteractiveAuth(tmpProfileDir)
+            val outcome = factory.completeInteractiveAuth(tmpProfileDir, begin.continuationHandle)
+
+            assertTrue(outcome is CompleteAuthResult.Failure)
+            assertEquals(CompleteAuthResult.Reason.ACCESS_DENIED, outcome.reason)
+            assertTrue(outcome.message.contains("denied", ignoreCase = true))
         }
 
     @Test

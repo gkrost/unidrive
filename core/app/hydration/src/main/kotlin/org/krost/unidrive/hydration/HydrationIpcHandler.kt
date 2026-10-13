@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *   open_read   request:  {"verb":"hydration.open_read","handle_id":"...","path":"/foo"}
  *   open_read   reply ok: {"ok":true,"cache_path":"/home/.../foo.txt"}
  *   open_read   reply err:{"ok":false,"error":"<message>"}
+ *                         an excluded cloud item answers with the `excluded` token without a download,
+ *                         even if a warm cache copy exists.
  *   open_write  request:  {"verb":"hydration.open_write","handle_id":"...","path":"/foo","cache_path":"/home/.../foo.txt"[,"base_etag":"..."]}
  *   open_write  reply:    same as open_read; base_etag (OPTIONAL) is the etag the client
  *                         observed at list/open time — a mismatch refuses the write with

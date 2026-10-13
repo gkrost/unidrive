@@ -23,6 +23,8 @@ internal class LifecycleError(
     val token: String,
     message: String,
     cause: Throwable? = null,
+    /** Extra keys of the JSON refusal next to `ok`, `error` and `message` (counts only, never a secret). */
+    val details: JsonObject = JsonObject(emptyMap()),
 ) : Exception(message, cause)
 
 /** One compact JSON object on stdout. Anything else on stdout would break a front-end's parser. */
@@ -34,6 +36,7 @@ internal fun lifecycleErrorJson(e: LifecycleError): JsonObject =
         put("ok", false)
         put("error", e.token)
         put("message", e.message ?: e.token)
+        for ((key, value) in e.details) put(key, value)
     }
 
 /** Test seams of the lifecycle commands; production uses the defaults and never reassigns them. */

@@ -356,6 +356,20 @@ class HydrationImpl(
         if (!resolvesInsideCache(path)) return OpenResult.Failed(HydrationError.InvalidPath)
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
+        if (mount.isExcludedPath(path)) {
+            val error = HydrationError.Excluded
+            _events.emit(HydrationEvent.Failed(path, error))
+            _events.emit(
+                HydrationEvent.Completed(
+                    path = path,
+                    handleId = handleId,
+                    direction = HydrationEvent.Completed.Direction.DOWNLOAD,
+                    ok = false,
+                    error = error,
+                ),
+            )
+            return OpenResult.Failed(error)
+        }
         touch(path)
         // #652: a cold read is a download in the history; a warm serve never starts the handle, so it leaves no row.
         val tx = history?.begin(TransferDirection.DOWNLOAD, path, bytesTotal = entry.remoteSize.takeIf { it > 0 })
