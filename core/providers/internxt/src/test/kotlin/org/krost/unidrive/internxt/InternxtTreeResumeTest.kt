@@ -60,7 +60,7 @@ class InternxtTreeResumeTest {
         val resume = treeResumeOf(staging.marker, staging.rows.values.toList(), roots)
         return InternxtProvider.collectScopedInventoryImpl(
             getContents = { uuid ->
-                if (uuid == failOn) throw IllegalStateException("outage")
+                if (uuid == failOn) error("outage")
                 synchronized(listed) { listed += uuid }
                 tree[uuid] ?: error("unexpected uuid $uuid")
             },
