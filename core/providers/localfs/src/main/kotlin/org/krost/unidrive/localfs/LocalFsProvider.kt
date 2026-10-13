@@ -11,10 +11,12 @@ import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.ScanContext
 import org.slf4j.LoggerFactory
 import java.io.FileNotFoundException
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 
 /**
@@ -142,7 +144,7 @@ class LocalFsProvider(root: Path) : CloudProvider {
         withContext(Dispatchers.IO) {
             val src = toLocal(remotePath)
             destination.parent?.let { Files.createDirectories(it) }
-            Files.copy(src, destination, StandardCopyOption.REPLACE_EXISTING)
+            copyDurably(src, destination)
             Files.size(destination)
         }
 
@@ -159,11 +161,20 @@ class LocalFsProvider(root: Path) : CloudProvider {
         withContext(Dispatchers.IO) {
             val dest = toLocal(remotePath)
             dest.parent?.let { Files.createDirectories(it) }
-            Files.copy(localPath, dest, StandardCopyOption.REPLACE_EXISTING)
+            copyDurably(localPath, dest)
             val size = Files.size(dest)
             onProgress?.invoke(size, size)
             toItem(dest)
         }
+
+    /** Copies keeping the source mtime (the JDK stamps "now" on Linux otherwise) and flushes the target to disk. */
+    private fun copyDurably(
+        from: Path,
+        to: Path,
+    ) {
+        Files.copy(from, to, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES)
+        FileChannel.open(to, StandardOpenOption.WRITE).use { it.force(true) }
+    }
 
     override suspend fun delete(remotePath: String, ifMatchETag: String?) {
         withContext(Dispatchers.IO) { deleteRecursivelyNoFollow(toLocal(remotePath)) }

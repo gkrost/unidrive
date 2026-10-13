@@ -1766,7 +1766,7 @@ class InternxtProvider(
         // query and the engine drops what falls outside the scope.
         val scopeRoots = scanContext?.scopeRoots.orEmpty()
         val onProgress = scanContext?.onProgress
-        if (cursor == null && scopeRoots.isNotEmpty()) return scopedFullDelta(scopeRoots, onPageProgress, onProgress)
+        if (cursor == null && scopeRoots.isNotEmpty()) return scopedFullDelta(scopeRoots, onPageProgress, onProgress, scanContext = scanContext)
         // #517 R3: once a full gather ended in an unavailable account-wide listing, later
         // full gathers skip the doomed attempt for a while — with the listing watchdog at
         // 330 s even one doomed attempt is minutes of heavy load the walk was going
@@ -1782,7 +1782,7 @@ class InternxtProvider(
                 heavyListingsUnavailableUntil.get(),
                 if (scopeRoots.isEmpty()) "" else " of $scopeRoots",
             )
-            return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress)
+            return scopedFullDelta(scopeRoots.ifEmpty { listOf("/") }, onPageProgress, onProgress, scanContext = scanContext)
         }
         // A full enumeration of the whole drive pages through the cursor listings: the offset listing below
         // needs 25-56 s per page on a large account and the gateway cuts it at about two minutes. Only a server
@@ -1807,8 +1807,11 @@ class InternxtProvider(
         // are encoded in resumeMarker. A fresh scan starts both offsets at 0
         // with an empty resumedItems list.
         val resume = parseResumeOffsets(scanContext?.resumeMarker)
-        val resumedFolders = scanContext?.resumedItems.orEmpty().filter { it.isFolder }
-        val resumedFiles = scanContext?.resumedItems.orEmpty().filter { !it.isFolder }
+        // Rows the cursor listing or the tree walk staged are theirs: their markers do not parse as offsets, so
+        // this listing starts over, and stale rows of another listing would rejoin it as if they were current.
+        val resumedRows = scanContext?.resumedItems.orEmpty().filter { it.hash != CURSOR_STAGED_TAG && !isTreeStaged(it) }
+        val resumedFolders = resumedRows.filter { it.isFolder }
+        val resumedFiles = resumedRows.filter { !it.isFolder }
         val allFiles = mutableListOf<InternxtFile>()
         val allFolders = mutableListOf<InternxtFolder>()
         // Resumed items rejoin the gather as Internxt model objects so the
@@ -2238,10 +2241,25 @@ class InternxtProvider(
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
         onProgress: ((ScanProgress) -> Unit)?,
         progressBaseline: Int = 0,
+        // Only a walk that is the first strategy tried gets the scan context: a walk that took over from a
+        // listing which already stored progress must leave that progress and its marker alone.
+        scanContext: ScanContext? = null,
     ): DeltaPage {
-        val startedAt = Instant.now()
+        val resume = treeResumeOf(scanContext?.resumeMarker, scanContext?.resumedItems.orEmpty(), scopeRoots)
+        // The cursor of the page is the instant the walk began; a resumed walk keeps the first attempt's instant,
+        // so the next incremental delta asks for everything since the beginning, the outage included.
+        val startedAt = resume?.marker?.startedAt?.let(Instant::parse) ?: Instant.now()
+        if (resume != null) {
+            log.info(
+                "Resuming the folder walk begun {}: {} folders listed, {} staged rows",
+                startedAt,
+                resume.listedFolders.size,
+                resume.files.size + resume.folders.size,
+            )
+        }
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
         val rootUuid = authService.getValidCredentials().rootFolderId
+        val persist = scanContext?.persistPage
         val inventory =
             collectScopedInventoryImpl(
                 getContents = ::folderContentsWithPerPageFallback,
@@ -2254,6 +2272,11 @@ class InternxtProvider(
                     heartbeat?.tick(progress.items + progressBaseline)
                     onProgress?.invoke(progress)
                 },
+                resume = resume,
+                persist =
+                    persist?.let { store ->
+                        { rows, startsDone -> store(rows, treeMarker(startedAt.toString(), scopeRoots, startsDone)) }
+                    },
             )
         val skipped = foldersSkipped.get()
         if (skipped > 0) {
@@ -2677,12 +2700,33 @@ class InternxtProvider(
             log: org.slf4j.Logger,
             concurrency: Int = 4,
             onProgress: ((ScanProgress) -> Unit)? = null,
+            resume: TreeResume? = null,
+            persist: (suspend (rows: List<org.krost.unidrive.CloudItem>, startsDone: Set<String>) -> Unit)? = null,
         ): ScopedInventory {
             val files = java.util.Collections.synchronizedList(mutableListOf<InternxtFile>())
             val folders = java.util.Collections.synchronizedMap(linkedMapOf<String, InternxtFolder>())
             val permits = kotlinx.coroutines.sync.Semaphore(concurrency)
             val known = AtomicInteger(0)
             val done = AtomicInteger(0)
+
+            // A resumed walk starts from the rows the interrupted one stored: what they list is known, the
+            // folders marked listed are done, and only the folders still outstanding are listed again.
+            val listed: Set<String> = resume?.listedFolders.orEmpty()
+            val seeded = HashSet<String>()
+            val visited = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+            val starts = LinkedHashSet<String>()
+            val startsDone = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+            val persistLock = kotlinx.coroutines.sync.Mutex()
+            if (resume != null) {
+                files.addAll(resume.files)
+                for (f in resume.folders) {
+                    folders[f.uuid] = f
+                    seeded.add(f.uuid)
+                }
+                startsDone.addAll(resume.marker.startsDone)
+                known.set(seeded.size)
+                done.set(seeded.count { it in listed })
+            }
 
             fun live(f: InternxtFolder) = f.status == "EXISTS" && !f.removed && !f.deleted
 
@@ -2705,6 +2749,7 @@ class InternxtProvider(
             suspend fun listing(uuid: String): FolderContentResponse = permits.withPermit { getContents(uuid) }
 
             suspend fun walk(folderUuid: String) {
+                if (folderUuid in listed || !visited.add(folderUuid)) return
                 val content =
                     try {
                         listing(folderUuid)
@@ -2718,15 +2763,36 @@ class InternxtProvider(
                         }
                         throw e
                     }
-                content.files
-                    .filter { it.status == "EXISTS" && !it.removed && !it.deleted }
-                    .mapTo(files) { if (it.folderUuid != null) it else it.copy(folderUuid = folderUuid) }
+                val listedFiles =
+                    content.files
+                        .filter { it.status == "EXISTS" && !it.removed && !it.deleted }
+                        .map { if (it.folderUuid != null) it else it.copy(folderUuid = folderUuid) }
+                files.addAll(listedFiles)
                 scanned.incrementAndGet()
                 val children =
                     content.children.filter(::live).map { child ->
                         (if (child.parentUuid != null) child else child.copy(parentUuid = folderUuid)).also { folders[it.uuid] = it }
                     }
                 known.addAndGet(children.size)
+                // The listing, the rows of the children and the folder's own done mark are stored together: a
+                // folder marked listed has all its children staged, and one that is not has none.
+                persist?.let { store ->
+                    persistLock.withLock {
+                        val isStart = folderUuid in starts
+                        if (isStart) startsDone.add(folderUuid)
+                        val own =
+                            if (isStart) {
+                                emptyList()
+                            } else {
+                                listOfNotNull(folders[folderUuid]?.toStagedCloudItem(driveRootUuid)?.copy(hash = TREE_DONE_TAG))
+                            }
+                        val rows =
+                            listedFiles.map { it.toStagedCloudItem(driveRootUuid).copy(hash = treeFileTag(it)) } +
+                                children.map { it.toStagedCloudItem(driveRootUuid).copy(hash = TREE_STAGED_TAG) } +
+                                own
+                        store(rows, startsDone.toSet())
+                    }
+                }
                 done.incrementAndGet()
                 report()
                 kotlinx.coroutines.coroutineScope {
@@ -2746,9 +2812,16 @@ class InternxtProvider(
                     folders[stamped.uuid] = stamped
                     current = stamped.uuid
                 }
-                known.incrementAndGet()
-                walk(current)
+                if (starts.add(current)) {
+                    if (current !in seeded) known.incrementAndGet()
+                    if (current in listed && current !in seeded) done.incrementAndGet()
+                }
             }
+
+            kotlinx.coroutines.coroutineScope {
+                for (f in resume?.folders.orEmpty()) if (f.uuid !in listed) launch { walk(f.uuid) }
+            }
+            for (start in starts) walk(start)
             return ScopedInventory(files.toList(), folders.values.toList())
         }
 

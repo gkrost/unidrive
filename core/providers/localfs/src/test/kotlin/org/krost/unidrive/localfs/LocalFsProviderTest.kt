@@ -4,6 +4,7 @@ import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.CapabilityResult
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -12,6 +13,25 @@ import kotlin.test.assertTrue
 
 class LocalFsProviderTest {
     private fun newRoot(): Path = Files.createTempDirectory("localfs-remote")
+
+    @Test
+    fun upload_and_download_preserve_source_mtime_and_full_size() =
+        runTest {
+            val p = LocalFsProvider(newRoot())
+            p.authenticate()
+            val mtime = FileTime.fromMillis(1_600_000_000_000L)
+            val src = Files.createTempFile("src", ".bin")
+            Files.write(src, ByteArray(100_000) { it.toByte() })
+            Files.setLastModifiedTime(src, mtime)
+
+            val item = p.upload(src, "/a.bin")
+            assertEquals(100_000L, item.size)
+            assertEquals(mtime.toInstant(), item.modified)
+
+            val dest = Files.createTempDirectory("out").resolve("a.bin")
+            assertEquals(100_000L, p.download("/a.bin", dest))
+            assertEquals(mtime, Files.getLastModifiedTime(dest))
+        }
 
     @Test
     fun upload_then_list_and_download_roundtrips() =
