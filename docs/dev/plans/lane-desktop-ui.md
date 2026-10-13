@@ -55,7 +55,10 @@ symbol. Work the tiers **in order**; within a tier the items are file-disjoint a
   same file); `profile list` prints a table; `remove` rewrites the config and deletes the profile folder.
 - **PR a:** `profile list --json`, `profile set <name> <key> <value>` for the documented keys only (unknown keys
   refused; "restart the daemon" in the reply), and a free-text `label` key. The profile name stays the
-  immutable id.
+  immutable id. The account's ignore keys follow the same path: `profile set <name> honor_gitignore true|false`,
+  and `profile set <name> ignore_rules` with the rules on standard input, one per line (an empty input clears the
+  key; the daemon reads both at start, so the reply says to restart). `profile list --json` reports both, as
+  `false` and `[]` when unset.
 - **PR b:** non-interactive `profile add --type --name --mode [--label] --json`. Credentials never come from
   arguments:
   - `auth begin`/`auth complete` for the device-code flow;

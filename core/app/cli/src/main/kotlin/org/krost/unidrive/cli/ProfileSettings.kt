@@ -48,6 +48,11 @@ internal object ProfileSettings {
     const val SYNC_PATH = "sync_path"
     const val HYDRATION_CACHE_MAX_BYTES = "hydration_cache_max_bytes"
     const val DAEMON_POLL_SECONDS = "daemon_poll_seconds"
+    const val HONOR_GITIGNORE = "honor_gitignore"
+    const val IGNORE_RULES = "ignore_rules"
+
+    /** Upper bound of the `ignore_rules` input, in characters; far above any real rule list. */
+    const val IGNORE_RULES_MAX_CHARS = 64 * 1024
 
     class Spec(
         val key: String,
@@ -59,6 +64,8 @@ internal object ProfileSettings {
         val toToml: (profile: String, raw: String) -> String,
         /** The key's current value in the parsed config; JSON null when unset. */
         val read: (RawProvider) -> JsonElement,
+        /** The value is a block of text read from standard input, not an argument (patterns would not survive a command line). */
+        val fromStdin: Boolean = false,
     )
 
     val SPECS: List<Spec> =
@@ -90,6 +97,21 @@ internal object ProfileSettings {
                 needsDaemonRestart = true,
                 toToml = { _, raw -> nonNegative(DAEMON_POLL_SECONDS, raw, Int.MAX_VALUE.toLong()).toString() },
                 read = { rp -> rp.daemon_poll_seconds?.let(::JsonPrimitive) ?: JsonNull },
+            ),
+            Spec(
+                key = HONOR_GITIGNORE,
+                description = "also read .gitignore files as upload ignore rules: true or false (default false)",
+                needsDaemonRestart = true,
+                toToml = { _, raw -> honorGitignoreToml(raw) },
+                read = { rp -> JsonPrimitive(rp.honor_gitignore ?: false) },
+            ),
+            Spec(
+                key = IGNORE_RULES,
+                description = "the account's own upload ignore rules, git syntax, one per line from standard input; empty input clears them",
+                needsDaemonRestart = true,
+                toToml = { _, raw -> ignoreRulesToml(raw) },
+                read = { rp -> JsonArray(rp.ignore_rules.orEmpty().map(::JsonPrimitive)) },
+                fromStdin = true,
             ),
         )
 
@@ -123,6 +145,31 @@ internal object ProfileSettings {
         }
         return n
     }
+
+    private fun honorGitignoreToml(raw: String): String =
+        when (raw.trim().lowercase()) {
+            "true" -> "true"
+            "false" -> "false"
+            else -> throw ProfileCommandError("invalid_value", "$HONOR_GITIGNORE must be true or false, got '$raw'")
+        }
+
+    /**
+     * The rules in [text], one per line (CRLF or LF); blank lines carry no rule and are dropped. Patterns are kept as
+     * typed, since git's syntax has no invalid pattern; only control characters and an oversized input are refused.
+     */
+    fun ignoreRuleLines(text: String): List<String> {
+        if (text.length > IGNORE_RULES_MAX_CHARS) {
+            throw ProfileCommandError("invalid_value", "$IGNORE_RULES is larger than $IGNORE_RULES_MAX_CHARS characters")
+        }
+        val rules = text.split('\n').map { it.removeSuffix("\r") }.filter { it.isNotBlank() }
+        if (rules.any { line -> line.any { it < ' ' || it == '\u007f' } }) {
+            throw ProfileCommandError("invalid_value", "$IGNORE_RULES must not contain control characters")
+        }
+        return rules
+    }
+
+    private fun ignoreRulesToml(raw: String): String =
+        ignoreRuleLines(raw).joinToString(", ", "[", "]") { "\"${escapeTomlValue(it)}\"" }
 
     private fun syncPathToml(
         profile: String,
@@ -191,7 +238,8 @@ internal fun writeConfigAtomically(
     name = "set",
     description = [
         "Change one documented key of a profile in config.toml (label, sync_path, hydration_cache_max_bytes, " +
-            "daemon_poll_seconds). Credentials and fixed keys (type, mode, sync_root) are refused. " +
+            "daemon_poll_seconds, honor_gitignore, ignore_rules). ignore_rules takes its rules from standard input, " +
+            "one per line (an empty input clears them), not from an argument. Credentials and fixed keys (type, mode, sync_root) are refused. " +
             "A running daemon does not reload the config: restart it.",
     ],
     mixinStandardHelpOptions = true,
@@ -206,7 +254,7 @@ class ProfileSetCommand : Callable<Int> {
     @Parameters(index = "1", description = ["Key to change"])
     lateinit var key: String
 
-    @Parameters(index = "2", arity = "0..1", description = ["New value (omit with --unset)"])
+    @Parameters(index = "2", arity = "0..1", description = ["New value (omit with --unset; ignore_rules reads standard input)"])
     var value: String? = null
 
     @Option(names = ["--unset"], description = ["Remove the key instead of setting it"])
@@ -229,13 +277,19 @@ class ProfileSetCommand : Callable<Int> {
             1
         }
 
+    private fun readStdinText(): String =
+        System.`in`.readNBytes(ProfileSettings.IGNORE_RULES_MAX_CHARS * 4 + 1).toString(Charsets.UTF_8)
+
     private fun applyChange(): JsonObject {
         val configPath = profileCmd.parent.configBaseDir().resolve("config.toml")
         val spec = ProfileSettings.specFor(key)
         if (!isValidProfileName(name)) {
             throw ProfileCommandError("invalid_profile_name", "'$name' is not a valid profile name")
         }
-        if (!unset && value == null) {
+        if (spec.fromStdin && value != null) {
+            throw ProfileCommandError("invalid_value", "$key is read from standard input, one rule per line; pass no value")
+        }
+        if (!unset && value == null && !spec.fromStdin) {
             throw ProfileCommandError("missing_value", "a value is required for $key (or pass --unset)")
         }
         if (unset && value != null) {
@@ -254,7 +308,9 @@ class ProfileSetCommand : Callable<Int> {
             }
         val current = raw.providers[name] ?: throw ProfileCommandError("profile_not_found", "profile '$name' is not configured")
 
-        val line = value?.let { "$key = ${spec.toToml(name, it)}" }
+        val input = if (spec.fromStdin && !unset) readStdinText() else value
+        if (spec.fromStdin && input != null && ProfileSettings.ignoreRuleLines(input).isEmpty()) unset = true
+        val line = if (unset) null else input?.let { "$key = ${spec.toToml(name, it)}" }
         val edited =
             when (val r = editProfileKey(text, name, key, line)) {
                 is ProfileKeyEdit.Edited -> r.text
