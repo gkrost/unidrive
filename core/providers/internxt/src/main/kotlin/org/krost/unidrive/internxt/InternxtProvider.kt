@@ -506,6 +506,7 @@ class InternxtProvider(
     // demands. Retries on IOException and 5xx; other 4xx are final, except a
     // reconciled MissingUploadsError may restart one exhausted Bridge session.
     // Transient failures get at most 3 attempts with simple exponential backoff.
+    @Suppress("ThrowsCount") // Separate terminal exits preserve each retryable transport failure's original type.
     private suspend fun <T> retryShardCommit(
         onMissingUploadSession: suspend () -> Unit = {},
         op: suspend () -> T,

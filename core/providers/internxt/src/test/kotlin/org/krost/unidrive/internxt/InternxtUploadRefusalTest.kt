@@ -23,6 +23,16 @@ import java.util.concurrent.atomic.AtomicInteger
  * error keeps its own (retryable) type.
  */
 class InternxtUploadRefusalTest {
+    private data class UploadScenario(
+        val emptyListing: Boolean = false,
+        val missingUploads: Boolean = false,
+        val missingUploadsCount: Int = 0,
+        val onFinish: () -> Unit = {},
+        val onStart: () -> Unit = {},
+        val onPut: () -> Unit = {},
+        val reconcileListing: String = """{"children":[],"files":[]}""",
+    )
+
     private val bucket = "6928426c1a2316b856c9ab81"
     private val shardUrl = "https://shard-host.invalid/refusal-put"
     private val tmp: Path = Files.createTempDirectory("ud-refusal-")
@@ -41,17 +51,11 @@ class InternxtUploadRefusalTest {
      * parent, #580), not a degraded gateway (that fails the listing itself).
      */
     private fun newProviderParentGone(): InternxtProvider =
-        newProviderWith(HttpStatusCode.OK, emptyListing = true)
+        newProviderWith(HttpStatusCode.OK, scenario = UploadScenario(emptyListing = true))
 
     private fun newProviderWith(
         createStatus: HttpStatusCode,
-        emptyListing: Boolean = false,
-        missingUploads: Boolean = false,
-        missingUploadsCount: Int = 0,
-        onFinish: () -> Unit = {},
-        onStart: () -> Unit = {},
-        onPut: () -> Unit = {},
-        reconcileListing: String = """{"children":[],"files":[]}""",
+        scenario: UploadScenario = UploadScenario(),
     ): InternxtProvider {
         val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp))
         val authField = InternxtProvider::class.java.getDeclaredField("authService")
@@ -87,21 +91,21 @@ class InternxtUploadRefusalTest {
                 MockEngine { request ->
                     val url = request.url.toString()
                     when {
-                        (emptyListing || missingUploads || missingUploadsCount > 0) && url.contains("/folders/content/") ->
-                            respond(reconcileListing, HttpStatusCode.OK, json)
+                        (scenario.emptyListing || scenario.missingUploads || scenario.missingUploadsCount > 0) && url.contains("/folders/content/") ->
+                            respond(scenario.reconcileListing, HttpStatusCode.OK, json)
                         url.contains("/v2/buckets/") && url.contains("/files/start") -> {
-                            onStart()
+                            scenario.onStart()
                             val session = startCount.incrementAndGet()
                             respond("""{"uploads":[{"index":0,"uuid":"shard-$session","url":"$shardUrl-$session"}]}""", HttpStatusCode.OK, json)
                         }
                         url.startsWith("$shardUrl-") -> {
-                            onPut()
+                            scenario.onPut()
                             respond("", HttpStatusCode.OK)
                         }
                         url.contains("/v2/buckets/") && url.contains("/files/finish") -> {
-                            onFinish()
+                            scenario.onFinish()
                             val finish = finishCount.incrementAndGet()
-                            if (missingUploads || finish <= missingUploadsCount) {
+                            if (scenario.missingUploads || finish <= scenario.missingUploadsCount) {
                                 respond("""{"message":"MissingUploadsError: Missing uploads to complete the upload"}""", HttpStatusCode.Conflict, json)
                             } else {
                                 respond("""{"id":"bucket-entry-1","index":"${"aa".repeat(32)}","bucket":"$bucket","name":"enc"}""", HttpStatusCode.OK, json)
@@ -132,10 +136,13 @@ class InternxtUploadRefusalTest {
             val provider =
                 newProviderWith(
                     HttpStatusCode.OK,
-                    missingUploadsCount = 1,
-                    onStart = { starts.incrementAndGet() },
-                    onPut = { puts.incrementAndGet() },
-                    onFinish = { finishes.incrementAndGet() },
+                    scenario =
+                        UploadScenario(
+                            missingUploadsCount = 1,
+                            onStart = { starts.incrementAndGet() },
+                            onPut = { puts.incrementAndGet() },
+                            onFinish = { finishes.incrementAndGet() },
+                        ),
                 )
             try {
                 val item = provider.upload(local(), "/f.txt", existingRemoteId = null, onProgress = null)
@@ -157,10 +164,13 @@ class InternxtUploadRefusalTest {
             val provider =
                 newProviderWith(
                     HttpStatusCode.OK,
-                    missingUploads = true,
-                    onFinish = { finishCalls++ },
-                    onStart = { startCalls++ },
-                    onPut = { putCalls++ },
+                    scenario =
+                        UploadScenario(
+                            missingUploads = true,
+                            onFinish = { finishCalls++ },
+                            onStart = { startCalls++ },
+                            onPut = { putCalls++ },
+                        ),
                 )
             try {
                 val e = assertFailsWith<PermanentUploadFailureException> {
@@ -181,9 +191,12 @@ class InternxtUploadRefusalTest {
             var finishCalls = 0
             val provider = newProviderWith(
                 HttpStatusCode.OK,
-                missingUploads = true,
-                onFinish = { finishCalls++ },
-                reconcileListing = """{"children":[],"files":[{"uuid":"old","fileId":"old-entry","plainName":"f","type":"txt","size":"10","status":"EXISTS","creationTime":"2000-01-01T00:00:00Z"}]}""",
+                scenario =
+                    UploadScenario(
+                        missingUploads = true,
+                        onFinish = { finishCalls++ },
+                        reconcileListing = """{"children":[],"files":[{"uuid":"old","fileId":"old-entry","plainName":"f","type":"txt","size":"10","status":"EXISTS","creationTime":"2000-01-01T00:00:00Z"}]}""",
+                    ),
             )
             try {
                 assertFailsWith<PermanentUploadFailureException> {
