@@ -9,6 +9,7 @@ import org.krost.unidrive.sync.ProfileInfo
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isProfileAuthenticated
+import org.krost.unidrive.sync.isReservedProfileName
 import org.krost.unidrive.sync.isValidProfileName
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
@@ -147,6 +148,10 @@ class ProfileAddCommand : Callable<Int> {
         val name = if (nameInput.isNullOrBlank()) type else nameInput
 
         // Validate profile name is a valid TOML bare key (no dots, spaces, brackets)
+        if (isReservedProfileName(name)) {
+            System.err.println("Error: Profile name '$name' is a reserved Windows device name.")
+            System.exit(1)
+        }
         if (!isValidProfileName(name)) {
             System.err.println("Error: Profile name '$name' is invalid.")
             System.err.println("Use only letters, digits, hyphens, and underscores.")

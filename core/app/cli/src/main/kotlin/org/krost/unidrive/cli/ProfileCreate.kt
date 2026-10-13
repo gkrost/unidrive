@@ -11,6 +11,7 @@ import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.escapeTomlValue
 import org.krost.unidrive.sync.generateProfileToml
 import org.krost.unidrive.sync.isValidProfileName
+import org.krost.unidrive.sync.isReservedProfileName
 import org.krost.unidrive.sync.setDefaultProfile
 import java.io.IOException
 import java.nio.file.AtomicMoveNotSupportedException
@@ -64,6 +65,9 @@ internal object ProfileCreator {
                     "'$type' is not a provider type. Known: ${SyncConfig.KNOWN_TYPES.sorted().joinToString(", ")}",
                 )
         val name = req.name?.takeIf { it.isNotBlank() } ?: type
+        if (isReservedProfileName(name)) {
+            throw LifecycleError("reserved_profile_name", "'$name' is a reserved Windows device name")
+        }
         if (!isValidProfileName(name)) {
             throw LifecycleError("invalid_profile_name", "'$name' is invalid: use only letters, digits, hyphens and underscores")
         }

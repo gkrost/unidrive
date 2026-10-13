@@ -223,6 +223,13 @@ class ProfileCommandTest {
         assertFalse(isValidProfileName("path/name")) // slashes
     }
 
+    @Test
+    fun `isValidProfileName rejects Windows reserved device names on every platform`() {
+        for (name in listOf("con", "NUL", "aux", "prn", "com1", "COM9", "lpt1", "LPT9", "con.txt", "COM1.log")) {
+            assertFalse(isValidProfileName(name), "reserved profile name was accepted: $name")
+        }
+    }
+
     // ── Duplicate detection ──────────────────────────────────────────────────
 
     @Test
