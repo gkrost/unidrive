@@ -337,7 +337,14 @@ class InternxtProvider(
         remoteId: String,
         remotePath: String,
         destination: Path,
-    ): Long = downloadWithFileUuid(remoteId, remotePath, destination)
+    ): Long = downloadWithFileUuid(remoteId, remotePath, destination).bytesWritten
+
+    override suspend fun downloadByIdWithHash(
+        remoteId: String,
+        remotePath: String,
+        destination: Path,
+        targetMtimeMillis: Long?,
+    ): DownloadReceipt = downloadWithFileUuid(remoteId, remotePath, destination, targetMtimeMillis)
 
     override suspend fun download(
         remotePath: String,
@@ -345,14 +352,26 @@ class InternxtProvider(
     ): Long {
         val metadata = getMetadata(remotePath)
         if (metadata.isFolder) throw ProviderException("Cannot download a folder: $remotePath")
-        return downloadWithFileUuid(metadata.id, remotePath, destination)
+        return downloadWithFileUuid(metadata.id, remotePath, destination).bytesWritten
     }
 
+    override suspend fun downloadWithHash(
+        remotePath: String,
+        destination: Path,
+        targetMtimeMillis: Long?,
+    ): DownloadReceipt {
+        val metadata = getMetadata(remotePath)
+        if (metadata.isFolder) throw ProviderException("Cannot download a folder: $remotePath")
+        return downloadWithFileUuid(metadata.id, remotePath, destination, targetMtimeMillis)
+    }
+
+    @Suppress("ThrowsCount") // The baseline entry predates the streamed receipt parameters and return type.
     private suspend fun downloadWithFileUuid(
         fileUuid: String,
         remotePath: String,
         destination: Path,
-    ): Long {
+        targetMtimeMillis: Long? = null,
+    ): DownloadReceipt {
         val fileMeta =
             try {
                 api.getFileMeta(fileUuid)
@@ -375,8 +394,18 @@ class InternxtProvider(
                     java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
                     java.nio.file.StandardOpenOption.WRITE,
                 ).close()
+                targetMtimeMillis?.let {
+                    Files.setLastModifiedTime(destination, java.nio.file.attribute.FileTime.fromMillis(it))
+                }
             }
-            return 0L
+            val sha256 = java.security.MessageDigest.getInstance("SHA-256").digest().joinToString("") { "%02x".format(it) }
+            return DownloadReceipt(
+                bytesWritten = 0L,
+                plaintextSha256 = sha256,
+                stagedSize = Files.size(destination),
+                stagedMtimeMillis = Files.getLastModifiedTime(destination).toMillis(),
+                mtimeAppliedBeforePlacement = false,
+            )
         }
         val bucket = fileMeta.bucket ?: throw ProviderException("File has no bucket: $remotePath")
         val fileId = fileMeta.fileId ?: throw ProviderException("File has no fileId: $remotePath")
@@ -410,7 +439,7 @@ class InternxtProvider(
         // refuse a short stored object before reading a byte (#536); a null/0
         // size stays "unknown" and only the post-download guard applies.
         val expected = fileMeta.size.toLongOrNull()
-        val written =
+        val downloaded =
             try {
                 retryShardCommit {
                     val bridgeInfo =
@@ -465,6 +494,7 @@ class InternxtProvider(
                         destination,
                         expectedSize = expected,
                         expectedCiphertextSha256 = usableShards.first().hash,
+                        targetMtimeMillis = targetMtimeMillis,
                     )
                 }
             } catch (e: RemoteIncompleteDownloadException) {
@@ -479,23 +509,29 @@ class InternxtProvider(
         // a complete cache. Compare against the declared plaintext size, remove the partial copy
         // and fail as the typed permanent failure so the caller (hydration) never trusts a
         // partial file. Skipped when the declared size is unknown (0).
-        if (expected != null && expected > 0L && written != expected) {
+        if (expected != null && expected > 0L && downloaded.bytesWritten != expected) {
             withContext(Dispatchers.IO) {
                 Files.deleteIfExists(destination)
             }
             log.warn(
                 "download of {} is incomplete: got {} of {} bytes; removed the partial copy",
                 remotePath,
-                written,
+                downloaded.bytesWritten,
                 expected,
             )
             throw RemoteIncompleteDownloadException(
-                "Incomplete download of $remotePath: got $written of $expected bytes",
-                storedBytes = written,
+                "Incomplete download of $remotePath: got ${downloaded.bytesWritten} of $expected bytes",
+                storedBytes = downloaded.bytesWritten,
                 declaredBytes = expected,
             )
         }
-        return written
+        return DownloadReceipt(
+            bytesWritten = downloaded.bytesWritten,
+            plaintextSha256 = downloaded.plaintextSha256,
+            stagedSize = downloaded.stagedSize,
+            stagedMtimeMillis = downloaded.stagedMtimeMillis,
+            mtimeAppliedBeforePlacement = downloaded.mtimeAppliedBeforePlacement,
+        )
     }
 
     // Stages 5-7 of the upload pipeline (startUpload → PUT shard → finishUpload)

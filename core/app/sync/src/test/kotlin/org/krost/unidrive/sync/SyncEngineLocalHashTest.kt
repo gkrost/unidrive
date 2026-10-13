@@ -109,6 +109,33 @@ class SyncEngineLocalHashTest {
         }
 
     @Test
+    fun `an edit after placement is not baselined as the downloaded content`() =
+        runTest {
+            val downloaded = "aaaa".toByteArray()
+            val edited = "bbbb".toByteArray()
+            provider.files["/doc.txt"] = downloaded
+            provider.deltaItems = listOf(remoteFile("/doc.txt", downloaded.size.toLong()))
+            provider.afterDownloadWrite = { path ->
+                Files.write(path, edited)
+                Files.setLastModifiedTime(path, FileTime.fromMillis(Files.getLastModifiedTime(path).toMillis() + 60_000L))
+            }
+
+            val eng = engine()
+            eng.syncOnce()
+
+            assertContentEquals(edited, Files.readAllBytes(syncRoot.resolve("doc.txt")))
+            assertNull(
+                db.getEntry("/doc.txt")?.localHash,
+                "the local edit must not be recorded as the hash of the remote download",
+            )
+
+            provider.afterDownloadWrite = null
+            quietRemote("cursor-2")
+            eng.syncOnce()
+            assertTrue(provider.uploadedPaths.contains("/doc.txt"), "the post-placement edit must be sent on the next pass")
+        }
+
+    @Test
     fun `upload on a hashless provider records the SHA-256 of the sent file`() =
         runTest {
             val eng = engine()

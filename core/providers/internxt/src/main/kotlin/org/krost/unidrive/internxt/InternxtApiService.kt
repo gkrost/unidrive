@@ -911,17 +911,19 @@ class InternxtApiService(
         }
     }
 
-    /** Streams encrypted bytes from [downloadUrl] through [cipher] directly to [destination]. Returns byte count. */
-    suspend fun downloadFileStreaming(
+    /** Streams encrypted bytes through [cipher] to [destination], hashing plaintext before atomic publication. */
+    @Suppress("ThrowsCount") // The baseline entry predates target mtime and the streamed content receipt.
+    internal suspend fun downloadFileStreaming(
         downloadUrl: String,
         cipher: javax.crypto.Cipher,
         destination: Path,
         expectedSize: Long? = null,
         expectedCiphertextSha256: String? = null,
-    ): Long {
+        targetMtimeMillis: Long? = null,
+    ): InternxtDownloadedContent {
         bridgeBudget.awaitSlot()
         try {
-            val written =
+            val downloaded =
                 httpClient.prepareGet(downloadUrl).execute { response ->
                     if (!response.status.isSuccess()) {
                         throw InternxtApiException("Download failed: ${response.status}", response.status.value)
@@ -945,8 +947,9 @@ class InternxtApiService(
                     }
                     val channel: ByteReadChannel = response.body()
                     var written = 0L
-                    val digest = java.security.MessageDigest.getInstance("SHA-256")
-                    withContext(Dispatchers.IO) {
+                    val ciphertextDigest = java.security.MessageDigest.getInstance("SHA-256")
+                    val plaintextDigest = java.security.MessageDigest.getInstance("SHA-256")
+                    val result = withContext(Dispatchers.IO) {
                         Files.createDirectories(destination.parent)
                         // #529: a name near the 255-byte component limit cannot take the suffix — stage short.
                         val tmpPath = destination.parent.resolve(
@@ -958,16 +961,17 @@ class InternxtApiService(
                                 while (!channel.isClosedForRead) {
                                     val n = channel.readAvailable(buf)
                                     if (n <= 0) break
-                                    digest.update(buf, 0, n)
+                                    ciphertextDigest.update(buf, 0, n)
                                     val decrypted = cipher.update(buf, 0, n)
                                     if (decrypted != null) {
                                         out.write(decrypted)
+                                        plaintextDigest.update(decrypted)
                                         written += decrypted.size
                                     }
                                 }
                                 expectedCiphertextSha256?.let { expectedHash ->
                                     val expectedBytes = expectedHash.lowercase().toByteArray(Charsets.US_ASCII)
-                                    val actualHash = digest.digest().joinToString("") { "%02x".format(it) }
+                                    val actualHash = ciphertextDigest.digest().joinToString("") { "%02x".format(it) }
                                     if (expectedBytes.size != 64 ||
                                         !expectedHash.matches(Regex("[0-9a-fA-F]{64}")) ||
                                         !java.security.MessageDigest.isEqual(
@@ -983,19 +987,33 @@ class InternxtApiService(
                                 val finalBlock = cipher.doFinal()
                                 if (finalBlock != null && finalBlock.isNotEmpty()) {
                                     out.write(finalBlock)
+                                    plaintextDigest.update(finalBlock)
                                     written += finalBlock.size
                                 }
                             }
+                            targetMtimeMillis?.let {
+                                Files.setLastModifiedTime(tmpPath, java.nio.file.attribute.FileTime.fromMillis(it))
+                            }
+                            val stagedSize = Files.size(tmpPath)
+                            val stagedMtimeMillis = Files.getLastModifiedTime(tmpPath).toMillis()
+                            val plaintextSha256 = plaintextDigest.digest().joinToString("") { "%02x".format(it) }
                             Files.move(tmpPath, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                            InternxtDownloadedContent(
+                                written,
+                                plaintextSha256,
+                                stagedSize,
+                                stagedMtimeMillis,
+                                mtimeAppliedBeforePlacement = targetMtimeMillis != null,
+                            )
                         } catch (e: Exception) {
                             Files.deleteIfExists(tmpPath)
                             throw e
                         }
                     }
-                    written
+                    result
                 }
             bridgeBudget.recordSuccess()
-            return written
+            return downloaded
         } catch (e: InternxtApiException) {
             if (e.statusCode == 429 || e.statusCode == 503) bridgeBudget.recordThrottle(e.retryAfterMs ?: 0L)
             throw e
@@ -1510,6 +1528,14 @@ class InternxtApiService(
         httpClient.close()
     }
 }
+
+internal data class InternxtDownloadedContent(
+    val bytesWritten: Long,
+    val plaintextSha256: String,
+    val stagedSize: Long,
+    val stagedMtimeMillis: Long,
+    val mtimeAppliedBeforePlacement: Boolean,
+)
 
 @Serializable
 data class UsageResponse(
