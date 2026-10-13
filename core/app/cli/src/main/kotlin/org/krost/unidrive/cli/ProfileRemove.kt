@@ -160,17 +160,6 @@ internal object ProfileRemover {
         }
     }
 
-    private fun writeConfig(
-        configPath: Path,
-        text: String,
-    ) {
-        try {
-            Files.writeString(configPath, text)
-        } catch (e: IOException) {
-            throw LifecycleError("config_write_failed", "config.toml could not be written: ${e.javaClass.simpleName}; nothing was removed", e)
-        }
-    }
-
     private fun holderOf(
         profileDir: Path,
         socket: Path,
@@ -210,8 +199,8 @@ internal object ProfileRemover {
         confirm: () -> Boolean = { true },
     ): Result? {
         val configPath = configDir.resolve("config.toml")
-        val (content, raw) = readConfig(configDir)
-        val rp = lookup(raw, name)
+        val (_, raw) = readConfig(configDir)
+        lookup(raw, name)
         val profileDir = configDir.resolve(name)
         val socket = ProfileRemoveHooks.socketPath(name)
 
@@ -234,32 +223,44 @@ internal object ProfileRemover {
             throw LifecycleError("profile_in_use", "profile '$name' was taken by another unidrive process; nothing was removed")
         }
 
-        val type = rp.type ?: name
-        val syncRoot = rp.sync_root ?: SyncConfig.defaultSyncRoot(type).toString()
-        val wasDefault = raw.general.default_profile == name
         val warnings = mutableListOf<String>()
         val existed = dirExists
         var credentialsRemoved = false
         var credentialsKept = false
         var tokensRemoved = false
         var socketRemoved = false
+        var removedMode: String? = null
+        var syncRoot = ""
+        var wasDefault = false
         try {
-            writeConfig(configPath, removeProfileSection(content.lines(), name).joinToString("\n"))
+            ConfigFileTransaction.withLock(configPath) {
+                val (content, latestRaw) = readConfig(configDir)
+                val latestProvider = lookup(latestRaw, name)
+                val type = latestProvider.type ?: name
+                syncRoot = latestProvider.sync_root ?: SyncConfig.defaultSyncRoot(type).toString()
+                wasDefault = latestRaw.general.default_profile == name
+                removedMode = latestProvider.mode
+                try {
+                    ConfigFileTransaction.writeAtomically(configPath, removeProfileSection(content.lines(), name).joinToString("\n"))
+                } catch (e: IOException) {
+                    throw LifecycleError("config_write_failed", "config.toml could not be written: ${e.javaClass.simpleName}; nothing was removed", e)
+                }
 
-            // The IPC tokens and the socket belong to a daemon that is gone: always removed, also with --keep-data.
-            for (scope in IpcAuth.Scope.entries) {
-                if (ProfilePurge.deleteQuietly(IpcAuth.tokenFile(profileDir, scope), warnings)) tokensRemoved = true
-            }
-            if (ProfilePurge.deleteQuietly(socket, warnings)) socketRemoved = true
-            ProfilePurge.deleteQuietly(socket.resolveSibling("${socket.fileName}.meta"), warnings)
+                // The IPC tokens and socket belong to a daemon that is gone: always removed, also with --keep-data.
+                for (scope in IpcAuth.Scope.entries) {
+                    if (ProfilePurge.deleteQuietly(IpcAuth.tokenFile(profileDir, scope), warnings)) tokensRemoved = true
+                }
+                if (ProfilePurge.deleteQuietly(socket, warnings)) socketRemoved = true
+                ProfilePurge.deleteQuietly(socket.resolveSibling("${socket.fileName}.meta"), warnings)
 
-            val present = StoragePermissions.CREDENTIAL_FILES.filter { Files.exists(profileDir.resolve(it), LinkOption.NOFOLLOW_LINKS) }
-            if (keepData) {
-                credentialsKept = present.isNotEmpty()
-            } else {
-                for (file in present) if (ProfilePurge.deleteQuietly(profileDir.resolve(file), warnings)) credentialsRemoved = true
-                credentialsKept = present.any { Files.exists(profileDir.resolve(it), LinkOption.NOFOLLOW_LINKS) }
-                if (existed) ProfilePurge.purge(profileDir, ProfilePurge.ProtectedRoot.of(syncRoot), warnings, isTop = true)
+                val present = StoragePermissions.CREDENTIAL_FILES.filter { Files.exists(profileDir.resolve(it), LinkOption.NOFOLLOW_LINKS) }
+                if (keepData) {
+                    credentialsKept = present.isNotEmpty()
+                } else {
+                    for (file in present) if (ProfilePurge.deleteQuietly(profileDir.resolve(file), warnings)) credentialsRemoved = true
+                    credentialsKept = present.any { Files.exists(profileDir.resolve(it), LinkOption.NOFOLLOW_LINKS) }
+                    if (existed) ProfilePurge.purge(profileDir, ProfilePurge.ProtectedRoot.of(syncRoot), warnings, isTop = true)
+                }
             }
         } finally {
             if (guarded) guard.unlock()
@@ -276,7 +277,7 @@ internal object ProfileRemover {
             buildJsonObject {
                 put("ok", true)
                 put("profile", name)
-                put("mode", rp.mode)
+                put("mode", removedMode)
                 put("daemon_stopped", daemonStopped)
                 put("was_default_profile", wasDefault)
                 put(

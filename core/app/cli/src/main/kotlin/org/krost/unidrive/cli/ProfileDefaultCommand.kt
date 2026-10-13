@@ -95,6 +95,7 @@ class ProfileDefaultCommand : Callable<Int> {
     private fun applyChange(): JsonObject {
         val target = requestedTarget()
         val configPath = profileCmd.parent.configBaseDir().resolve("config.toml")
+        return ConfigFileTransaction.withLock(configPath) {
         val text = readConfigText(configPath)
         val raw = parseConfig(text, configPath)
         if (target != null && target !in raw.providers) {
@@ -109,11 +110,12 @@ class ProfileDefaultCommand : Callable<Int> {
         }
         if (edited != text) save(configPath, edited)
 
-        return buildJsonObject {
+        buildJsonObject {
             put("ok", true)
             put("default_profile", target)
             put("previous", raw.general.default_profile?.takeIf { it.isNotBlank() })
             put("message", if (target != null) "Default profile is now '$target'." else "Default profile cleared.")
+        }
         }
     }
 }

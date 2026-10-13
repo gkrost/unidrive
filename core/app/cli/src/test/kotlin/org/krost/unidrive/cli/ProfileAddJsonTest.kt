@@ -210,7 +210,11 @@ class ProfileAddJsonTest {
             assertEquals(token, errorToken(), "args $args")
         }
         assertFalse(Files.exists(configFile), "a refused creation writes no config")
-        assertEquals(0, Files.list(dir).use { it.count() }, "and creates no folder")
+        assertEquals(
+            setOf("config.toml.lock"),
+            Files.list(dir).use { entries -> entries.map { it.fileName.toString() }.toList().toSet() },
+            "refused creation may leave only the shared config lock file",
+        )
     }
 
     @Test

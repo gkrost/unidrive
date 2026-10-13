@@ -14,10 +14,8 @@ import org.krost.unidrive.sync.isValidProfileName
 import org.krost.unidrive.sync.isReservedProfileName
 import org.krost.unidrive.sync.setDefaultProfile
 import java.io.IOException
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 
 /** What `profile add --type ...` was asked to create. */
 internal class NewProfile(
@@ -57,6 +55,7 @@ internal object ProfileCreator {
         req: NewProfile,
     ): JsonObject {
         val configPath = configDir.resolve("config.toml")
+        return ConfigFileTransaction.withLock(configPath) {
         val type = req.type
         val factory =
             LifecycleHooks.factoryFor(type)
@@ -142,7 +141,7 @@ internal object ProfileCreator {
             } catch (_: Exception) {
                 null
             }
-        return buildJsonObject {
+        buildJsonObject {
             put("ok", true)
             put("profile", name)
             put("type", type)
@@ -159,6 +158,7 @@ internal object ProfileCreator {
                     else -> "none"
                 },
             )
+        }
         }
     }
 
@@ -226,23 +226,6 @@ internal object ProfileCreator {
         // One atomic replace: a kill between an append and a default-profile rewrite must not leave a
         // truncated config.toml (every profile gone) or a profile without the default that was asked for.
         Files.createDirectories(configPath.parent)
-        replaceConfigAtomically(configPath, text)
-    }
-
-    private fun replaceConfigAtomically(
-        target: Path,
-        text: String,
-    ) {
-        val tmp = target.resolveSibling(target.fileName.toString() + ".tmp")
-        try {
-            Files.writeString(tmp, text)
-            try {
-                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)
-            }
-        } finally {
-            Files.deleteIfExists(tmp)
-        }
+        ConfigFileTransaction.writeAtomically(configPath, text)
     }
 }
