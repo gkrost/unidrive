@@ -172,6 +172,7 @@ class OneDriveProvider(
         ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        rejectUnsupportedName(remotePath)
         val attrs = Files.readAttributes(localPath, BasicFileAttributes::class.java)
         val fileSize = attrs.size()
         val fsInfo =
@@ -262,12 +263,7 @@ class OneDriveProvider(
                         remotePath,
                     )
                 }
-                if (e.isInvalidRequest()) {
-                    throw PermanentUploadFailureException(
-                        "OneDrive rejected the upload to '$remotePath' as invalidRequest: ${e.message}",
-                        cause = e,
-                    )
-                }
+                e.throwIfPermanentNameRefusal(remotePath)
                 throw e
             }
         }
@@ -278,6 +274,7 @@ class OneDriveProvider(
         return try {
             put("fail").toCloudItem()
         } catch (e: GraphApiException) {
+            e.throwIfPermanentNameRefusal(remotePath)
             if (e.isSimilarName()) {
                 landUnderServerName(e)
             } else if (e.isNameAlreadyExists()) {
@@ -315,6 +312,7 @@ class OneDriveProvider(
     }
 
     override suspend fun createFolder(path: String): CloudItem {
+        rejectUnsupportedName(path)
         val cleanPath = path.removePrefix("/")
         val name = cleanPath.substringAfterLast("/")
         val parent =
@@ -324,6 +322,7 @@ class OneDriveProvider(
         return try {
             graphApi.createFolder(name, parent).toCloudItem()
         } catch (e: GraphApiException) {
+            e.throwIfPermanentNameRefusal(path)
             if (!e.isNameAlreadyExists()) throw e
             createRefusedFolder(parent, name, e)
         }
@@ -420,8 +419,26 @@ class OneDriveProvider(
         fromPath: String,
         toPath: String,
     ): CloudItem {
+        rejectUnsupportedName(toPath)
         val item = itemAt(fromPath)
         return graphApi.moveItem(item.id, toPath, fromPath, ifMatchETag = item.eTag).toCloudItem()
+    }
+
+    private fun rejectUnsupportedName(path: String) {
+        OneDriveNameRules.issue(path)?.let { rule ->
+            throw PermanentUploadFailureException("OneDrive cannot use '$path': $rule")
+        }
+    }
+
+    private fun GraphApiException.throwIfPermanentNameRefusal(path: String) {
+        val issue = OneDriveNameRules.issue(path)
+        if (isInvalidRequest() || statusCode == 403 && path.contains("_vti_", ignoreCase = true)) {
+            val reason = issue ?: if (statusCode == 403) "name contains the reserved _vti_ token" else "Graph rejected this name or path as invalidRequest"
+            throw PermanentUploadFailureException(
+                "OneDrive rejected '$path': $reason${if (isInvalidRequest()) " (invalidRequest)" else " (403 accessDenied)"}",
+                cause = this,
+            )
+        }
     }
 
     // 410 Gone on any delta call = cursor aged out / drive re-keyed.  Convert to a

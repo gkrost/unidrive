@@ -259,7 +259,9 @@ class TransferHistoryTest {
         }
         val produceMs = (System.nanoTime() - produceStart) / 1_000_000
         val drainStart = System.nanoTime()
-        assertTrue(history.flush(120_000))
+        // This is a delivery/drop test, not a throughput target. The Windows CI runner can
+        // take over two minutes to drain the 50k SQLite-backed rows during a full check.
+        assertTrue(history.flush(300_000))
         val drainMs = (System.nanoTime() - drainStart) / 1_000_000
 
         println("BURST rows=$total produce_ms=$produceMs drain_ms=$drainMs written=${history.stats.written}")
