@@ -103,22 +103,8 @@ internal object ProfileRemover {
     ) {
         val stateDb = profileDir.resolve("state.db")
         if (!Files.exists(stateDb)) return
-        val rows =
-            try {
-                val db = StateDatabase(stateDb, readOnly = true)
-                try {
-                    db.initialize()
-                    db.pendingUploadRows()
-                } finally {
-                    db.close()
-                }
-            } catch (e: Exception) {
-                throw LifecycleError(
-                    "state_unreadable",
-                    "the state of profile '$name' could not be read: ${e.javaClass.simpleName}; nothing was removed",
-                    e,
-                )
-            }
+        val rows = readPendingRows(stateDb) 
+            ?: throw LifecycleError("state_unreadable", "the state of profile '$name' could not be read; nothing was removed")
         val pending = rows.size
         val failed = rows.count { it.lastErrorAt != null }
         if (pending - failed > 0) {
@@ -132,6 +118,23 @@ internal object ProfileRemover {
                         put("failed", failed)
                     },
             )
+        }
+    }
+
+    /** The rows awaiting upload, or null when the state.db cannot be read (locked, corrupt, unexpected schema). */
+    private fun readPendingRows(stateDb: Path): List<StateDatabase.PendingUploadRow>? {
+        val db = StateDatabase(stateDb, readOnly = true)
+        return try {
+            db.initialize()
+            db.pendingUploadRows()
+        } catch (_: java.sql.SQLException) {
+            null
+        } catch (_: IllegalStateException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        } finally {
+            db.close()
         }
     }
 
