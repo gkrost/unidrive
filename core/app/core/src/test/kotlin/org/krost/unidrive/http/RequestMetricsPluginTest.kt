@@ -104,19 +104,19 @@ class RequestMetricsPluginTest {
                     assertEquals(chunk.size * chunks, bytes.size)
                 }
 
-            val bytes = client.get("https://api.example.test/v1/items/abc/content").bodyAsBytes()
-            assertEquals(chunk.size * chunks, bytes.size)
-
-            val attempt = collected.awaitCount(1).single()
-            assertEquals("GET /v1/items/{id}/content", attempt.endpointClass)
-            assertEquals(AttemptOutcome.OK, attempt.outcome)
-            val headers = assertNotNull(attempt.headersMs)
-            // Both values are rounded down to whole milliseconds. On a saturated CI worker, the mock response can
-            // finish between the two samples within one clock tick even though the delayed body was consumed.
-            assertTrue(headers <= attempt.totalMs, "headers ${headers}ms must not exceed total ${attempt.totalMs}ms")
-            assertTrue(attempt.totalMs >= (chunks - 1) * 60L - 20, "total ${attempt.totalMs}ms includes the slow body")
-            assertEquals((chunk.size * chunks).toLong(), attempt.bytesDown)
-            assertEquals("test", attempt.provider)
+                val attempt = collected.awaitCount(1).single()
+                assertEquals("GET /v1/items/{id}/content", attempt.endpointClass)
+                assertEquals(AttemptOutcome.OK, attempt.outcome)
+                val headers = assertNotNull(attempt.headersMs)
+                // Both values are rounded down to whole milliseconds. On a saturated CI worker, the delayed body
+                // can finish between the two samples within one clock tick.
+                assertTrue(headers <= attempt.totalMs, "headers ${headers}ms must not exceed total ${attempt.totalMs}ms")
+                assertTrue(attempt.totalMs >= (chunks - 1) * 60L - 20, "total ${attempt.totalMs}ms includes the slow body")
+                assertEquals((chunk.size * chunks).toLong(), attempt.bytesDown)
+                assertEquals("test", attempt.provider)
+            } finally {
+                server.stop(0)
+            }
         }
 
     @Test
