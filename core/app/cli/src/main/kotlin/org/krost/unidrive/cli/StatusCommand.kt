@@ -229,6 +229,7 @@ class StatusCommand : Runnable {
         var uploadsPending = 0
         var downloadBytes = 0L
         var uploadBytes = 0L
+        val refusedUploads = mutableListOf<Pair<String, String>>()
         try {
             db.initialize()
             for (entry in db.getAllEntries()) {
@@ -236,21 +237,31 @@ class StatusCommand : Runnable {
                 if (!entry.isHydrated) {
                     downloadsPending++
                     downloadBytes += entry.remoteSize
-                } else if (entry.isPendingUpload) {
-                    // #136: the whole UD-901 predicate — the !isHydrated arm above
-                    // already routed sparse partial-download rows (remoteId == null,
-                    // isHydrated == false) to downloads, so this arm sees only
-                    // hydrated rows and the predicate reduces to remoteId == null.
-                    uploadsPending++
-                    uploadBytes += entry.localSize ?: 0L
+                    continue
                 }
+                if (!entry.isPendingUpload) continue
+                // #136: hydrated rows use the whole UD-901 predicate; the !isHydrated
+                // branch above already routed sparse partial-downloads to downloads.
+                val refusal = db.uploadRefusal(entry.path)
+                val watermark = "${entry.localMtime}|${entry.localSize}|"
+                if (refusal != null && refusal.startsWith(watermark)) {
+                    refusedUploads += entry.path to refusal.substringAfter(watermark)
+                    continue
+                }
+                uploadsPending++
+                uploadBytes += entry.localSize ?: 0L
             }
         } finally {
             db.close()
         }
         val total = downloadsPending + uploadsPending
         if (total == 0) {
-            println("No pending transfers for profile '${profile.name}'. (state.db has no UD-225/UD-901 markers — nothing for `apply` to do.)")
+            if (refusedUploads.isEmpty()) {
+                println("No pending transfers for profile '${profile.name}'. (state.db has no UD-225/UD-901 markers — nothing for `apply` to do.)")
+            } else {
+                println("No retryable transfers for profile '${profile.name}'.")
+                refusedUploads.forEach { (path, reason) -> println("  Upload refused: $path — $reason") }
+            }
             return
         }
         println("Pending transfers for ${AnsiHelper.bold(profile.name)}:")
@@ -260,6 +271,7 @@ class StatusCommand : Runnable {
         if (uploadsPending > 0) {
             println("  Upload:   $uploadsPending file(s), ${CliProgressReporter.formatSize(uploadBytes)}")
         }
+        refusedUploads.forEach { (path, reason) -> println("  Upload refused: $path — $reason") }
         println("Run `unidrive -p ${profile.name} apply` to drain.")
     }
 

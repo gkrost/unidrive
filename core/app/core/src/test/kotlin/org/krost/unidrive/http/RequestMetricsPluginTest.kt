@@ -1,10 +1,10 @@
 package org.krost.unidrive.http
 
 import io.ktor.client.HttpClient
+import io.ktor.client.engine.cio.CIO
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.client.request.get
-import io.ktor.client.request.prepareGet
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsBytes
@@ -13,14 +13,10 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.writeFully
-import io.ktor.utils.io.writer
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
+import com.sun.net.httpserver.HttpServer
+import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.SocketException
 import java.net.UnknownHostException
 import java.util.concurrent.CopyOnWriteArrayList
@@ -55,10 +51,6 @@ class RequestMetricsPluginTest {
         }
     }
 
-    private companion object {
-        const val HOLD_BODY_MS = 50L
-    }
-
     private val classifier = EndpointClassifier(setOf("api.example.test"), setOf("v1", "items", "children", "content"))
 
     private fun client(
@@ -80,45 +72,49 @@ class RequestMetricsPluginTest {
     @Test
     fun `a large body shows header time below total time and the bytes that were read`() =
         runBlocking {
+            // A real loopback server: the mock engine hands a response over at times that depend on how its body
+            // producer is scheduled, so it cannot say "the headers came first, the body followed slowly".
             val chunk = ByteArray(64 * 1024) { 1 }
             val chunks = 6
-            // The body is held back until the test has the response in hand and has let real time pass: the gap between
-            // the headers and the end of the body is set by the test, never by how fast the machine happens to be.
-            val release = CompletableDeferred<Unit>()
-            val collected = Collected()
-            val (client, _) =
-                client(collected) {
-                    val body =
-                        CoroutineScope(Dispatchers.IO).writer(autoFlush = true) {
-                            channel.writeFully(chunk)
-                            release.await()
-                            repeat(chunks - 1) { channel.writeFully(chunk) }
-                        }.channel
-                    respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentLength, (chunk.size * chunks).toString()))
-                }
-
-            val bytes =
-                withTimeout(30_000) {
-                    client.prepareGet("https://api.example.test/v1/items/abc/content").execute { response ->
-                        val handedOver = System.nanoTime()
-                        while (System.nanoTime() - handedOver < TimeUnit.MILLISECONDS.toNanos(HOLD_BODY_MS)) delay(5)
-                        release.complete(Unit)
-                        response.bodyAsBytes()
+            val server = HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)
+            server.createContext("/v1/items/abc/content") { exchange ->
+                exchange.sendResponseHeaders(200, (chunk.size * chunks).toLong())
+                exchange.responseBody.use { out ->
+                    repeat(chunks) {
+                        out.write(chunk)
+                        out.flush()
+                        Thread.sleep(60)
                     }
                 }
-            assertEquals(chunk.size * chunks, bytes.size)
+            }
+            server.start()
+            try {
+                val collected = Collected()
+                val tap = RequestMetricsTap().also { it.sink = collected }
+                val client =
+                    HttpClient(CIO) {
+                        install(RequestId) {
+                            metrics = tap
+                            provider = "test"
+                            endpoints = EndpointClassifier(setOf("127.0.0.1", "localhost"), setOf("v1", "items", "children", "content"))
+                        }
+                    }
+                client.use {
+                    val bytes = it.get("http://127.0.0.1:${server.address.port}/v1/items/abc/content").bodyAsBytes()
+                    assertEquals(chunk.size * chunks, bytes.size)
+                }
 
-            val attempt = collected.awaitCount(1).single()
-            assertEquals("GET /v1/items/{id}/content", attempt.endpointClass)
-            assertEquals(AttemptOutcome.OK, attempt.outcome)
-            val headers = assertNotNull(attempt.headersMs)
-            // Both are whole milliseconds rounded down, so they may differ by one less than the gap the test enforced.
-            assertTrue(
-                attempt.totalMs >= headers + HOLD_BODY_MS - 1,
-                "headers ${headers}ms, total ${attempt.totalMs}ms: the body was held back for ${HOLD_BODY_MS}ms after the headers",
-            )
-            assertEquals((chunk.size * chunks).toLong(), attempt.bytesDown)
-            assertEquals("test", attempt.provider)
+                val attempt = collected.awaitCount(1).single()
+                assertEquals("GET /v1/items/{id}/content", attempt.endpointClass)
+                assertEquals(AttemptOutcome.OK, attempt.outcome)
+                val headers = assertNotNull(attempt.headersMs)
+                assertTrue(headers < attempt.totalMs, "headers ${headers}ms must come before total ${attempt.totalMs}ms")
+                assertTrue(attempt.totalMs >= (chunks - 1) * 60L - 20, "total ${attempt.totalMs}ms includes the slow body")
+                assertEquals((chunk.size * chunks).toLong(), attempt.bytesDown)
+                assertEquals("test", attempt.provider)
+            } finally {
+                server.stop(0)
+            }
         }
 
     @Test

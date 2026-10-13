@@ -23,6 +23,7 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation(libs.ktor.client.mock)
+    testImplementation(libs.ktor.client.cio)
     testImplementation(libs.kotlinx.coroutines.test)
 
     testImplementation(project(":providers:onedrive"))
