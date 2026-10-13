@@ -64,6 +64,10 @@ symbol. Work the tiers **in order**; within a tier the items are file-disjoint a
   New profile folders and credential files go through the same owner-only permission helpers as the console path.
 - **PR c:** `profile remove` refuses while a daemon holds the profile (machine-readable `error` token), unless
   `--stop`. It also removes the IPC token files and the socket. The JSON result says what was kept.
+- **`profile default <name> [--json]` / `profile default --clear`:** rewrites only `[general] default_profile` and
+  starts no daemon. Reply `{"ok":true,"default_profile":<name|null>,"previous":<name|null>,"message":...}`; refusals use
+  `{"ok":false,"error":<token>,"message":...}` with the tokens `profile_not_found`, `invalid_profile_name`,
+  `missing_value`, `invalid_value`, `config_not_found`, `config_invalid`, `write_failed`. Exit code 0 / 1.
 - **Tests:** each command with no console (CI-style); no secret in argv, logs or JSON; existing interactive tests
   unchanged.
 - **Must not:** auto-spawn a daemon (`DaemonAutospawn` is for `mount`/`refresh`). A front-end calls these

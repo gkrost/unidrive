@@ -25,6 +25,7 @@ import java.util.concurrent.Callable
     mixinStandardHelpOptions = true,
     subcommands = [
         ProfileAddCommand::class,
+        ProfileDefaultCommand::class,
         ProfileListCommand::class,
         ProfileRemoveCommand::class,
         ProfileSetCommand::class,
@@ -35,7 +36,7 @@ class ProfileCommand : Runnable {
     lateinit var parent: Main
 
     override fun run() {
-        println("Usage: unidrive profile <add|list|set|remove>")
+        println("Usage: unidrive profile <add|list|set|default|remove>")
     }
 }
 

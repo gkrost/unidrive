@@ -39,17 +39,18 @@ fun escapeTomlValue(value: String): String =
     }
 
 /**
- * #646: set `[general] default_profile` in config text. The value is inserted directly under
- * the `[general]` header (an existing `default_profile` line is replaced in place) and every
- * other line is preserved byte for byte, comments and ordering included — the same
- * line-oriented contract as the rest of this file. Fails when the text has no `[general]`
- * section: the CLI's config always starts with one.
+ * #646: set `[general] default_profile` in config text, or remove it with a null [profileName].
+ * The value is inserted directly under the `[general]` header (an existing `default_profile` line
+ * is replaced in place) and every other line is preserved byte for byte, comments, ordering and
+ * the file's line-ending style included — the same line-oriented contract as the rest of this
+ * file. Fails when the text has no `[general]` section: the CLI's config always starts with one.
  */
 fun setDefaultProfile(
     configText: String,
-    profileName: String,
+    profileName: String?,
 ): String {
-    val lines = configText.lines().toMutableList()
+    val eol = if (configText.contains("\r\n")) "\r" else ""
+    val lines = configText.split("\n").toMutableList()
     val generalIdx = lines.indexOfFirst { it.trim() == "[general]" }
     require(generalIdx >= 0) { "config text has no [general] section" }
     val sectionEnd =
@@ -57,9 +58,18 @@ fun setDefaultProfile(
             .drop(generalIdx + 1)
             .indexOfFirst { it.trim().startsWith("[") }
             .let { if (it < 0) lines.size else generalIdx + 1 + it }
-    val line = "default_profile = \"${escapeTomlValue(profileName)}\""
-    val existing = (generalIdx + 1 until sectionEnd).firstOrNull { lines[it].trim().startsWith("default_profile") }
-    if (existing != null) lines[existing] = line else lines.add(generalIdx + 1, line)
+    val existing =
+        (generalIdx + 1 until sectionEnd).firstOrNull { i ->
+            val t = lines[i].trim()
+            t.startsWith("default_profile") && t.drop("default_profile".length).trimStart().startsWith("=")
+        }
+    when {
+        profileName == null -> if (existing != null) lines.removeAt(existing)
+        else -> {
+            val line = "default_profile = \"${escapeTomlValue(profileName)}\"" + eol
+            if (existing != null) lines[existing] = line else lines.add(generalIdx + 1, line)
+        }
+    }
     return lines.joinToString("\n")
 }
 
