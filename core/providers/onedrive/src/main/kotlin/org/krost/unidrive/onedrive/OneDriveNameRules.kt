@@ -12,6 +12,7 @@ internal object OneDriveNameRules {
             when {
                 name.any { it in forbidden } -> return "name contains a character OneDrive forbids"
                 name.startsWith(' ') || name.endsWith(' ') -> return "name starts or ends with a space"
+                name.endsWith('.') -> return "name ends with a period"
                 name.equals(".lock", ignoreCase = true) -> return "name is reserved: .lock"
                 deviceName.matches(name) -> return "name is a reserved device name"
                 name.contains("_vti_", ignoreCase = true) -> return "name contains the reserved _vti_ token"

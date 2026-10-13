@@ -68,6 +68,36 @@ class OneDriveCreateCollisionTest {
     private fun jsonHeaders() = headersOf(HttpHeaders.ContentType, "application/json")
 
     @Test
+    fun `invalid upload and folder names are rejected before making a request`() =
+        runTest {
+            var requestCount = 0
+            val engine =
+                MockEngine {
+                    requestCount++
+                    respond("{}", HttpStatusCode.OK, jsonHeaders())
+                }
+            val provider = providerWith(engine)
+            val local = Files.createTempFile("ud-invalid-name", ".txt")
+            try {
+                val uploadFailure =
+                    assertFailsWith<PermanentUploadFailureException> {
+                        provider.upload(local, "/bad:name.txt", existingRemoteId = null)
+                    }
+                assertTrue(uploadFailure.message.orEmpty().contains("character"))
+
+                val folderFailure =
+                    assertFailsWith<PermanentUploadFailureException> {
+                        provider.createFolder("/....")
+                    }
+                assertTrue(folderFailure.message.orEmpty().contains("period"))
+                assertEquals(0, requestCount, "locally invalid paths must be rejected before Graph is called")
+            } finally {
+                provider.close()
+                Files.deleteIfExists(local)
+            }
+        }
+
+    @Test
     fun `create collision keeps both and never overwrites the pre-existing remote`() =
         runTest {
             val conflictBehaviors = mutableListOf<String?>()

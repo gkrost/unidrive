@@ -12,6 +12,8 @@ class OneDriveNameRulesTest {
             "/ leading.txt" to "name starts or ends with a space",
             "/trailing .txt" to null,
             "/trailing " to "name starts or ends with a space",
+            "/trailing." to "name ends with a period",
+            "/...." to "name ends with a period",
             "/.lock" to "name is reserved: .lock",
             "/con.txt" to "name is a reserved device name",
             "/COM9" to "name is a reserved device name",
