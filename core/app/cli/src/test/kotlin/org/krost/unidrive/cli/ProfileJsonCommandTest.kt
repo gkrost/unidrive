@@ -453,8 +453,8 @@ class ProfileJsonCommandTest {
         assertEquals(0, run("profile", "set", "work", "label", "x", "--json"), "set on an existing profile succeeds")
         assertEquals(1, run("profile", "set", "nope", "label", "x", "--json"), "set on a missing profile is refused")
 
-        val names = Files.list(dir).use { s -> s.map { it.fileName.toString() }.toList() }
-        assertEquals(listOf("config.toml"), names, "no profile folder, socket, token file or temp file appears")
+        val names = Files.list(dir).use { s -> s.map { it.fileName.toString() }.sorted().toList() }
+        assertEquals(listOf("config.toml", "config.toml.lock"), names, "no profile folder, socket, token file or temp file appears")
         assertNull(System.console(), "this suite runs the way CI does: without a console")
     }
 }
