@@ -73,5 +73,13 @@ sealed class CompleteAuthResult {
     /** Terminal failure with a user-displayable message. */
     data class Failure(
         val message: String,
+        val reason: Reason? = null,
     ) : CompleteAuthResult()
+
+    /** Stable machine-readable categories for terminal device-code failures. */
+    enum class Reason {
+        EXPIRED,
+        UNKNOWN_HANDLE,
+        ACCESS_DENIED,
+    }
 }

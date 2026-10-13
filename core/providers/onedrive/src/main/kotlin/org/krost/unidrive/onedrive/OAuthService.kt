@@ -9,6 +9,7 @@ import io.ktor.http.*
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
+import org.krost.unidrive.CompleteAuthResult
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.Pkce
@@ -169,6 +170,7 @@ class OAuthService(
 
         data class Failed(
             val message: String,
+            val reason: CompleteAuthResult.Reason? = null,
         ) : DevicePollOutcome()
     }
 
@@ -214,7 +216,16 @@ class OAuthService(
         return when (error) {
             "authorization_pending" -> DevicePollOutcome.Pending(fallbackInterval)
             "slow_down" -> DevicePollOutcome.Pending(fallbackInterval * 2)
-            "expired_token" -> DevicePollOutcome.Failed("Device code expired. Please try again.")
+            "expired_token" ->
+                DevicePollOutcome.Failed(
+                    "Device code expired. Please try again.",
+                    CompleteAuthResult.Reason.EXPIRED,
+                )
+            "access_denied" ->
+                DevicePollOutcome.Failed(
+                    "Access was denied. Please start a new sign-in if you want to try again.",
+                    CompleteAuthResult.Reason.ACCESS_DENIED,
+                )
             else -> DevicePollOutcome.Failed("Device code error: $error - $body")
         }
     }
