@@ -232,3 +232,64 @@ B: N2 (ProfileCommand)
 C: N3 PR 1 (new telemetry package)
 D: N4 PR 1 (ignore package) ─▶ PR 2 (upload path, after #788)
 ```
+
+## Status after the history wave
+Re-read against the open issues and PRs; the section above is the previous wave.
+
+### Done since
+| Item | PR |
+|---|---|
+| N1 #607 (c) the explicit wiring order in `DaemonRuntime.run` | #794 |
+| N2 #656 PR c, safe `profile remove` (`daemon_running`, `--stop`, `--yes --json`) | #795; #656 closed |
+| N3 #652 history store and daemon wiring | #797, #812; #652 closed |
+| U6 #653 `history.list` / `history.subscribe` | #818 |
+| U7 #654 `metrics.query` | #820 |
+| #586 credential health in `daemon.status` | #810 |
+| N4 #660 PR 2a: the mount holds ignored paths back, `ignore.explain`, the status field | #819 |
+| deflaking the timing tests | #834 |
+
+### Owner decisions from the Windows client questionnaire (gkrost/unidrive-windows#258)
+- **Re-authentication while the daemon runs is solved here (#813):** `auth` hands the new credentials to the running daemon over IPC instead of refusing with `profile_in_use`. The daemon is not stopped. #743 is closed in favour of #813.
+- **Pause is un-postponed (#778):** manual pause/resume and `paused` in `daemon.status` start now. The timed pause #789 comes after.
+- **The clients stay mount-only for v1:** no front-end needs mirror verbs.
+
+### Next, in this order
+**M1: #660 PR 2b, ignore for the mirror (`LocalScanner` / `Reconciler` upload planning).**
+- In flight in worktree `wt-ui-660c`, branch `feat/660-ignore-mirror`; no PR yet.
+- **Size:** M.
+
+**M2: #778 pause and resume.**
+- **Do:**
+  - `daemon.pause` / `daemon.resume` (admin scope);
+  - `paused` plus a reason in `daemon.status`;
+  - a paused daemon starts no transfer and finishes nothing half-way unsafely;
+  - reads and hydration of already-local bytes keep working.
+  
+  Say in the PR what a paused daemon does with an `open` that needs a download: that is a product question, so ask it on the issue before building.
+- **Tests:** contract fixtures for both verbs and the status field, and a pause during an upload burst.
+- **Size:** M. Then #789 (`until`).
+
+**M3: #813 hot re-auth.**
+- **Do:**
+  - `auth begin` / `complete` / `login` on a held profile hand the new token to the daemon (an admin verb, or the token file plus a reload signal; pick one and say why);
+  - the daemon swaps credentials without a restart;
+  - `credential_health` turns `ok`.
+- **Tests:** a fake daemon holding the lock, and no secret in any argv or log.
+- **Size:** M. The client's Sign in works unchanged after it.
+
+**M4: #816 and #817, account lifecycle follow-ups.**
+- #816: `profile remove` refuses while a **stopped** profile's state still has pending uploads; a `failed` count is reported apart from pending.
+- #817: a non-interactive way to set or clear the default profile.
+- **Size:** S each.
+
+**Later:**
+- #664 (logs), when the owner asks.
+- #651 epic remainder after M1.
+
+### Parallel plan, this wave
+```
+A: M1 #660 PR 2b (Reconciler)
+B: M2 #778 pause (DaemonRuntime / status) ─▶ #789
+C: M3 #813 hot re-auth (auth CLI + daemon)  — coordinate with B on DaemonRuntime
+D: M4 #816, #817 (ProfileCommand)
+```
