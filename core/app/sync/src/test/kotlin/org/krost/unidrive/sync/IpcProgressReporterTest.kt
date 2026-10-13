@@ -123,20 +123,20 @@ class IpcProgressReporterTest {
                 server!!.unregisterSyncSubscriber(connId)
             }
         }
+        val subscribedBefore = server!!.syncSubscribersSnapshot.size
         val req = """{"verb":"sync.subscribe"}""" + "\n"
         val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
         while (w.hasRemaining()) client.write(w)
-        // Drain reply + any state-dump lines.
-        readLines(client, timeoutMs = 250, minLines = 1)
-        // Wait for the afterReply callback to complete and register
-        // the subscriber. Without this, the test might update state
-        // and the delayed flushStateDumpTo might dump that new state.
-        // The afterReply hook runs in the handlerDispatcher coroutine
-        // after writeNonBlocking returns, so there's a window where
-        // the reply has been read but the subscriber isn't registered yet.
-        // Use Thread.sleep not delay() — the server runs on real threads
-        // while runTest uses virtual time.
-        Thread.sleep(100)
+        // The reply: waited for until it is there, however slow the runner is (readLines returns at the first line).
+        readLines(client, timeoutMs = 30_000, minLines = 1)
+        // The afterReply hook runs in the handlerDispatcher coroutine after the reply was written: it flushes the state
+        // dump and then registers the subscriber, so a reader that has the reply may still be ahead of it. Wait for the
+        // registration itself. Thread.sleep, not delay(): the server runs on real threads, runTest on virtual time.
+        val deadline = System.currentTimeMillis() + 30_000
+        while (server!!.syncSubscribersSnapshot.size <= subscribedBefore && System.currentTimeMillis() < deadline) Thread.sleep(5)
+        check(server!!.syncSubscribersSnapshot.size > subscribedBefore) { "the connection never became a sync subscriber" }
+        // The state dump was written before the registration: take whatever is in the socket now.
+        readLines(client, timeoutMs = 100, minLines = Int.MAX_VALUE)
     }
 
     private fun parseJson(line: String): JsonObject = Json.decodeFromString(JsonObject.serializer(), line)

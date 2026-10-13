@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.deleteIfExists
 import kotlin.test.AfterTest
@@ -15,6 +16,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 class TransferHistoryTest {
     private lateinit var dir: Path
@@ -259,7 +261,8 @@ class TransferHistoryTest {
         }
         val produceMs = (System.nanoTime() - produceStart) / 1_000_000
         val drainStart = System.nanoTime()
-        assertTrue(history.flush(120_000))
+        awaitDrained(history)
+        assertTrue(history.flush(60_000), "the writer answers once the queue is empty")
         val drainMs = (System.nanoTime() - drainStart) / 1_000_000
 
         println("BURST rows=$total produce_ms=$produceMs drain_ms=$drainMs written=${history.stats.written}")
@@ -267,6 +270,30 @@ class TransferHistoryTest {
         assertTrue(history.stats.written >= total, "every row is written at least once")
         assertEquals(total, history.rows().size)
         assertTrue(history.rows().all { it.result == TransferResult.SUCCESS })
+    }
+
+    /**
+     * Waits for the writer to take everything queued. How long that is depends on the disk (a CI runner's can be
+     * ten times slower than a laptop's), so the test does not budget the time; it fails when the writer stops making
+     * progress, which is the case it exists to catch.
+     */
+    private fun awaitDrained(
+        history: TransferHistory,
+        stallMs: Long = 30_000,
+    ) {
+        var lastWritten = -1L
+        var lastProgress = System.nanoTime()
+        while (history.stats.queued > 0) {
+            val written = history.stats.written
+            val now = System.nanoTime()
+            if (written != lastWritten) {
+                lastWritten = written
+                lastProgress = now
+            } else if (now - lastProgress > TimeUnit.MILLISECONDS.toNanos(stallMs)) {
+                fail("the writer made no progress for ${stallMs}ms: ${history.stats}")
+            }
+            Thread.sleep(20)
+        }
     }
 
     @Test
