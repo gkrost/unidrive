@@ -54,6 +54,7 @@ class GetCommand : Runnable {
         val lock = parent.acquireProfileLock()
         val provider = parent.createProvider()
         val config = parent.loadSyncConfig()
+        val excludePatterns = config.effectiveExcludePatterns(parent.resolveCurrentProfile().name)
         val dbPath = parent.providerConfigDir().resolve("state.db")
         val db = StateDatabase(dbPath)
         db.initialize()
@@ -64,6 +65,10 @@ class GetCommand : Runnable {
 
         try {
             runBlocking {
+                if (pathMatchesExcludePatterns(normalizedPath, excludePatterns)) {
+                    System.err.println("get: skipped excluded item: $normalizedPath")
+                    return@runBlocking
+                }
                 provider.authenticateAndLog()
 
                 val isFolder =
@@ -72,14 +77,23 @@ class GetCommand : Runnable {
 
                 if (isFolder) {
                     val prefix = if (normalizedPath.endsWith("/")) normalizedPath else "$normalizedPath/"
+                    val candidates = db.getEntriesByPrefix(prefix).filterNot { it.isFolder }
+                    val excludedCount = candidates.count { child ->
+                        pathMatchesExcludePatterns(child.path, excludePatterns)
+                    }
                     val children =
-                        db.getEntriesByPrefix(prefix).filter { child ->
-                            if (child.isFolder) return@filter false
+                        candidates.filterNot { child ->
+                            pathMatchesExcludePatterns(child.path, excludePatterns)
+                        }.filter { child ->
                             if (!child.isHydrated) return@filter true
                             placeholder.isSparse(placeholder.resolveLocal(child.path), child.remoteSize)
                         }
                     if (children.isEmpty()) {
-                        println("Already hydrated: $normalizedPath")
+                        if (excludedCount > 0) {
+                            println("Skipped $excludedCount excluded file(s) under $normalizedPath")
+                        } else {
+                            println("Already hydrated: $normalizedPath")
+                        }
                         return@runBlocking
                     }
                     println("Hydrating ${children.size} file(s) under $normalizedPath...")
@@ -145,7 +159,10 @@ class GetCommand : Runnable {
                     val ok = okCount.get()
                     val skip = skipCount.get()
                     val total = children.size
-                    println("Downloaded ${CliProgressReporter.formatSize(totalBytes.get())} total  ($ok/$total ok, $skip skipped)")
+                    println(
+                        "Downloaded ${CliProgressReporter.formatSize(totalBytes.get())} total  " +
+                            "($ok/$total ok, $skip skipped, $excludedCount excluded)",
+                    )
                     if (skip > 0) {
                         println("Tip: re-run the same command to retry skipped files.")
                     }

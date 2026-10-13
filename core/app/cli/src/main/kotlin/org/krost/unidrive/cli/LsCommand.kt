@@ -56,6 +56,7 @@ class LsCommand : Callable<Int> {
     override fun call(): Int {
         val normalized = normalizeLsPath(path)
         val profile = parent.resolveCurrentProfile()
+        val excludePatterns = parent.loadSyncConfig().effectiveExcludePatterns(profile.name)
         val socketPath = IpcServer.defaultSocketPath(profile.name)
 
         // Single source of truth: when a DAEMON serves this profile, read its
@@ -103,7 +104,7 @@ class LsCommand : Callable<Int> {
                 provider.close()
             }
         if (listing == null) return noSuchPath(normalized)
-        printChildren(listing)
+        printChildren(listing, excludePatterns)
         return 0
     }
 
@@ -146,9 +147,10 @@ class LsCommand : Callable<Int> {
             entries.sortedWith(
                 compareByDescending<ViewEntryParsed> { it.isFolder }.thenBy { it.basename().lowercase() },
             )
-        val nameWidth = (sorted.maxOf { it.basename().length + if (it.isFolder) 1 else 0 }).coerceAtMost(60)
+        val nameWidth =
+            sorted.maxOf { displayName(it.basename(), it.isFolder, it.excluded).length }.coerceAtMost(60)
         for (item in sorted) {
-            val displayName = if (item.isFolder) item.basename() + "/" else item.basename()
+            val displayName = displayName(item.basename(), item.isFolder, item.excluded)
             val size = if (item.isFolder) "" else CliProgressReporter.formatSize(item.size)
             // Render mtime as ISO-8601, matching the live path's CloudItem.modified.toString().
             val mtime = if (item.mtimeMs > 0) Instant.ofEpochMilli(item.mtimeMs).toString() else "-"
@@ -158,7 +160,7 @@ class LsCommand : Callable<Int> {
 
     private fun ViewEntryParsed.basename(): String = path.substringAfterLast('/')
 
-    private fun printChildren(children: List<CloudItem>) {
+    private fun printChildren(children: List<CloudItem>, excludePatterns: List<String>) {
         if (children.isEmpty()) return
         // Sort: folders first, then files, each alphabetically by name.
         // Matches the Reconciler's ordering so `ls` output lines up with what a
@@ -167,11 +169,14 @@ class LsCommand : Callable<Int> {
             children.sortedWith(
                 compareByDescending<CloudItem> { it.isFolder }.thenBy { it.name.lowercase() },
             )
-        val nameWidth = (sorted.maxOf { it.name.length + if (it.isFolder) 1 else 0 }).coerceAtMost(60)
+        val nameWidth =
+            sorted.maxOf {
+                displayName(it.name, it.isFolder, pathMatchesExcludePatterns(it.path, excludePatterns)).length
+            }.coerceAtMost(60)
         for (item in sorted) {
             // Folder suffix is the classic ls-style trailing '/'; mtime is ISO-8601
             // (matches CloudItem.modified.toString()).
-            val displayName = if (item.isFolder) item.name + "/" else item.name
+            val displayName = displayName(item.name, item.isFolder, pathMatchesExcludePatterns(item.path, excludePatterns))
             val size = if (item.isFolder) "" else CliProgressReporter.formatSize(item.size)
             val mtime = item.modified?.toString() ?: "-"
             println("%-${nameWidth}s  %10s  %s".format(displayName, size, mtime))
@@ -202,6 +207,11 @@ class LsCommand : Callable<Int> {
          */
         internal fun normalizeLsPath(path: String): String =
             (if (path.startsWith("/")) path else "/$path").trimEnd('/').ifEmpty { "/" }
+
+        internal fun displayName(name: String, isFolder: Boolean, excluded: Boolean): String {
+            val baseName = if (isFolder) "$name/" else name
+            return if (excluded) "$baseName [excluded]" else baseName
+        }
 
         /** What `ls` should print when the daemon's state.db view is reachable. */
         internal sealed interface DaemonLsView {
@@ -277,12 +287,13 @@ class LsCommand : Callable<Int> {
         // hydration.list reply entry shape (serialiseListEntries in HydrationIpcHandler):
         //   {"path":"...","size":N,"mtime_ms":N,"hydrated":bool,"folder":bool[,<additive fields>]}
         // The fields after `folder` (remote_modified_ms, remote_id, etag,
-        // pending_upload, error) are additive and skipped by the tail group, so
+        // pending_upload, error, excluded, blocked) are additive and skipped by the tail group, so
         // old/new daemon replies both parse.
         private val ENTRY_REGEX =
             Regex(
                 """\{"path":"((?:[^"\\]|\\.)*)","size":(-?\d+),"mtime_ms":(-?\d+),"hydrated":(?:true|false),"folder":(true|false)(?:,[^}]*)?\}""",
             )
+        private val EXCLUDED_REGEX = Regex(",\\\"excluded\\\":true(?:,|})")
 
         /**
          * Parse the `entries` array out of a `hydration.list` ok reply. Mirrors
@@ -297,6 +308,7 @@ class LsCommand : Callable<Int> {
                     size = m.groupValues[2].toLong(),
                     mtimeMs = m.groupValues[3].toLong(),
                     isFolder = m.groupValues[4].toBoolean(),
+                    excluded = EXCLUDED_REGEX.containsMatchIn(m.value),
                 )
             }.toList()
 
@@ -320,6 +332,7 @@ class LsCommand : Callable<Int> {
             val size: Long,
             val mtimeMs: Long,
             val isFolder: Boolean,
+            val excluded: Boolean = false,
         )
     }
 }

@@ -172,6 +172,22 @@ class LsCommandTest {
     }
 
     @Test
+    fun `ls preserves and displays excluded entries`() {
+        val reply =
+            """{"ok":true,"entries":[""" +
+                """{"path":"/scratch.tmp","size":42,"mtime_ms":2000,"hydrated":false,"folder":false,"remote_modified_ms":null,"remote_id":"id","etag":null,"pending_upload":false,"error":false,"excluded":true}""" +
+                "]}"
+
+        val entry = LsCommand.parseListEntries(reply).single()
+
+        assertTrue(entry.excluded)
+        assertEquals("scratch.tmp [excluded]", LsCommand.displayName("scratch.tmp", isFolder = false, excluded = entry.excluded))
+        assertEquals("scratch/ [excluded]", LsCommand.displayName("scratch", isFolder = true, excluded = true))
+        assertTrue(pathMatchesExcludePatterns("/scratch.tmp", listOf("*.tmp")))
+        assertFalse(pathMatchesExcludePatterns("/document.txt", listOf("*.tmp")))
+    }
+
+    @Test
     fun parses_list_entries_that_carry_the_additive_fields() {
         // hydration.list entries grew remote_modified_ms, remote_id, etag, pending_upload and
         // error after `folder`; a daemon that predates them stops at `folder`. ls must read both,
