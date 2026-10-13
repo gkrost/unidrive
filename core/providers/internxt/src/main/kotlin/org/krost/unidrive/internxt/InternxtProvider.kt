@@ -503,14 +503,24 @@ class InternxtProvider(
     // require re-encrypting the whole file. The retry is at provider scope so
     // indexBytes / iv / fileKey / hashHex / tempFile all stay stable across
     // attempts — that's the IV-pinning guarantee the BACKLOG design constraint
-    // demands. Retries on IOException and 5xx; never on 4xx (those are
-    // logically-final). Max 3 attempts with simple exponential backoff.
-    private suspend fun <T> retryShardCommit(op: suspend () -> T): T {
+    // demands. Retries on IOException and 5xx; other 4xx are final, except a
+    // reconciled MissingUploadsError may restart one exhausted Bridge session.
+    // Transient failures get at most 3 attempts with simple exponential backoff.
+    @Suppress("ThrowsCount") // Separate terminal exits preserve each retryable transport failure's original type.
+    private suspend fun <T> retryShardCommit(
+        onMissingUploadSession: suspend () -> Unit = {},
+        op: suspend () -> T,
+    ): T {
         val maxAttempts = 3
         var attempt = 0
+        var restartedMissingSession = false
         while (true) {
             try {
                 return op()
+            } catch (e: MissingUploadSessionException) {
+                if (restartedMissingSession) throw e
+                restartedMissingSession = true
+                onMissingUploadSession()
             } catch (e: InternxtApiException) {
                 attempt++
                 val transient = e.statusCode in setOf(429, 500, 502, 503, 504)
@@ -925,7 +935,22 @@ class InternxtProvider(
         // — in that case we leave the .enc alone so the next upload() call
         // can resume cleanly.
         val bucketEntry =
-            retryShardCommit {
+            retryShardCommit(
+                onMissingUploadSession = {
+                    // A 409 plus a successful Drive listing with no matching entry proves this
+                    // Bridge session cannot be finished. Preserve the pinned ciphertext/index,
+                    // but forget the shard session so the one bounded recovery starts and PUTs a
+                    // fresh shard instead of replaying finish against the missing UUID.
+                    currentTomb =
+                        currentTomb.copy(
+                            stage = UploadTombstone.Stage.PUT_PENDING,
+                            shardUuid = null,
+                            bridgePutUrl = null,
+                            tombstoneWrittenAtMillis = System.currentTimeMillis(),
+                        )
+                    withContext(Dispatchers.IO) { tombstoneStore.write(pathHashStr, currentTomb) }
+                },
+            ) {
                 // Start upload — fresh PUT URL when the cached one is null
                 // (cold start), absent, or older than URL_TTL_MS (the OVH
                 // presigned-URL safety margin). The ciphertext + indexBytes +
@@ -3491,7 +3516,7 @@ internal suspend fun commitWithRetry(
                         folderUuid,
                         e.requestId?.let { " requestId=$it" } ?: "",
                     )
-                    throw org.krost.unidrive.PermanentUploadFailureException(
+                    throw MissingUploadSessionException(
                         "finishUpload 409 MissingUploadsError after reconcile NotFound: ${e.message}",
                         cause = e,
                         requestId = e.requestId,
@@ -3501,6 +3526,13 @@ internal suspend fun commitWithRetry(
         }
     return first
 }
+
+/** A 409 with no landed Drive entry means this Bridge session is exhausted; the caller may start one fresh session. */
+private class MissingUploadSessionException(
+    message: String,
+    cause: Throwable,
+    requestId: String?,
+) : org.krost.unidrive.PermanentUploadFailureException(message, cause, requestId)
 
 internal fun pickReconcileCandidate(
     listing: org.krost.unidrive.internxt.model.FolderContentResponse,

@@ -255,6 +255,10 @@ class HydrationImpl(
     private val lastWalkAtMs = AtomicLong(0L)
 
     companion object {
+        // A provider refusal must not hot-loop, but unchanged local bytes get another chance after transient provider-side
+        // state can expire.
+        private const val UPLOAD_REFUSAL_RETRY_AFTER_MS = 6L * 60 * 60 * 1000
+
         // Wire token for "an upload of the path is still in flight, retry"; the same literal
         // dehydrate's Busy reply puts on the wire.
         private const val BUSY_TOKEN = "busy"
@@ -733,9 +737,12 @@ class HydrationImpl(
                 // #493: the provider refused the request itself; the same bytes and the same call would be refused again,
                 // so the retry ladder would only hold a transfer slot through its whole backoff schedule.
                 runCatching { stateDb.markUploadFailed(path, java.time.Instant.now()) }
-                // Persisted with the content's stamp: the replay at the next start and a resubmission of the same bytes skip the
-                // provider (#493). New content, or any rewrite of the row, clears it.
-                refusalStamp(cachePath)?.let { stamp -> runCatching { stateDb.markUploadRefused(path, "$stamp|${e.message ?: "refused"}") } }
+                // Persisted with the content's stamp and retry deadline: replay and a resubmission of the same bytes skip the
+                // provider until the deadline (#493). New content, an expired deadline, or any rewrite makes it eligible.
+                refusalStamp(cachePath)?.let { stamp ->
+                    val retryAt = System.currentTimeMillis() + UPLOAD_REFUSAL_RETRY_AFTER_MS
+                    runCatching { stateDb.markUploadRefused(path, "$stamp|$retryAt|${e.message ?: "refused"}") }
+                }
                 val err = HydrationError.Generic(e.message ?: "upload refused")
                 _events.emit(HydrationEvent.Failed(path, err, retryScheduled = false))
                 log.warn("upload of {} refused by the provider, not retrying: {}", path, e.message ?: "upload refused")
@@ -1085,7 +1092,12 @@ class HydrationImpl(
     private fun refusedEarlier(path: String, cachePath: Path): String? {
         val refusal = runCatching { stateDb.uploadRefusal(path) }.getOrNull() ?: return null
         val stamp = refusalStamp(cachePath) ?: return null
-        return if (refusal.startsWith("$stamp|")) refusal.substring(stamp.length + 1) else null
+        if (!refusal.startsWith("$stamp|")) return null
+        val detail = refusal.substring(stamp.length + 1)
+        // Legacy refusals have no deadline: make them eligible once after upgrade.
+        val retryAt = detail.substringBefore('|').toLongOrNull() ?: return null
+        val reason = detail.substringAfter('|', "upload refused")
+        return if (System.currentTimeMillis() < retryAt) reason else null
     }
 
     override suspend fun cancelUpload(path: String): Boolean {
