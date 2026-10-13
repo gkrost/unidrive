@@ -20,6 +20,8 @@ class OneDriveNameRulesTest {
             "/COM10" to null,
             "/_VTI_folder/file.txt" to "name contains the reserved _vti_ token",
             "/desktop.ini" to "name is reserved: desktop.ini",
+            "/forms" to "name is reserved: forms at the drive root",
+            "/forms/report.txt" to null,
             "/~\$draft.docx" to "name starts with the reserved ~\$ prefix",
             "/${"x".repeat(400)}" to null,
             "/${"x".repeat(401)}" to "OneDrive cloud path exceeds 400 characters",

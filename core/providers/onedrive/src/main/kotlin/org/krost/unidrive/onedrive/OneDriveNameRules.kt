@@ -8,7 +8,11 @@ internal object OneDriveNameRules {
     fun issue(path: String): String? {
         val normalized = path.trim('/')
         if (normalized.length > 400) return "OneDrive cloud path exceeds 400 characters"
-        for (name in normalized.split('/')) {
+        val names = normalized.split('/')
+        if (names.size == 1 && names.single().equals("forms", ignoreCase = true)) {
+            return "name is reserved: forms at the drive root"
+        }
+        for (name in names) {
             when {
                 name.any { it in forbidden } -> return "name contains a character OneDrive forbids"
                 name.startsWith(' ') || name.endsWith(' ') -> return "name starts or ends with a space"
