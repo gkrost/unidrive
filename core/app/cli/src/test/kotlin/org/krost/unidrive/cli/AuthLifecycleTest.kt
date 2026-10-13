@@ -220,12 +220,53 @@ class AuthLifecycleTest {
 
     @Test
     fun `complete reports a failed or expired sign-in as an error`() {
-        LifecycleHooks.factoryFor = { DeviceFactory(ArrayDeque(listOf(CompleteAuthResult.Failure("Device code expired. Call auth_begin again.")))) }
+        LifecycleHooks.factoryFor = {
+            DeviceFactory(
+                ArrayDeque(
+                    listOf(
+                        CompleteAuthResult.Failure(
+                            "Device code expired. Call auth_begin again.",
+                            CompleteAuthResult.Reason.EXPIRED,
+                        ),
+                    ),
+                ),
+            )
+        }
 
         assertEquals(1, run("auth", "complete", "--handle", "h", "--json"))
 
-        assertEquals("auth_failed", errorToken())
+        assertEquals("flow_expired", errorToken())
         assertTrue("expired" in json().getValue("message").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `complete maps stable provider failure reasons to distinct tokens`() {
+        val cases =
+            listOf(
+                CompleteAuthResult.Reason.UNKNOWN_HANDLE to "unknown_handle",
+                CompleteAuthResult.Reason.ACCESS_DENIED to "access_denied",
+                null to "auth_failed",
+            )
+        for ((reason, token) in cases) {
+            LifecycleHooks.factoryFor = {
+                DeviceFactory(ArrayDeque(listOf(CompleteAuthResult.Failure("provider failure", reason))))
+            }
+
+            assertEquals(1, run("auth", "complete", "--handle", "h", "--json"))
+            assertEquals(token, errorToken())
+        }
+    }
+
+    @Test
+    fun `complete bounds echoed provider failure text`() {
+        val message = "provider response ".repeat(200)
+        LifecycleHooks.factoryFor = { DeviceFactory(ArrayDeque(listOf(CompleteAuthResult.Failure(message)))) }
+
+        assertEquals(1, run("auth", "complete", "--handle", "h", "--json"))
+
+        val returnedMessage = json().getValue("message").jsonPrimitive.content
+        assertTrue(returnedMessage.length <= 512, "provider failure text was not capped: ${returnedMessage.length} characters")
+        assertTrue(message.startsWith(returnedMessage))
     }
 
     @Test

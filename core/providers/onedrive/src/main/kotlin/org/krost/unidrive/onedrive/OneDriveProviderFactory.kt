@@ -192,12 +192,16 @@ open class OneDriveProviderFactory : ProviderFactory {
                 ?: restorePendingFlow(profileDir, continuationHandle)
                 ?: return CompleteAuthResult.Failure(
                     "Unknown or expired continuation_handle. Call auth_begin again.",
+                    CompleteAuthResult.Reason.UNKNOWN_HANDLE,
                 )
 
         if (System.currentTimeMillis() > state.expiresAtMillis) {
             finishFlow(profileDir, continuationHandle)
             state.oauthService.close()
-            return CompleteAuthResult.Failure("Device code expired. Call auth_begin again.")
+            return CompleteAuthResult.Failure(
+                "Device code expired. Call auth_begin again.",
+                CompleteAuthResult.Reason.EXPIRED,
+            )
         }
 
         val oauth = state.oauthService
@@ -234,7 +238,7 @@ open class OneDriveProviderFactory : ProviderFactory {
             is OAuthService.DevicePollOutcome.Failed -> {
                 finishFlow(profileDir, continuationHandle)
                 oauth.close()
-                CompleteAuthResult.Failure(outcome.message)
+                CompleteAuthResult.Failure(outcome.message, outcome.reason)
             }
         }
     }
