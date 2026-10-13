@@ -242,48 +242,7 @@ class ProfileAddCommand : Callable<Int> {
             } else {
                 false
             }
-        val writeResult =
-            ConfigFileTransaction.withLock(configPath) {
-                val latestText = if (Files.exists(configPath)) Files.readString(configPath) else "[general]\n\n"
-                val latest =
-                    try {
-                        SyncConfig.parseRaw(latestText, configPath.toString())
-                    } catch (_: Exception) {
-                        System.err.println("Error: config.toml could not be parsed.")
-                        return@withLock null
-                    }
-                if (latest.providers.keys.any { it.equals(name, ignoreCase = true) }) {
-                    return@withLock "Profile '$name' already exists."
-                }
-                val latestConflict =
-                    SyncConfig.detectRootIsolationConflicts(
-                        latest.copy(
-                            providers =
-                                latest.providers + (
-                                    name to
-                                        org.krost.unidrive.sync.RawProvider(
-                                            type = type,
-                                            mode = mode.wireName,
-                                            sync_root = syncRoot,
-                                        )
-                                ),
-                        ),
-                    )
-                if (latestConflict != null) return@withLock latestConflict
-
-                val defaultNowMissing = latest.general.default_profile.isNullOrBlank()
-                val anchored =
-                    if (wantsDefault && defaultNowMissing && latestText.lineSequence().none { it.trim() == "[general]" }) {
-                        "[general]\n\n$latestText"
-                    } else {
-                        latestText
-                    }
-                var updated = anchored.trimEnd('\n') + "\n\n" + toml
-                val makeDefault = wantsDefault && defaultNowMissing
-                if (makeDefault) updated = org.krost.unidrive.sync.setDefaultProfile(updated, name)
-                ConfigFileTransaction.writeAtomically(configPath, updated)
-                if (makeDefault) "default" else "added"
-            }
+        val writeResult = writeInteractiveProfile(configPath, name, type, mode, syncRoot, toml, wantsDefault)
         if (writeResult == null) {
             System.err.println("Error: config.toml could not be parsed.")
             return
@@ -302,6 +261,57 @@ class ProfileAddCommand : Callable<Int> {
 
         if (writeResult == "default") println("  Default: ${AnsiHelper.bold(name)}")
     }
+
+    private fun writeInteractiveProfile(
+        configPath: Path,
+        name: String,
+        type: String,
+        mode: org.krost.unidrive.sync.ProfileMode,
+        syncRoot: String,
+        toml: String,
+        wantsDefault: Boolean,
+    ): String? =
+        ConfigFileTransaction.withLock(configPath) {
+            val latestText = if (Files.exists(configPath)) Files.readString(configPath) else "[general]\n\n"
+            val latest =
+                try {
+                    SyncConfig.parseRaw(latestText, configPath.toString())
+                } catch (_: Exception) {
+                    System.err.println("Error: config.toml could not be parsed.")
+                    return@withLock null
+                }
+            if (latest.providers.keys.any { it.equals(name, ignoreCase = true) }) {
+                return@withLock "Profile '$name' already exists."
+            }
+            val latestConflict =
+                SyncConfig.detectRootIsolationConflicts(
+                    latest.copy(
+                        providers =
+                            latest.providers + (
+                                name to
+                                    org.krost.unidrive.sync.RawProvider(
+                                        type = type,
+                                        mode = mode.wireName,
+                                        sync_root = syncRoot,
+                                    )
+                            ),
+                    ),
+                )
+            if (latestConflict != null) return@withLock latestConflict
+
+            val defaultNowMissing = latest.general.default_profile.isNullOrBlank()
+            val anchored =
+                if (wantsDefault && defaultNowMissing && latestText.lineSequence().none { it.trim() == "[general]" }) {
+                    "[general]\n\n$latestText"
+                } else {
+                    latestText
+                }
+            var updated = anchored.trimEnd('\n') + "\n\n" + toml
+            val makeDefault = wantsDefault && defaultNowMissing
+            if (makeDefault) updated = org.krost.unidrive.sync.setDefaultProfile(updated, name)
+            ConfigFileTransaction.writeAtomically(configPath, updated)
+            if (makeDefault) "default" else "added"
+        }
 
     private fun promptRequired(
         console: java.io.Console,
