@@ -429,9 +429,9 @@ class StateDatabase(
                     "ALTER TABLE sync_entries ADD COLUMN cache_backed INTEGER",
                 )
             }
-            // #493: the provider refused the upload of this row's content as a request (PermanentUploadFailureException),
-            // as `<cache mtime ms>|<cache size>|<reason>`. Same additive pattern, no schema_version bump: NULL = not refused,
-            // which is every older row. Any upsert of the row (INSERT OR REPLACE) clears it, a successful upload included.
+            // #493: the provider refused the upload of this row's content as a request (PermanentUploadFailureException).
+            // Hydration stores the content stamp, retry deadline and reason. Same additive pattern, no schema_version bump:
+            // NULL = not refused, which is every older row. Any upsert of the row clears it, a successful upload included.
             if (!columnExists("sync_entries", "upload_refused")) {
                 stmt.executeUpdate(
                     "ALTER TABLE sync_entries ADD COLUMN upload_refused TEXT",
@@ -1141,9 +1141,9 @@ class StateDatabase(
     }
 
     /**
-     * #493: records that the provider refused the upload of this row's current content as a request (a permanent failure:
-     * the same bytes would be refused again). [stamp] is `<cache mtime ms>|<cache size>|<reason>`; the replay at daemon
-     * start and a later submission of unchanged content skip the provider while it matches. Any upsert of the row clears it.
+     * #493: records that the provider refused the upload of this row's current content as a request. [stamp] is
+     * `<cache mtime ms>|<cache size>|<retry-at epoch ms>|<reason>`; legacy stamps without a deadline are eligible once
+     * after upgrade. Replay and same-content submissions skip it only until the retry deadline. Any row upsert clears it.
      */
     @Synchronized
     fun markUploadRefused(

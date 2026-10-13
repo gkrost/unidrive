@@ -618,6 +618,8 @@ internal class HydrationTestEnv(
 
         fun markUploadFailed(path: String, at: Instant): Boolean = db.markUploadFailed(path, at)
 
+        fun markUploadRefused(path: String, stamp: String): Boolean = db.markUploadRefused(path, stamp)
+
         /** Runs [block] holding the database's monitor, as a long batch (an enumeration's save) does. */
         fun <T> holdingDatabase(block: () -> T): T = synchronized(db) { block() }
 

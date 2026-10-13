@@ -15,6 +15,7 @@ import kotlin.test.Test
 import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * #493: an upload the drive server refuses as a request (400, 413, 415, 422) is refused again with the same bytes; it is
@@ -46,7 +47,10 @@ class InternxtUploadRefusalTest {
         createStatus: HttpStatusCode,
         emptyListing: Boolean = false,
         missingUploads: Boolean = false,
+        missingUploadsCount: Int = 0,
         onFinish: () -> Unit = {},
+        onStart: () -> Unit = {},
+        onPut: () -> Unit = {},
         reconcileListing: String = """{"children":[],"files":[]}""",
     ): InternxtProvider {
         val provider = InternxtProvider(InternxtConfig(credentialProtector = null, tokenPath = tmp))
@@ -75,27 +79,40 @@ class InternxtUploadRefusalTest {
         httpField.isAccessible = true
         (httpField.get(api) as? HttpClient)?.close()
         val json = headersOf("Content-Type", "application/json")
+        val startCount = AtomicInteger()
+        val finishCount = AtomicInteger()
         httpField.set(
             api,
             HttpClient(
                 MockEngine { request ->
                     val url = request.url.toString()
                     when {
-                        (emptyListing || missingUploads) && url.contains("/folders/content/") ->
+                        (emptyListing || missingUploads || missingUploadsCount > 0) && url.contains("/folders/content/") ->
                             respond(reconcileListing, HttpStatusCode.OK, json)
-                        url.contains("/v2/buckets/") && url.contains("/files/start") ->
-                            respond("""{"uploads":[{"index":0,"uuid":"shard-1","url":"$shardUrl"}]}""", HttpStatusCode.OK, json)
-                        url == shardUrl -> respond("", HttpStatusCode.OK)
+                        url.contains("/v2/buckets/") && url.contains("/files/start") -> {
+                            onStart()
+                            val session = startCount.incrementAndGet()
+                            respond("""{"uploads":[{"index":0,"uuid":"shard-$session","url":"$shardUrl-$session"}]}""", HttpStatusCode.OK, json)
+                        }
+                        url.startsWith("$shardUrl-") -> {
+                            onPut()
+                            respond("", HttpStatusCode.OK)
+                        }
                         url.contains("/v2/buckets/") && url.contains("/files/finish") -> {
                             onFinish()
-                            if (missingUploads) {
+                            val finish = finishCount.incrementAndGet()
+                            if (missingUploads || finish <= missingUploadsCount) {
                                 respond("""{"message":"MissingUploadsError: Missing uploads to complete the upload"}""", HttpStatusCode.Conflict, json)
                             } else {
                                 respond("""{"id":"bucket-entry-1","index":"${"aa".repeat(32)}","bucket":"$bucket","name":"enc"}""", HttpStatusCode.OK, json)
                             }
                         }
                         request.url.encodedPath == "/drive/files" && request.method == HttpMethod.Post ->
-                            respond("""{"statusCode":${createStatus.value},"message":["refused"],"error":"x"}""", createStatus, json)
+                            if (createStatus == HttpStatusCode.OK) {
+                                respond("""{"uuid":"drive-file-1","fileId":"bucket-entry-1","plainName":"f","type":"txt","size":"10","bucket":"$bucket","folderUuid":"root-folder-uuid"}""", createStatus, json)
+                            } else {
+                                respond("""{"statusCode":${createStatus.value},"message":["refused"],"error":"x"}""", createStatus, json)
+                            }
                         else -> respond("""{"error":"unexpected ${request.method.value} $url"}""", HttpStatusCode.NotFound, json)
                     }
                 },
@@ -107,16 +124,52 @@ class InternxtUploadRefusalTest {
     private fun local(): Path = tmp.resolve("f.txt").also { Files.write(it, ByteArray(10) { 0x41 }) }
 
     @Test
+    fun `missing shard session is restarted once with the same encrypted payload`() =
+        runTest {
+            val starts = AtomicInteger()
+            val puts = AtomicInteger()
+            val finishes = AtomicInteger()
+            val provider =
+                newProviderWith(
+                    HttpStatusCode.OK,
+                    missingUploadsCount = 1,
+                    onStart = { starts.incrementAndGet() },
+                    onPut = { puts.incrementAndGet() },
+                    onFinish = { finishes.incrementAndGet() },
+                )
+            try {
+                val item = provider.upload(local(), "/f.txt", existingRemoteId = null, onProgress = null)
+                assertEquals("drive-file-1", item.id)
+                assertEquals(2, starts.get(), "a missing shard session gets one fresh bridge session")
+                assertEquals(2, puts.get(), "the same ciphertext is uploaded to the fresh session")
+                assertEquals(2, finishes.get(), "the fresh session is finished once")
+            } finally {
+                provider.close()
+            }
+        }
+
+    @Test
     fun `a regular upload with missing shards and no reconciled entry is refused after one finish`() =
         runTest {
             var finishCalls = 0
-            val provider = newProviderWith(HttpStatusCode.OK, missingUploads = true, onFinish = { finishCalls++ })
+            var startCalls = 0
+            var putCalls = 0
+            val provider =
+                newProviderWith(
+                    HttpStatusCode.OK,
+                    missingUploads = true,
+                    onFinish = { finishCalls++ },
+                    onStart = { startCalls++ },
+                    onPut = { putCalls++ },
+                )
             try {
                 val e = assertFailsWith<PermanentUploadFailureException> {
                     provider.upload(local(), "/f.txt", existingRemoteId = null, onProgress = null)
                 }
                 assertTrue("MissingUploadsError" in (e.message ?: ""))
-                assertEquals(1, finishCalls, "neither the helper nor the shard pipeline repeats an exhausted session")
+                assertEquals(2, finishCalls, "one 409-reconciled session gets one fresh-session retry")
+                assertEquals(2, startCalls, "the refused shard session is replaced")
+                assertEquals(2, putCalls, "the encrypted payload is PUT to the replacement session")
             } finally {
                 provider.close()
             }
@@ -136,7 +189,7 @@ class InternxtUploadRefusalTest {
                 assertFailsWith<PermanentUploadFailureException> {
                     provider.upload(local(), "/f.txt", existingRemoteId = null, onProgress = null)
                 }
-                assertEquals(1, finishCalls, "a stale same-name entry does not justify another finish")
+                assertEquals(2, finishCalls, "a stale same-name entry does not justify repeating finish on the same session")
             } finally {
                 provider.close()
             }

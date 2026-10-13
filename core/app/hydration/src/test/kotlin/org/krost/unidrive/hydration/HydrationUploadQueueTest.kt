@@ -344,6 +344,30 @@ class HydrationUploadQueueTest {
     }
 
     @Test
+    fun `a refused upload is retried after its backoff expires even when content is unchanged`() = runTest {
+        val env = HydrationTestEnv(
+            recoveryUploadScope = this,
+            maxUploadAttempts = 3,
+            uploadRetryDelaysMs = listOf(1L, 1L),
+        )
+        env.stateDb.insertCreatedRow("/docs/f.txt")
+        writeCache(env, "/docs/f.txt", "same refused content")
+        val cache = env.syncEngine.resolveCachePath("/docs/f.txt")
+        env.syncEngine.refuseUploads(999)
+        env.hydration.openForWrite("conn1", "first", "/docs/f.txt", cache)
+        advanceUntilIdle()
+        assertEquals(1, env.syncEngine.uploadAttempts())
+
+        // Persist a deadline that has elapsed. The bytes and their filesystem stamp stay unchanged.
+        val contentStamp = "${Files.getLastModifiedTime(cache).toMillis()}|${Files.size(cache)}"
+        assertTrue(env.stateDb.markUploadRefused("/docs/f.txt", "$contentStamp|0|previous refusal"))
+        env.hydration.openForWrite("conn1", "after-backoff", "/docs/f.txt", cache)
+        advanceUntilIdle()
+
+        assertEquals(2, env.syncEngine.uploadAttempts(), "an expired refusal is eligible with identical bytes")
+    }
+
+    @Test
     fun `an upload whose row vanished while queued is not retried`() = runTest {
         val env = HydrationTestEnv(
             recoveryUploadScope = this,
