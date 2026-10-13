@@ -21,7 +21,6 @@ import org.krost.unidrive.telemetry.TransferRow
 import org.slf4j.LoggerFactory
 import java.sql.SQLException
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The read verbs over a profile's transfer history (`telemetry.db`): `history.list` and `history.subscribe`. Both are in
@@ -55,9 +54,16 @@ class HistoryRpcHandler(
 
     private class Subscriber(
         val queue: Channel<Tail>,
-        val dropped: AtomicInteger,
     ) {
         @Volatile var job: Job? = null
+
+        /**
+         * The `seq` of the last snapshot this subscriber has been handed, or the tail position it subscribed at. Every
+         * snapshot committed after the subscribe is offered to the queue in `seq` order, so a jump from here to the next
+         * snapshot taken off the queue is exactly the snapshots that were dropped before it, and the marker for them
+         * goes out right ahead of it. Written by the subscriber's single writer coroutine, and once before it starts.
+         */
+        @Volatile var lastSeq: Long = 0
     }
 
     private val subscribers = ConcurrentHashMap<String, Subscriber>()
@@ -147,10 +153,14 @@ class HistoryRpcHandler(
         if (scope == null || writer == null) return unavailable(NOT_STARTED)
         // A repeated subscribe on one connection replaces the first: never two writers on a connection.
         subscribers.remove(connectionId)?.let { tearDown(it) }
-        subscribers[connectionId] = Subscriber(Channel(capacity = subscriberCapacity), AtomicInteger())
+        val sub = Subscriber(Channel(capacity = subscriberCapacity))
+        subscribers[connectionId] = sub
+        // Read after the queue is registered: whatever is committed from here on is queued for it.
+        val tailSeq = h.tailSeq
+        sub.lastSeq = tailSeq
         return buildJsonObject {
             put("ok", JsonPrimitive(true))
-            put("tail_seq", JsonPrimitive(h.tailSeq))
+            put("tail_seq", JsonPrimitive(tailSeq))
         }.toString()
     }
 
@@ -162,8 +172,12 @@ class HistoryRpcHandler(
             scope.launch {
                 try {
                     for (tail in sub.queue) {
-                        val lost = sub.dropped.getAndSet(0)
-                        if (lost > 0 && !write(connectionId, lostLine(lost))) break
+                        // The gap is counted from the sequence numbers, not from a counter the writer thread bumps while
+                        // this coroutine is between taking a snapshot and writing it: that order would put the marker
+                        // ahead of a snapshot that came before the gap.
+                        val lost = tail.seq - sub.lastSeq - 1
+                        sub.lastSeq = maxOf(sub.lastSeq, tail.seq)
+                        if (lost > 0 && !write(connectionId, lostLine(lost.toInt()))) break
                         if (!write(connectionId, rowLine(tail))) break
                     }
                 } finally {
@@ -197,7 +211,7 @@ class HistoryRpcHandler(
             while (true) {
                 val sent = sub.queue.trySend(tail)
                 if (sent.isSuccess || sent.isClosed) break
-                if (sub.queue.tryReceive().isSuccess) sub.dropped.incrementAndGet()
+                sub.queue.tryReceive() // full: the oldest goes; the subscriber sees the jump in `seq`
             }
         }
     }

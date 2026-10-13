@@ -4,6 +4,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -454,12 +455,23 @@ class HydrationCacheBudgetTest {
             assertFalse(Files.exists(cache), "the one walk that ran found the cache over budget")
         }
 
+    /**
+     * Syncs and reads [count] files through the mount, outside any test scheduler: this is minutes of file and database
+     * work on a slow disk, and `runTest` gives its whole body one real-time limit that is meant for the part on virtual time.
+     */
+    private fun Env.manyCachedFiles(
+        prefix: Char,
+        count: Int,
+    ) {
+        runBlocking { syncedAndRead(*(1..count).map { "$prefix%03d.bin".format(it) }.toTypedArray()) }
+    }
+
     @Test
-    fun `an over-budget pass classifies the cache in batches, not one row query per file`() =
+    fun `an over-budget pass classifies the cache in batches, not one row query per file`() {
+        val env = freshEnv()
+        val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40
+        env.manyCachedFiles('f', fileCount)
         runTest {
-            val env = freshEnv()
-            val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40
-            env.syncedAndRead(*(1..fileCount).map { "f%03d.bin".format(it) }.toTypedArray())
             val hydration = env.hydration(this, budget = 1, delayMs = 0)
             val batches = mutableListOf<Int>()
             hydration.onDispositionBatch = { batches += it }
@@ -474,13 +486,14 @@ class HydrationCacheBudgetTest {
             )
             assertEquals(0L, hydration.cacheSizeBytes(), "a 1-byte budget with every copy evictable empties the cache")
         }
+    }
 
     @Test
-    fun `a pass that needs a few evictions never looks at the rest of the cache`() =
+    fun `a pass that needs a few evictions never looks at the rest of the cache`() {
+        val env = freshEnv()
+        val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40
+        env.manyCachedFiles('g', fileCount)
         runTest {
-            val env = freshEnv()
-            val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40
-            env.syncedAndRead(*(1..fileCount).map { "g%03d.bin".format(it) }.toTypedArray())
             val hydration = env.hydration(this, budget = (fileCount - 2) * 1_000L, delayMs = 0)
             val batches = mutableListOf<Int>()
             hydration.onDispositionBatch = { batches += it }
@@ -491,6 +504,7 @@ class HydrationCacheBudgetTest {
             assertEquals(1, batches.size, "two evictions out of the oldest batch: the rest is never asked about")
             assertEquals((fileCount - 2) * 1_000L, hydration.cacheSizeBytes())
         }
+    }
 
     @Test
     fun `the first trigger of a fresh instance reconciles instead of trusting an empty accounting`() =
