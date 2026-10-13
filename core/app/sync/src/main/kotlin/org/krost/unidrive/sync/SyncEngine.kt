@@ -11,6 +11,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.PermanentDownloadFailureException
+import org.krost.unidrive.PermanentUploadFailureException
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.http.Priority
 import org.krost.unidrive.engine.AuditSink
@@ -1602,6 +1603,9 @@ open class SyncEngine(
                                             this@coroutineScope.cancel()
                                         } catch (e: CancellationException) {
                                             throw e
+                                        } catch (e: PermanentUploadFailureException) {
+                                            handlePermanentUploadFailure(action, e)
+                                            transferFailures.incrementAndGet()
                                         } catch (e: Exception) {
                                             // #530: one WARN line, the stack trace at DEBUG.
                                             log.warn(
@@ -1870,6 +1874,10 @@ open class SyncEngine(
                     gatherScope.cancel()
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: PermanentUploadFailureException) {
+                    handlePermanentUploadFailure(action, e)
+                    transferFailures.incrementAndGet()
+                    executedPaths.add(action.path)
                 } catch (e: Exception) {
                     // #530: one WARN line, the stack trace at DEBUG.
                     log.warn(
@@ -3648,6 +3656,24 @@ open class SyncEngine(
         if (remoteId.isNotEmpty()) {
             db.setDownloadQuarantine(remoteId, Instant.now())
         }
+    }
+
+    private fun handlePermanentUploadFailure(
+        action: SyncAction.Upload,
+        e: PermanentUploadFailureException,
+    ) {
+        val localPath = placeholder.resolveLocal(action.path)
+        val attrs = runCatching { Files.readAttributes(localPath, java.nio.file.attribute.BasicFileAttributes::class.java) }.getOrNull()
+        val stamp = "${attrs?.lastModifiedTime()?.toMillis()}|${attrs?.size()}|${e.message.orEmpty()}"
+        val recorded = db.markUploadRefused(action.path, stamp)
+        log.warn(
+            "Permanent upload refusal for {}: {}{}",
+            action.path,
+            e.message,
+            if (recorded) " — will skip unchanged content" else " — could not persist refusal",
+        )
+        reporter.onWarning("Upload refused: ${action.path} - ${e.message}")
+        logFailure(action, e)
     }
 
     private fun logUnhydratedFolderSkips(dryRun: Boolean) {

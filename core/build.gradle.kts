@@ -257,6 +257,11 @@ subprojects {
 
     tasks.withType<Test>().configureEach {
         jvmArgs("--enable-native-access=ALL-UNNAMED")
+        // A failed assertion's message (the expected/actual values) is what tells a timing flake from a
+        // real regression; the default format prints only the exception class and line.
+        testLogging {
+            exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        }
         finalizedBy(tasks.withType<JacocoReport>())
         // #453: redirect the test JVM's home to the build dir. Tests that build a
         // provider config without an explicit path (OneDriveConfig's default

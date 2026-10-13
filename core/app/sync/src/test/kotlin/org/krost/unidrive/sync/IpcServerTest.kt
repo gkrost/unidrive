@@ -97,12 +97,17 @@ class IpcServerTest {
                 server!!.unregisterSyncSubscriber(connId)
             }
         }
+        val subscribedBefore = server!!.syncSubscribersSnapshot.size
         val req = """{"verb":"sync.subscribe"}""" + "\n"
         val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
         while (w.hasRemaining()) client.write(w)
-        // Drain at least the {"ok":true} reply; allow up to 250ms for
-        // any state-dump lines that follow.
-        readFromClient(client, timeoutMs = 250, minLines = 1)
+        // The {"ok":true} reply, waited for until it is there however slow the runner is.
+        readFromClient(client, timeoutMs = 30_000, minLines = 1)
+        // The post-reply hook flushes the state dump, then registers the subscriber: a broadcast before that is not
+        // queued for the connection. Wait for the registration itself, not for a fixed pause.
+        val deadline = System.currentTimeMillis() + 30_000
+        while (server!!.syncSubscribersSnapshot.size <= subscribedBefore && System.currentTimeMillis() < deadline) delay(5)
+        check(server!!.syncSubscribersSnapshot.size > subscribedBefore) { "the connection never became a sync subscriber" }
     }
 
     // UD-816: real Unix-domain-socket I/O races runTest's virtual-time delays.
@@ -755,9 +760,11 @@ class IpcServerTest {
             }
         }
 
-        // Give the listener time to subscribe before hammering.
-        val deadline = System.currentTimeMillis() + 3000
-        while (srv.clientCount < 1 && System.currentTimeMillis() < deadline) delay(20)
+        // Hammer only once the listener is subscribed: a connection is accepted before its sync.subscribe is handled, and
+        // a broadcast before that is not queued for it. Polling the condition, not a fixed pause, so a loaded runner is waited for.
+        val deadline = System.currentTimeMillis() + 30_000
+        while (srv.syncSubscribersSnapshot.isEmpty() && System.currentTimeMillis() < deadline) delay(20)
+        assertTrue(srv.syncSubscribersSnapshot.isNotEmpty(), "the listener never became a sync subscriber")
 
         // Fire 50 broadcasts + 50 RPC round-trips (batched 8 at a time so the connection cap
         // is not exceeded: 1 persistent listener + up to 8 in-flight RPC clients = 9 max).

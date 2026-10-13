@@ -7,6 +7,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -264,29 +265,59 @@ class HistoryRpcHandlerTest {
     fun `a subscriber that falls behind gets a lost marker with the count, never a silent gap`() = runBlocking {
         val h = open(capacity = 4)
         val gate = CompletableDeferred<Unit>()
+        val firstWrite = CompletableDeferred<Unit>()
         val lines = CopyOnWriteArrayList<String>()
-        h.start(scope) { _, line -> gate.await(); lines += line; true }
+        h.start(scope) { _, line ->
+            firstWrite.complete(Unit)
+            gate.await()
+            lines += line
+            true
+        }
         h.subscribe("c1")
         h.beginStreaming("c1")
+        // One snapshot goes to the writer, which then sits at the gate: from here every further snapshot has to wait in the
+        // queue of 4, so which ones are lost does not depend on how quickly the writer coroutine got going.
+        record("/first")
+        assertTrue(history!!.flush())
+        withTimeout(10_000) { firstWrite.await() }
         repeat(20) { record("/f$it") }
         assertTrue(history!!.flush())
         gate.complete(Unit)
-        awaitQuiet(lines)
+        awaitLines(lines, 1 + 4 + 1) // the held snapshot, the marker, the 4 that stayed in the queue
 
         val events = lines.map { obj(it) }
         val lost = events.filter { it.getValue("event").jsonPrimitive.content == "history.lost" }
         val rows = events.filter { it.getValue("event").jsonPrimitive.content == "history.row" }
-        assertTrue(lost.isNotEmpty(), "20 snapshots into a queue of 4 behind a stalled writer: $lines")
+        assertEquals(1, lost.size, "one gap: $lines")
         assertEquals(setOf("event", "since_last"), lost.first().keys, "the shape events/history.lost.ndjson pins")
-        assertEquals(20, rows.size + lost.sumOf { it.getValue("since_last").jsonPrimitive.int }, "delivered plus lost is everything committed")
+        assertEquals(16, lost.first().getValue("since_last").jsonPrimitive.int, "21 snapshots: 1 held, 4 queued, the 16 oldest of the rest dropped")
+        assertEquals(21, rows.size + lost.sumOf { it.getValue("since_last").jsonPrimitive.int }, "delivered plus lost is everything committed")
         // The marker comes ahead of the row after the gap, and the seqs rise.
         val seqs = rows.map { it.getValue("seq").jsonPrimitive.long }
-        assertEquals(seqs.sorted(), seqs)
-        val firstGap = seqs.zipWithNext().indexOfFirst { (a, b) -> b != a + 1 }
-        assertTrue(firstGap >= 0)
+        assertEquals(listOf(1L, 18L, 19L, 20L, 21L), seqs)
         val markerIndex = events.indexOfFirst { it.getValue("event").jsonPrimitive.content == "history.lost" }
+        assertEquals("history.row", events[markerIndex - 1].getValue("event").jsonPrimitive.content)
+        assertEquals(1L, events[markerIndex - 1].getValue("seq").jsonPrimitive.long, "the row before the gap is delivered before its marker")
         assertEquals("history.row", events[markerIndex + 1].getValue("event").jsonPrimitive.content)
-        assertEquals(seqs[firstGap + 1], events[markerIndex + 1].getValue("seq").jsonPrimitive.long)
+        assertEquals(18L, events[markerIndex + 1].getValue("seq").jsonPrimitive.long, "the marker is ahead of the first row after the gap")
+    }
+
+    @Test
+    fun `a subscriber whose writer starts late is told about the snapshots it never got`() = runBlocking {
+        val h = open(capacity = 4)
+        val lines = CopyOnWriteArrayList<String>()
+        h.start(scope) { _, line -> lines += line; true }
+        h.subscribe("c1")
+        repeat(20) { record("/f$it") }
+        assertTrue(history!!.flush())
+        // Nothing has taken a snapshot off the queue yet: 16 were dropped before the stream even began.
+        h.beginStreaming("c1")
+        awaitLines(lines, 5)
+
+        val events = lines.map { obj(it) }
+        assertEquals(listOf("history.lost", "history.row", "history.row", "history.row", "history.row"), events.map { it.getValue("event").jsonPrimitive.content })
+        assertEquals(16, events.first().getValue("since_last").jsonPrimitive.int)
+        assertEquals(listOf(17L, 18L, 19L, 20L), events.drop(1).map { it.getValue("seq").jsonPrimitive.long })
     }
 
     @Test
@@ -329,16 +360,5 @@ class HistoryRpcHandlerTest {
         val deadline = System.currentTimeMillis() + 5_000
         while (lines.size < count && System.currentTimeMillis() < deadline) delay(10)
         assertNotNull(lines.getOrNull(count - 1), "expected $count line(s), got $lines")
-    }
-
-    // Waits until no line has arrived for a moment.
-    private suspend fun awaitQuiet(lines: List<String>) {
-        var last = -1
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline) {
-            delay(150)
-            if (lines.size == last && lines.isNotEmpty()) return
-            last = lines.size
-        }
     }
 }

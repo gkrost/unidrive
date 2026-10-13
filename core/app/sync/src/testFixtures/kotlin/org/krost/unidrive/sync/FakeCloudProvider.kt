@@ -55,6 +55,8 @@ class FakeCloudProvider : CloudProvider {
     var deltaPages: List<Pair<List<CloudItem>, String>> = emptyList()
     private var deltaPageIndex = 0
     val uploadedPaths = mutableListOf<String>()
+    val uploadAttempts = mutableListOf<String>()
+    val uploadThrowByPath = mutableMapOf<String, Throwable>()
     val deletedPaths = mutableListOf<String>()
     val files = mutableMapOf<String, ByteArray>()
 
@@ -216,6 +218,8 @@ class FakeCloudProvider : CloudProvider {
         ifMatchETag: String?,
         onProgress: ((Long, Long) -> Unit)?,
     ): CloudItem {
+        uploadAttempts.add(remotePath)
+        uploadThrowByPath[remotePath]?.let { throw it }
         lastUploadExistingRemoteId = existingRemoteId
         if (authFailOnUpload) throw AuthenticationException("Token expired")
         if (uploadFailCount > 0) {
