@@ -9,6 +9,7 @@ import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.ProcessLock
+import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.isValidProfileName
 import org.krost.unidrive.sync.removeProfileSection
@@ -36,7 +37,8 @@ internal object ProfileRemoveHooks {
  *
  * It refuses while a process holds the profile (the process lock, or a socket that answers) and
  * never starts a daemon; `--stop` asks the running daemon to shut down over IPC, waits a bounded
- * time and proceeds only once the profile is free. It removes the config section, the profile
+ * time and proceeds only once the profile is free. A stopped profile whose state.db still holds uploads
+ * on their way (pending, failed ones apart) is refused unless the caller passes the override. It removes the config section, the profile
  * folder (state, credentials), the IPC token files and the socket. It never deletes the local
  * sync root or mount root, even when that folder lies inside the profile folder: it is reported
  * as kept. Nothing it returns or throws carries a secret, only names and counts.
@@ -86,6 +88,50 @@ internal object ProfileRemover {
         }
         if (holder == Holder.DAEMON && !stop) {
             throw LifecycleError("daemon_running", "a daemon is running for profile '$name'; stop it first, or run again with --stop")
+        }
+    }
+
+    /**
+     * Refuses a profile whose state.db still holds uploads that are on their way. The state.db is opened read-only and
+     * the rows are those the daemon reports as `uploads.pending` (same query); `failed` is the subset with a failed
+     * attempt on record. Failed uploads alone do not block: the user decides about those. A missing state.db has
+     * nothing pending; one that exists but cannot be read is refused, since nothing can be said about it.
+     */
+    private fun refuseIfUploadsPending(
+        profileDir: Path,
+        name: String,
+    ) {
+        val stateDb = profileDir.resolve("state.db")
+        if (!Files.exists(stateDb)) return
+        val rows =
+            try {
+                val db = StateDatabase(stateDb, readOnly = true)
+                try {
+                    db.initialize()
+                    db.pendingUploadRows()
+                } finally {
+                    db.close()
+                }
+            } catch (e: Exception) {
+                throw LifecycleError(
+                    "state_unreadable",
+                    "the state of profile '$name' could not be read: ${e.javaClass.simpleName}; nothing was removed",
+                    e,
+                )
+            }
+        val pending = rows.size
+        val failed = rows.count { it.lastErrorAt != null }
+        if (pending - failed > 0) {
+            throw LifecycleError(
+                "uploads_pending",
+                "profile '$name' still has uploads that never reached the cloud ($pending pending, $failed of them failed); " +
+                    "let them finish, or run again with --force-pending",
+                details =
+                    buildJsonObject {
+                        put("pending", pending)
+                        put("failed", failed)
+                    },
+            )
         }
     }
 
@@ -157,6 +203,7 @@ internal object ProfileRemover {
         name: String,
         keepData: Boolean,
         stop: Boolean,
+        forcePending: Boolean = false,
         confirm: () -> Boolean = { true },
     ): Result? {
         val configPath = configDir.resolve("config.toml")
@@ -165,7 +212,9 @@ internal object ProfileRemover {
         val profileDir = configDir.resolve(name)
         val socket = ProfileRemoveHooks.socketPath(name)
 
-        refuseIfHeld(holderOf(profileDir, socket), name, stop)
+        val holder = holderOf(profileDir, socket)
+        refuseIfHeld(holder, name, stop)
+        if (holder == Holder.NONE && !forcePending) refuseIfUploadsPending(profileDir, name)
         if (!confirm()) return null
 
         var daemonStopped = false

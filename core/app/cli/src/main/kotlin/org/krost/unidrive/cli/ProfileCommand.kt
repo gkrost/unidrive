@@ -443,7 +443,8 @@ class ProfileListCommand : Callable<Int> {
     name = "remove",
     description = [
         "Remove a provider profile: its config section, its profile folder (state, credentials), its IPC tokens and socket. " +
-            "Refuses while a daemon holds the profile (--stop asks it to stop first). The local sync root or mount root is never deleted.",
+            "Refuses while a daemon holds the profile (--stop asks it to stop first), and while a stopped profile still has " +
+            "uploads on their way (--force-pending removes it anyway; failed uploads alone do not block). The local sync root or mount root is never deleted.",
     ],
     mixinStandardHelpOptions = true,
 )
@@ -467,6 +468,12 @@ class ProfileRemoveCommand : Callable<Int> {
     var stop: Boolean = false
 
     @Option(
+        names = ["--force-pending"],
+        description = ["Remove a stopped profile even though uploads are still pending (refusal token uploads_pending)"],
+    )
+    var forcePending: Boolean = false
+
+    @Option(
         names = ["--json"],
         description = ["Print the result (or the refusal) as one JSON object on stdout; needs --yes, never prompts"],
     )
@@ -480,7 +487,7 @@ class ProfileRemoveCommand : Callable<Int> {
         if (json) {
             return try {
                 if (!yes) throw LifecycleError("confirmation_required", "--yes is required with --json; the command never prompts")
-                val result = ProfileRemover.remove(configDir, name, keepData, stop) ?: error("no confirmation was asked")
+                val result = ProfileRemover.remove(configDir, name, keepData, stop, forcePending) ?: error("no confirmation was asked")
                 emitJson(result.json)
                 0
             } catch (e: LifecycleError) {
@@ -505,7 +512,7 @@ class ProfileRemoveCommand : Callable<Int> {
 
         val result =
             try {
-                ProfileRemover.remove(configDir, name, keepData, stop) {
+                ProfileRemover.remove(configDir, name, keepData, stop, forcePending) {
                     if (yes) {
                         true
                     } else {
