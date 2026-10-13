@@ -1142,7 +1142,7 @@ class StateDatabase(
 
     /**
      * #493: records that the provider refused the upload of this row's current content as a request (a permanent failure:
-     * the same bytes would be refused again). [stamp] is `<cache mtime ms>|<cache size>|<reason>`; the replay at daemon
+     * the same bytes would be refused again). [stamp] is `<mtime ms>|<size>|<reason>`; the replay at daemon
      * start and a later submission of unchanged content skip the provider while it matches. Any upsert of the row clears it.
      */
     @Synchronized
@@ -1154,10 +1154,12 @@ class StateDatabase(
         val path = PathNormalizer.nfc(pathRaw)
         conn
             .prepareStatement(
-                "UPDATE sync_entries SET upload_refused=? WHERE path=? AND status='EXISTS'",
+                "UPDATE sync_entries SET upload_refused=?, local_mtime=?, local_size=? WHERE path=? AND status='EXISTS'",
             ).use { stmt ->
                 stmt.setString(1, stamp)
-                stmt.setString(2, path)
+                stmt.setLong(2, stamp.substringBefore('|').toLongOrNull() ?: return false)
+                stmt.setLong(3, stamp.substringAfter('|').substringBefore('|').toLongOrNull() ?: return false)
+                stmt.setString(4, path)
                 return stmt.executeUpdate() == 1
             }
     }

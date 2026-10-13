@@ -76,7 +76,7 @@ Listing and delta ([delta](https://learn.microsoft.com/en-us/graph/api/driveitem
 Names ([restrictions](https://support.microsoft.com/en-us/office/restrictions-and-limitations-in-onedrive-and-sharepoint-64883a5d-228e-48f5-b3d2-eb39e07630fa)):
 
 - Published: names cannot contain `" * : < > ? / \ |`, cannot start or end with a space, and cannot be `.lock`, `CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, `_vti_`, `desktop.ini` or start with `~$`. Some organisations also refuse `#` and `%`. The maximum file size is 250 GB.
-- The provider does not pre-validate names. When a file upload is refused with `400 invalidRequest`, `OneDriveProvider.upload` raises a `PermanentUploadFailureException`. Only the mount's upload queue (`HydrationImpl`) acts on that type: it stops retrying and records the refusal for that content. The mirror engine (`SyncEngine`) catches every upload exception alike, logs the failure and counts it, so a mirror profile tries the file again on every pass. Other refusals are not mapped (any other status, and `createFolder`, propagate as plain errors).
+- `OneDriveNameRules` checks the published character, reserved-name and 400-character cloud-path restrictions before upload, folder creation and move/rename requests. Graph `400 invalidRequest` and the observed `_vti_` `403 accessDenied` responses are also mapped to `PermanentUploadFailureException` as a fallback. The mount queue and mirror engine record permanent refusals against the current content watermark; unchanged content is not retried, and `status --pending` reports the refused path and reason.
 
 ## Server-family matrix
 

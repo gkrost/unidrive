@@ -101,6 +101,26 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `permanent upload refusal is skipped until local content changes`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            val local = syncRoot.resolve("bad.txt")
+            Files.writeString(local, "refused")
+            provider.uploadThrowByPath["/bad.txt"] = PermanentUploadFailureException("reserved name")
+
+            engine.syncOnce()
+            assertEquals("reserved name", db.uploadRefusal("/bad.txt")?.substringAfterLast('|'))
+            assertEquals(listOf("/bad.txt"), provider.uploadAttempts)
+
+            engine.syncOnce()
+            assertEquals(listOf("/bad.txt"), provider.uploadAttempts, "unchanged refused content must not be retried")
+
+            Files.writeString(local, "changed content")
+            engine.syncOnce()
+            assertEquals(2, provider.uploadAttempts.size, "changed content gets one fresh attempt")
+        }
+
+    @Test
     fun `refresh skips Pass 2 — local file gets pending row but is not uploaded`() =
         runTest {
             // First sync establishes baseline (no items, no actions).
