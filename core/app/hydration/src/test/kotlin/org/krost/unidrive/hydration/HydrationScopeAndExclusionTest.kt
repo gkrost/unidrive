@@ -246,4 +246,24 @@ class HydrationScopeAndExclusionTest {
         assertFalse(byPath.getValue("/new/keep.txt").excluded)
         assertTrue(byPath.getValue("/new/scratch.tmp").excluded)
     }
+
+    @Test
+    fun `open_read refuses an excluded remote file without downloading it`() = runTest {
+        val env = HydrationTestEnv(excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertUnhydratedEntry("/new/scratch.tmp", remoteSize = 5)
+        env.syncEngine.seedRemoteContent("/new/scratch.tmp", "bytes")
+
+        val result = env.hydration.openForRead("conn1", "h1", "/new/scratch.tmp")
+
+        assertTrue(result is OpenResult.Failed)
+        assertEquals(HydrationError.EXCLUDED_TOKEN, result.error.message)
+        assertEquals(0, env.syncEngine.downloadCount(), "an explicit read must not hydrate an excluded cloud item")
+
+        env.syncEngine.seedCacheContent("/new/scratch.tmp", "cached")
+        val warmResult = env.hydration.openForRead("conn1", "h2", "/new/scratch.tmp")
+
+        assertTrue(warmResult is OpenResult.Failed, "an excluded item stays unreadable even when its cache is warm")
+        assertEquals(HydrationError.EXCLUDED_TOKEN, warmResult.error.message)
+        assertEquals(0, env.syncEngine.downloadCount())
+    }
 }
