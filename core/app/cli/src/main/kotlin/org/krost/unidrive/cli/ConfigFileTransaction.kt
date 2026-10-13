@@ -36,8 +36,19 @@ internal object ConfigFileTransaction {
         text: String,
     ) {
         target.parent?.let(Files::createDirectories)
-        val tmp = target.resolveSibling(target.fileName.toString() + ".tmp")
+        val tmp =
+            try {
+                Files.createTempFile(
+                    target.parent,
+                    target.fileName.toString() + ".",
+                    ".tmp",
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")),
+                )
+            } catch (_: UnsupportedOperationException) {
+                Files.createTempFile(target.parent, target.fileName.toString() + ".", ".tmp")
+            }
         try {
+            OwnerOnly.requireFile(tmp)
             Files.writeString(tmp, text)
             try {
                 Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)

@@ -6,8 +6,10 @@ import org.krost.unidrive.PromptSpec
 import org.krost.unidrive.ProviderFactory
 import org.krost.unidrive.ProviderMetadata
 import java.nio.file.Path
+import java.nio.file.FileSystems
 import org.krost.unidrive.sync.SyncConfig
 import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermissions
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -16,6 +18,24 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class ConfigFileConcurrencyTest {
+    @Test
+    fun `atomic config replacement stays owner only`() {
+        if (!FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) return
+        val dir = Files.createTempDirectory("config-permissions")
+        try {
+            val config = dir.resolve("config.toml")
+            ConfigFileTransaction.withLock(config) {
+                ConfigFileTransaction.writeAtomically(config, "[general]\n")
+            }
+            assertEquals(
+                "rw-------",
+                PosixFilePermissions.toString(Files.getPosixFilePermissions(config)),
+            )
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
     private val localFactory =
         object : ProviderFactory {
             override val id = "localfs"
