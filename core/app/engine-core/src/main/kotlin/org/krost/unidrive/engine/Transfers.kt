@@ -58,6 +58,11 @@ object Transfers {
      * write that lands while it is hashed cannot turn the new bytes into the tracked baseline. The
      * callers pass a row that already carries the new mtime/size but may still hold the hash of the
      * previous contents, so a failed hash clears it rather than keeping it.
+     *
+     * #439 residual: on NTFS an mtime update can be deferred until the last handle closes, so a
+     * same-size rewrite that overlaps the hash can land hash(new) under the old baseline and later
+     * read as touch-only. The window is sub-second; the same race exists in the #112 remote-hash
+     * compare, which relies on the file's stats the same way.
      */
     fun withLocalHash(
         entry: SyncEntry,
