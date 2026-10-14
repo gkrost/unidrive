@@ -5,6 +5,7 @@ import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import org.krost.unidrive.AuthRequiredException
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.TransientNetworkException
@@ -13,8 +14,6 @@ import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.auth.RefreshableTokenLatch
 import org.krost.unidrive.internxt.model.*
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -103,81 +102,16 @@ open class AuthService(
         credentials = loadCredentials()
     }
 
-    private val stdinReader by lazy { BufferedReader(InputStreamReader(System.`in`)) }
-
-    private fun readLine(prompt: String): String {
-        System.console()?.let { console ->
-            return console.readLine(prompt)?.trim()
-                ?: throw AuthenticationException("No input provided")
-        }
-        print(prompt)
-        System.out.flush()
-        return stdinReader.readLine()?.trim()
+    // Console-only readers. #865: authenticateInteractive refuses to run without an interactive
+    // terminal, so there is deliberately no stdin fallback here — a headless caller must get the
+    // typed refusal above, never a blocking read on a stdin nobody will answer.
+    private fun readLine(prompt: String): String =
+        System.console()?.readLine(prompt)?.trim()
             ?: throw AuthenticationException("No input provided")
-    }
 
-    private fun readPassword(prompt: String): CharArray {
-        val console = System.console() ?: return readPasswordFromStdin(prompt)
-        return console.readPassword(prompt) ?: throw AuthenticationException("No input provided")
-    }
-
-    private fun readPasswordFromStdin(prompt: String): CharArray {
-        // Fallback: no console (e.g. Gradle run) — warn that terminal echo
-        // cannot be disabled, but avoid materializing the input as a String.
-        System.err.println("Warning: no console available — password will be echoed")
-        print(prompt)
-        System.out.flush()
-        return trimWhitespace(readPasswordCharacters())
-    }
-
-    private fun readPasswordCharacters(): CharArray {
-        var buffer = CharArray(128)
-        var length = 0
-        try {
-            while (true) {
-                when (val next = stdinReader.read()) {
-                    -1 -> return charsAtEndOfInput(buffer, length)
-                    '\n'.code -> return buffer.copyOf(length)
-                    '\r'.code -> Unit
-                    else -> {
-                        buffer = appendCharacter(buffer, length, next)
-                        length++
-                    }
-                }
-            }
-        } finally {
-            buffer.fill('\u0000')
-        }
-    }
-
-    private fun charsAtEndOfInput(
-        buffer: CharArray,
-        length: Int,
-    ): CharArray {
-        if (length == 0) throw AuthenticationException("No input provided")
-        return buffer.copyOf(length)
-    }
-
-    private fun appendCharacter(
-        buffer: CharArray,
-        length: Int,
-        character: Int,
-    ): CharArray {
-        val target = if (length == buffer.size) growAndClear(buffer) else buffer
-        target[length] = character.toChar()
-        return target
-    }
-
-    private fun growAndClear(buffer: CharArray): CharArray =
-        buffer.copyOf(buffer.size * 2).also { buffer.fill('\u0000') }
-
-    private fun trimWhitespace(chars: CharArray): CharArray {
-        var start = 0
-        var end = chars.size
-        while (start < end && chars[start].isWhitespace()) start++
-        while (end > start && chars[end - 1].isWhitespace()) end--
-        return chars.copyOfRange(start, end).also { chars.fill('\u0000') }
-    }
+    private fun readPassword(prompt: String): CharArray =
+        System.console()?.readPassword(prompt)
+            ?: throw AuthenticationException("No input provided")
 
     /**
      * Non-interactive Internxt login. See spec
@@ -343,7 +277,37 @@ open class AuthService(
         return response.bodyAsText()
     }
 
+    /**
+     * #865: a real interactive terminal on stdin, not merely a Console handle. JDK 22+ hands out a
+     * Console even when the streams are redirected (its isTerminal() then answers false), so the
+     * method is consulted reflectively; on the JDK 21 toolchain it does not exist and console
+     * presence is the answer (a console exists only when input and output are a terminal).
+     */
+    private fun hasInteractiveTerminal(): Boolean {
+        val console = System.console() ?: return false
+        return runCatching {
+            java.io.Console::class.java.getMethod("isTerminal").invoke(console) as Boolean
+        }.getOrNull() ?: true
+    }
+
+    /**
+     * Interactive email / password / 2FA sign-in, for a human on a terminal (`unidrive auth`).
+     *
+     * #865: without an interactive terminal there is nobody to answer the prompts — a daemon or
+     * mount start here used to camp on `Internxt email: ` forever (hidden window, closed stdin).
+     * Such a caller gets the typed [AuthRequiredException] instead, fast and non-interactively;
+     * a front-end signs in via `auth login`, which takes the credentials without a console.
+     */
     suspend fun authenticateInteractive(): InternxtCredentials {
+        if (!hasInteractiveTerminal()) {
+            val profile = config.tokenPath.fileName.toString()
+            val state = if (credentials != null) "expired" else "missing"
+            throw AuthRequiredException(
+                "${AuthRequiredException.REASON}: Internxt credentials are $state for profile " +
+                    "'$profile' and there is no interactive terminal to sign in on. " +
+                    "Sign in again: unidrive -p $profile auth",
+            )
+        }
         val email = readLine("Internxt email: ")
         if (email.isBlank()) throw AuthenticationException("No email provided")
 
