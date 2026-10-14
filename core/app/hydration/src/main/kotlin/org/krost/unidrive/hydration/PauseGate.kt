@@ -23,14 +23,18 @@ import java.util.concurrent.ConcurrentHashMap
  * [FINISH_UNDER_MS] is left to finish, any other is aborted and its owner re-queues it.
  */
 class PauseGate(
-    private val clockMs: () -> Long = System::currentTimeMillis,
+    val clockMs: () -> Long = System::currentTimeMillis,
     private val nanoTime: () -> Long = System::nanoTime,
 ) {
-    /** What `daemon.status` reports as `paused`: [sinceMs] is epoch ms, [auto] is whether a rule (not a person) paused. */
+    /**
+     * What `daemon.status` reports as `paused`: [sinceMs] is epoch ms, [auto] is whether a rule (not a person) paused,
+     * [untilMs] is the epoch ms at which the daemon resumes by itself, null for a pause that lasts until `daemon.resume`.
+     */
     data class State(
         val reason: String,
         val sinceMs: Long,
         val auto: Boolean,
+        val untilMs: Long? = null,
     )
 
     /** What a [pause] call changed. */
@@ -38,7 +42,7 @@ class PauseGate(
         /** The daemon was running and is paused now. */
         STARTED,
 
-        /** It was paused; the reason or `auto` is now different. The pause began at the first request. */
+        /** It was paused; the reason, `auto` or the end instant is now different. The pause began at the first request. */
         UPDATED,
 
         /** It was paused with exactly this state. */
@@ -53,15 +57,18 @@ class PauseGate(
 
     /**
      * Pauses the daemon. Pausing while paused keeps the first [State.sinceMs] (the pause began then) and takes
-     * the new [reason] and [auto]; the returned [Change] says whether anything differed.
+     * the new [reason], [auto] and [untilMs] (a request names the whole pause: no [untilMs] makes it untimed);
+     * the returned [Change] says whether anything differed. The gate only records [untilMs]; whoever
+     * schedules the resume is [PauseRpcHandler][org.krost.unidrive.cli.PauseRpcHandler].
      */
     @Synchronized
     fun pause(
         reason: String,
         auto: Boolean,
+        untilMs: Long? = null,
     ): Change {
         val previous = state.value
-        val next = State(reason, previous?.sinceMs ?: clockMs(), auto)
+        val next = State(reason, previous?.sinceMs ?: clockMs(), auto, untilMs)
         state.value = next
         return when {
             previous == null -> Change.STARTED

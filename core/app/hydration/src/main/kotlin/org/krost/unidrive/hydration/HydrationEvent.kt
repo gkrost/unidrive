@@ -126,11 +126,11 @@ sealed class HydrationEvent {
     }
 
     /**
-     * The daemon was paused, or its pause changed reason or `auto` while paused (#778): `daemon.status`
+     * The daemon was paused, or its pause changed reason, `auto` or end instant while paused (#778): `daemon.status`
      * carries the same object as `paused`. [path] is always the empty string — this event is not tied to a path.
      *
-     * Wire shape (NDJSON line on `hydration.subscribe` and `sync.subscribe`):
-     *   `{"event":"paused","reason":"metered","since_ms":1700000000000,"auto":true}`
+     * Wire shape (NDJSON line on `hydration.subscribe` and `sync.subscribe`; `until_ms` only for a timed pause):
+     *   `{"event":"paused","reason":"metered","since_ms":1700000000000,"auto":true,"until_ms":1700003600000}`
      */
     data class Paused(
         val reason: String,
@@ -138,17 +138,27 @@ sealed class HydrationEvent {
         val sinceMs: Long,
         /** True when a rule of the client paused, false when a person did. */
         val auto: Boolean,
+        /** Epoch ms at which the daemon resumes by itself; null for a pause that lasts until `daemon.resume`. */
+        val untilMs: Long? = null,
     ) : HydrationEvent() {
         override val path: String get() = ""
     }
 
     /**
-     * The pause ended (#778). Not sent for a `daemon.resume` that found the daemon running.
+     * The pause ended (#778). Not sent for a `daemon.resume` that found the daemon running. [reason] is
+     * [TIMEOUT] when the end instant of a timed pause came, null when `daemon.resume` ended it.
      *
-     * Wire shape (NDJSON line on `hydration.subscribe` and `sync.subscribe`): `{"event":"resumed"}`
+     * Wire shape (NDJSON line on `hydration.subscribe` and `sync.subscribe`): `{"event":"resumed"}`, or
+     * `{"event":"resumed","reason":"timeout"}` for a timed pause that ran out.
      */
-    data object Resumed : HydrationEvent() {
+    data class Resumed(
+        val reason: String? = null,
+    ) : HydrationEvent() {
         override val path: String get() = ""
+
+        companion object {
+            const val TIMEOUT = "timeout"
+        }
     }
 
     companion object {

@@ -595,8 +595,9 @@ class DaemonRuntime(
                 // upload, cloud download and cloud enumeration from starting (local writes stay queued, reported as
                 // waiting); a transfer already running is judged by the in-flight rule. The change goes to the
                 // subscribers of both streams: sync.subscribe (every mode) and hydration.subscribe (mount).
+                // A pause with until_ms resumes by itself on serveScope (the timer dies with the daemon, like the pause).
                 val pauseHandler =
-                    PauseRpcHandler(pause) { event ->
+                    PauseRpcHandler(pause, serveScope) { event ->
                         runCatching { server.emit(serialiseHydrationEvent(event)) }
                         hydrationIpc?.dispatchEvent(event)
                     }
