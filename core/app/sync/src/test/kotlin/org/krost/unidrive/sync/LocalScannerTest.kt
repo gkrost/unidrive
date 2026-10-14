@@ -663,6 +663,47 @@ class LocalScannerTest {
     }
 
     @Test
+    fun `#439 an unreadable file cannot be hash-checked and is flagged MODIFIED, not absorbed as touch-only`() {
+        // POSIX-only: the branch under test needs a file whose stats stay readable while its
+        // bytes cannot be opened. chmod 000 does exactly that on POSIX; Windows ACL semantics
+        // make it awkward to set up portably (same guard as the UD-736 visitFileFailed test).
+        val isWindows = System.getProperty("os.name", "").lowercase().contains("win")
+        org.junit.Assume.assumeFalse("POSIX-only test for the unreadable-file branch", isWindows)
+
+        val file = syncRoot.resolve("locked396.txt")
+        Files.writeString(file, "secret content")
+        val hash = HashVerifier.computeSha256Hex(file)
+        db.upsertEntry(hashlessRow("/locked396.txt", file, hash))
+        val originalMtime = Files.getLastModifiedTime(file).toMillis()
+
+        // A healthy sibling proves the walk continues past the unreadable file.
+        Files.writeString(syncRoot.resolve("healthy.txt"), "healthy")
+
+        Files.setPosixFilePermissions(file, emptySet())
+        file.toFile().setLastModified(originalMtime + 60_000L)
+        try {
+            val changes = scanner.scan()
+
+            assertEquals(
+                ChangeState.MODIFIED,
+                changes["/locked396.txt"],
+                "bytes that cannot be read must not be absorbed as a touch-only change",
+            )
+            assertEquals(
+                originalMtime,
+                db.getEntry("/locked396.txt")?.localMtime,
+                "an unverified file must not get its tracked mtime refreshed",
+            )
+            assertEquals(ChangeState.NEW, changes["/healthy.txt"], "the walk must continue past the unreadable file")
+        } finally {
+            Files.setPosixFilePermissions(
+                file,
+                java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"),
+            )
+        }
+    }
+
+    @Test
     fun `#396 provider with a remote hash keeps the #112 behaviour and ignores the local hash column`() {
         val file = syncRoot.resolve("remote396.txt")
         Files.writeString(file, "content")
