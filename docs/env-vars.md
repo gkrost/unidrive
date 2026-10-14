@@ -171,6 +171,16 @@ Java below 21. See `dist/README.md`.
 status glyphs; useful for CI and log-scraping pipelines.
 - **Code:** `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/GlyphRenderer.kt`.
 
+### `UNIDRIVE_MOUNT_BIN`
+
+Explicit path to the Linux co-daemon binary for `unidrive mount`. Set, it is
+used as given: a missing or non-executable file is refused with exit 78 and
+no fallback. Unset, the search takes the first executable of
+`~/.local/lib/unidrive/unidrive-mount` (per-user tarball, `install.sh`) and
+`/usr/lib/unidrive/unidrive-mount` (deb/rpm/AUR packages), and the refusal
+message names every path tried.
+- **Code:** `core/app/cli/src/main/kotlin/org/krost/unidrive/cli/MountCommand.kt` (`chooseBinary`).
+
 ## Other env vars in use (not yet documented in this file)
 
 The following production env vars are read by the daemon but their

@@ -195,6 +195,82 @@ class MountCommandTest {
         assertEquals(78, exit)
     }
 
+    /** Writes [path] and, where the filesystem understands POSIX bits, makes it executable. */
+    private fun executableFile(path: Path): Path {
+        path.parent.toFile().mkdirs()
+        Files.write(path, byteArrayOf(1))
+        if (Files.getFileStore(path).supportsFileAttributeView(java.nio.file.attribute.PosixFileAttributeView::class.java)) {
+            Files.setPosixFilePermissions(path, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"))
+        }
+        return path
+    }
+
+    @Test
+    fun `the co-daemon search takes per-user before system-wide and each when it is the only one`() {
+        val dir = Files.createTempDirectory("mount-bin-search")
+        try {
+            val perUser = dir.resolve("home").resolve("unidrive-mount")
+            val systemWide = dir.resolve("system").resolve("unidrive-mount")
+            assertEquals(null, MountCommand.chooseBinary(null, perUser, systemWide), "nothing installed: no choice")
+            executableFile(systemWide)
+            assertEquals(systemWide, MountCommand.chooseBinary(null, perUser, systemWide), "system-wide only")
+            executableFile(perUser)
+            assertEquals(perUser, MountCommand.chooseBinary(null, perUser, systemWide), "per-user wins when both are present")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `a non-executable per-user file is skipped in favour of the system-wide one`() {
+        val dir = Files.createTempDirectory("mount-bin-skips")
+        try {
+            val perUser = dir.resolve("home").resolve("unidrive-mount")
+            val systemWide = executableFile(dir.resolve("system").resolve("unidrive-mount"))
+            Files.createDirectories(perUser.parent)
+            Files.write(perUser, byteArrayOf(1))
+            if (!Files.getFileStore(perUser).supportsFileAttributeView(java.nio.file.attribute.PosixFileAttributeView::class.java)) {
+                return // on Windows a plain file answers isExecutable; the skip is POSIX-only behaviour
+            }
+            Files.setPosixFilePermissions(perUser, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"))
+            assertEquals(systemWide, MountCommand.chooseBinary(null, perUser, systemWide), "the non-executable file is skipped")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `an explicit UNIDRIVE_MOUNT_BIN wins without falling back, the missing-file message names it`() {
+        val dir = Files.createTempDirectory("mount-bin-env")
+        try {
+            val perUser = executableFile(dir.resolve("home").resolve("unidrive-mount"))
+            val missing = dir.resolve("elsewhere").resolve("unidrive-mount")
+            assertEquals(
+                missing,
+                MountCommand.chooseBinary(missing.toString(), perUser, dir.resolve("system").resolve("unidrive-mount")),
+                "the explicit path is returned as-is, never swapped for an installed one",
+            )
+            val message = MountCommand.binaryMissingMessage(missing.toString(), MountCommand.binaryCandidates(missing.toString(), perUser, dir.resolve("system").resolve("unidrive-mount")))
+            assertTrue(missing.toString() in message, "the message names the refused path: $message")
+            assertTrue("UNIDRIVE_MOUNT_BIN" in message, "the message names the variable: $message")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `with nothing installed the not-found message names every location tried`() {
+        val env = "/opt/custom/unidrive-mount"
+        val perUser = Paths.get("/home/u", ".local", "lib", "unidrive", "unidrive-mount")
+        val systemWide = Paths.get("/usr", "lib", "unidrive", "unidrive-mount")
+        val tried = MountCommand.binaryCandidates(env, perUser, systemWide)
+        assertEquals(3, tried.size, "env, per-user, system-wide: $tried")
+        val message = MountCommand.binaryMissingMessage(null, tried)
+        assertTrue(Paths.get(env).toString() in message, message)
+        assertTrue(perUser.toString() in message, message)
+        assertTrue(systemWide.toString() in message, message)
+    }
+
     @Test
     fun `binary present returns 0`() {
         // #239: any existing file qualifies (checkBinaryExists accepts isExecutable OR exists).

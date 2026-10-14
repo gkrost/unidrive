@@ -57,18 +57,17 @@ class MountCommand : Runnable {
             SyncEngine.defaultHydrationCacheRoot(),
             profile.name,
         )
-        val binary = defaultBinaryPath()
+        val envBinary = System.getenv("UNIDRIVE_MOUNT_BIN")
+        val tried = binaryCandidates(envBinary, perUserBinary(), systemWideBinary())
+        val binary = chooseBinary(envBinary, perUserBinary(), systemWideBinary())
 
-        val existsExit = checkBinaryExists(binary)
-        if (existsExit != 0) {
-            System.err.println(
-                "unidrive mount: co-daemon binary not found at $binary",
-            )
+        if (binary == null || checkBinaryExists(binary) != 0) {
+            System.err.println(binaryMissingMessage(envBinary, tried))
             System.err.println(
                 "Build manually: cd ../unidrive-mount-linux && cargo build --release " +
                     "&& cp target/release/unidrive-mount ~/.local/lib/unidrive/",
             )
-            System.exit(existsExit)
+            System.exit(EX_CONFIG)
             return
         }
 
@@ -115,7 +114,8 @@ class MountCommand : Runnable {
         const val EX_USAGE: Int = 64
         const val SIGTERM_GRACE_MS: Long = 10_000
 
-        fun defaultBinaryPath(): Path =
+        /** The per-user co-daemon location the tarball and `install.sh` write. */
+        fun perUserBinary(): Path =
             Paths.get(
                 System.getProperty("user.home"),
                 ".local",
@@ -123,6 +123,36 @@ class MountCommand : Runnable {
                 "unidrive",
                 "unidrive-mount",
             )
+
+        /** The system-wide co-daemon location the deb/rpm/AUR packages write; a seam so tests need no root. */
+        fun systemWideBinary(systemWideDir: Path = Paths.get("/", "usr", "lib", "unidrive")): Path =
+            systemWideDir.resolve("unidrive-mount")
+
+        /** Every location the search looks at, in order; an explicit `UNIDRIVE_MOUNT_BIN` comes first. */
+        fun binaryCandidates(envValue: String?, perUser: Path, systemWide: Path): List<Path> =
+            buildList {
+                if (envValue != null) add(Paths.get(envValue))
+                add(perUser)
+                add(systemWide)
+            }
+
+        /**
+         * The first executable candidate, per-user before system-wide. An explicit `UNIDRIVE_MOUNT_BIN` is
+         * returned as given: the caller refuses a missing one without falling back.
+         */
+        fun chooseBinary(envValue: String?, perUser: Path, systemWide: Path): Path? =
+            if (envValue != null) {
+                Paths.get(envValue)
+            } else {
+                binaryCandidates(null, perUser, systemWide).firstOrNull { Files.isExecutable(it) }
+            }
+
+        fun binaryMissingMessage(envValue: String?, tried: List<Path>): String =
+            if (envValue != null) {
+                "unidrive mount: co-daemon binary not found at $envValue (UNIDRIVE_MOUNT_BIN; no fallback)"
+            } else {
+                "unidrive mount: co-daemon binary not found (tried ${tried.joinToString(", ")})"
+            }
 
         fun hydrationCacheRoot(cacheRoot: Path, cacheKey: String): Path =
             SyncEngine.hydrationCacheRoot(cacheRoot, cacheKey)
