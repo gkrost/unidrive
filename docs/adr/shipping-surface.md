@@ -30,7 +30,7 @@ What ships:
 
 What does **not** ship: everything in the Context list above. AGENTS.md's "Don't reintroduce removed providers, modules, scripts, or workflows" is the binding rule.
 
-Exception, by the owner's go: `s3` is re-added (`core/providers/s3/`) through the `CloudProvider` SPI. The go covers this provider only; every other removed adapter still needs its own.
+Exception, by the owner's go: Dropbox (`core/providers/dropbox/`) is added as a new provider through the `CloudProvider` SPI — it was never one of the removed adapters — and `s3` is re-added (`core/providers/s3/`) through the same SPI. Each go covers that provider only; every other provider still needs its own.
 
 IPC: one Unix-domain socket per profile state directory; one client family (the CLI). Third-party consumers may subscribe to the NDJSON event stream — there is no policy against it, but no formal contract layer is maintained for them either.
 

@@ -13,6 +13,40 @@ class HashVerifierTest {
         tempDir = Files.createTempDirectory("unidrive-hash-test")
     }
 
+    // Dropbox's content_hash, restated from its published definition: SHA-256 over the SHA-256s of 4 MiB blocks.
+    private fun sha256(bytes: ByteArray): ByteArray = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+
+    private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+    @Test
+    fun `dropbox content hash of an empty file is the SHA-256 of no block digests`() {
+        val file = createFile("empty.bin", "")
+        assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", HashVerifier.computeDropboxContentHash(file))
+    }
+
+    @Test
+    fun `dropbox content hash of a short file hashes its one block digest`() {
+        val file = createFile("short.txt", "hello")
+        val expected = hex(sha256(sha256("hello".toByteArray())))
+        assertEquals(expected, HashVerifier.computeHash(file, HashAlgorithm.DropboxContentHash))
+        assertTrue(HashVerifier.verify(file, expected.uppercase(), HashAlgorithm.DropboxContentHash))
+        assertTrue(HashVerifier.matches(file, expected, HashAlgorithm.DropboxContentHash))
+        assertFalse(HashVerifier.matches(file, hex(sha256("hello".toByteArray())), HashAlgorithm.DropboxContentHash))
+    }
+
+    @Test
+    fun `dropbox content hash splits at exactly 4 MiB`() {
+        val block = ByteArray(4 * 1024 * 1024) { (it % 251).toByte() }
+        val tail = byteArrayOf(7)
+        val file = tempDir.resolve("boundary.bin")
+        Files.write(file, block + tail)
+        val exact = tempDir.resolve("exact.bin")
+        Files.write(exact, block)
+
+        assertEquals(hex(sha256(sha256(block) + sha256(tail))), HashVerifier.computeDropboxContentHash(file))
+        assertEquals(hex(sha256(sha256(block))), HashVerifier.computeDropboxContentHash(exact))
+    }
+
     @Test
     fun `verify returns true when hash is null`() {
         val file = createFile("test.txt", "content")

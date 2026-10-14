@@ -32,5 +32,5 @@ pluginManagement {
 
 include(
     "app:core", "app:engine-core", "app:sync", "app:sync-tracking", "app:hydration", "app:cli", "app:cli-spi",
-    "providers:internxt", "providers:onedrive", "providers:localfs", "providers:s3",
+    "providers:internxt", "providers:onedrive", "providers:localfs", "providers:dropbox", "providers:s3",
 )

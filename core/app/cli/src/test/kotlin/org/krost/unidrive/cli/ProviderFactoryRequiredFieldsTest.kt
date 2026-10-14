@@ -66,6 +66,10 @@ class ProviderFactoryRequiredFieldsTest {
                 mapOf(
                     "root_path" to "/tmp/localfs-remote-stub",
                 ),
+            "dropbox" to
+                mapOf(
+                    "client_id" to "stub-app-key",
+                ),
         )
 
     @Test

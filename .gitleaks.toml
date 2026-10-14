@@ -22,6 +22,11 @@ regexes = [
     # Test-fixture passwords used across integration and unit tests. These
     # are never valid outside the test harness.
     '''"(secret|testpass|test-password-123|master-key-folder-42|test-key-99|secret123)"''',
+    # The dropbox-api-token rule reads `Dropbox<...>: <15 characters>` as a token. A provider
+    # factory class declaration `class DropboxProviderFactory : ProviderFactory` matches by
+    # accident, because the identifier ProviderFactory is exactly 15 characters long. The match
+    # (the captured group) is only ever that identifier; a real token cannot equal it.
+    '''^ProviderFactory$''',
 ]
 
 # Path allowlist — files where substring matches above are expected by design.

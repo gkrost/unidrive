@@ -167,6 +167,7 @@ internal object LegacyInventory {
     fun contentHashAlgorithm(providerType: String): HashAlgorithm? =
         when (providerType.lowercase()) {
             "onedrive" -> HashAlgorithm.QuickXor
+            "dropbox" -> HashAlgorithm.DropboxContentHash
             else -> null
         }
 
@@ -545,6 +546,7 @@ internal object LegacyInventory {
                     HashAlgorithm.QuickXor -> "quickXor"
                     HashAlgorithm.Md5Hex -> "md5"
                     HashAlgorithm.Sha256Hex -> "sha256"
+                    HashAlgorithm.DropboxContentHash -> "dropboxContentHash"
                     null -> null
                 },
             lock = lockFacts,
