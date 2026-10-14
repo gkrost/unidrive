@@ -737,6 +737,10 @@ class RemoteGather(
         // wrong-twin delete #402 closed. Suppressed ≠ deleted.
         seenRemoteIds.addAll(admittedLoserIds)
         pruneRecentlyUploaded()
+        // One boundary for the whole sweep: a stamp past this instant is a write that
+        // landed after the sweep began (the next full gather judges it), never one the
+        // walk could have seen.
+        val sweptAt = Instant.now()
 
         for (entry in db.getAllEntries()) {
             if (entry.remoteId == null) continue
@@ -759,7 +763,7 @@ class RemoteGather(
             // mid-gather write (production never writes one); that row stays with the
             // #301 watermark guard, which compares the stamp against the cache file.
             val lastSynced = entry.lastSynced
-            if (lastSynced != null && !lastSynced.isAfter(Instant.now()) && lastSynced.isAfter(gatherStartedAt)) {
+            if (lastSynced != null && !lastSynced.isAfter(sweptAt) && lastSynced.isAfter(gatherStartedAt)) {
                 log.debug(
                     "Full sync: DB entry {} (remoteId={}) not in delta but its row was written after the gather started; deferring the deletion verdict",
                     entry.path,
