@@ -69,6 +69,25 @@ class DropboxDeltaTest {
         }
 
     @Test
+    fun `the heartbeat counts the walk's items so far and a new walk counts from the start`() =
+        runTest {
+            fake.json(
+                "files/list_folder",
+                """{"entries":[${file("/a.txt", "id:1")},${file("/b.txt", "id:2")}],"cursor":"c1","has_more":true}""",
+            )
+            fake.json("files/list_folder/continue", """{"entries":[${file("/c.txt", "id:3")}],"cursor":"c2","has_more":false}""")
+
+            val progress = mutableListOf<Int>()
+            val first = provider.delta(null, onPageProgress = { progress += it })
+            val second = provider.delta(first.cursor, onPageProgress = { progress += it })
+            assertEquals(listOf(2, 3), progress)
+
+            // the next gather is its own walk (the engine's incremental one) and counts from the start again
+            provider.delta(second.cursor, onPageProgress = { progress += it })
+            assertEquals(listOf(2, 3, 1), progress)
+        }
+
+    @Test
     fun `an incremental page reports a deletion with the id last seen at its path`() =
         runTest {
             fake.json("files/list_folder", """{"entries":[${file("/a.txt", "id:7")}],"cursor":"c1","has_more":false}""")

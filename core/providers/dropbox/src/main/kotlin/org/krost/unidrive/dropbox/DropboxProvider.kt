@@ -80,6 +80,11 @@ class DropboxProvider(
     @Volatile
     private var lastCursor: String? = null
 
+    // The engine's heartbeat climbs (itemsSoFar): the walk's running total across the delta calls that chain its
+    // pages, and whether the last page said hasMore (a no after it means the next call begins a new walk).
+    private var pageProgress = 0
+    private var walkHasMore = false
+
     // Cursors handed out in the middle of a full listing (one that began without a cursor). Their pages list what
     // exists; a deleted entry there is history from before the walk, never a deletion to act on.
     private val fullListingCursors = Collections.synchronizedSet(HashSet<String>())
@@ -400,6 +405,7 @@ class DropboxProvider(
         scanContext: ScanContext?,
     ): DeltaPage {
         ready()
+        if (cursor == null || !walkHasMore) pageProgress = 0
         val fullListing = cursor == null || cursor in fullListingCursors
         val page =
             try {
@@ -421,7 +427,9 @@ class DropboxProvider(
         cursor?.let { fullListingCursors.remove(it) }
         if (hasMore && fullListing) fullListingCursors += next
         if (!hasMore) lastCursor = next
-        onPageProgress?.invoke(visible.size)
+        pageProgress += visible.size
+        walkHasMore = hasMore
+        onPageProgress?.invoke(pageProgress)
         return DeltaPage(visible, next, hasMore)
     }
 
