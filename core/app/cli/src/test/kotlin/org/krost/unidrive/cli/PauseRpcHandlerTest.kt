@@ -1,6 +1,9 @@
 package org.krost.unidrive.cli
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -11,6 +14,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.krost.unidrive.hydration.HydrationEvent
 import org.krost.unidrive.hydration.PauseGate
 import org.krost.unidrive.hydration.TransferPausedException
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -26,7 +30,13 @@ class PauseRpcHandlerTest {
     private var now = 1_000L
     private val gate = PauseGate(clockMs = { now })
     private val events = mutableListOf<HydrationEvent>()
-    private val handler = PauseRpcHandler(gate) { events += it }
+    private val scope = CoroutineScope(SupervisorJob())
+    private val handler = PauseRpcHandler(gate, scope) { events += it }
+
+    @AfterTest
+    fun tearDown() {
+        scope.cancel()
+    }
 
     private fun reply(json: String): JsonObject = Json.parseToJsonElement(json).jsonObject
 
@@ -135,7 +145,7 @@ class PauseRpcHandlerTest {
         assertEquals("""{"ok":true}""", handler.resume())
 
         assertFalse(gate.isPaused)
-        assertEquals(listOf<HydrationEvent>(HydrationEvent.Resumed), events)
+        assertEquals(listOf<HydrationEvent>(HydrationEvent.Resumed()), events)
     }
 
     @Test

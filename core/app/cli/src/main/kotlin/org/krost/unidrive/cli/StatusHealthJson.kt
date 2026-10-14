@@ -63,14 +63,16 @@ internal fun providerHealthJson(lastContactMs: Long?): JsonObject =
 
 /**
  * `paused` (#778): present only while the daemon is paused. `since_ms` is epoch ms of the first request of the
- * pause; `auto` says whether a rule of the client (true) or a person (false) paused. The same object is the
- * reply of `daemon.pause` and the body of the `paused` event.
+ * pause; `auto` says whether a rule of the client (true) or a person (false) paused; `until_ms` (epoch ms at which
+ * the daemon resumes by itself) is present only for a timed pause. The same object is the reply of
+ * `daemon.pause` and the body of the `paused` event.
  */
 internal fun PauseGate.State.toJson(): JsonObject =
     buildJsonObject {
         put("reason", reason)
         put("since_ms", sinceMs)
         put("auto", auto)
+        untilMs?.let { put("until_ms", it) }
     }
 
 /**

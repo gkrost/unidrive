@@ -324,6 +324,33 @@ class DaemonPauseTest {
     }
 
     @Test
+    fun `a timed pause shows its end in the status and the daemon resumes by itself and says so`() = runBlocking {
+        val runtime = runtime(Provider())
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+        val syncSub = connect(IpcAuth.Scope.FULL)
+        try {
+            syncSub.send("""{"verb":"sync.subscribe"}""")
+            awaitIpcLine(syncSub, "sync.subscribe reply") { !it.contains("\"event\"") }
+
+            val until = System.currentTimeMillis() + 1_500
+            val reply = ask("""{"verb":"daemon.pause","reason":"user","auto":false,"until_ms":$until}""")
+            assertEquals(until, reply.getValue("paused").jsonObject.getValue("until_ms").jsonPrimitive.long)
+            assertEquals(reply.getValue("paused"), status().getValue("paused"), "the status shows the end instant")
+            assertTrue(awaitIpcLine(syncSub, "paused event") { it.contains("\"event\":\"paused\"") }.contains("\"until_ms\":$until"))
+
+            val resumed = awaitIpcLine(syncSub, "resumed event from the timer") { it.contains("\"event\":\"resumed\"") }
+            assertEquals("""{"event":"resumed","reason":"timeout"}""", resumed)
+            assertTrue(System.currentTimeMillis() >= until, "not before the instant")
+            assertFalse("paused" in status())
+        } finally {
+            syncSub.close()
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    @Test
     fun `the poll does not enumerate while paused and runs again at once when resumed`() = runBlocking {
         val provider = Provider()
         val runtime = runtime(provider, pollIntervalMs = 100)

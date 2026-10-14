@@ -667,9 +667,10 @@ fun serialiseHydrationEvent(e: HydrationEvent): String = when (e) {
         if (e.ok) "$base}" else "$base,\"error\":${jsonEsc(e.error?.message ?: "unknown")}}"
     }
     is HydrationEvent.Paused -> {
-        """{"event":"paused","reason":${jsonEsc(e.reason)},"since_ms":${e.sinceMs},"auto":${e.auto}}"""
+        val base = """{"event":"paused","reason":${jsonEsc(e.reason)},"since_ms":${e.sinceMs},"auto":${e.auto}"""
+        if (e.untilMs == null) "$base}" else "$base,\"until_ms\":${e.untilMs}}"
     }
-    HydrationEvent.Resumed -> """{"event":"resumed"}"""
+    is HydrationEvent.Resumed -> if (e.reason == null) """{"event":"resumed"}""" else """{"event":"resumed","reason":${jsonEsc(e.reason)}}"""
     is HydrationEvent.ViewInvalidated -> {
         if (e.full) {
             """{"event":"view.invalidated","full":true}"""

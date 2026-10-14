@@ -30,6 +30,7 @@ import org.krost.unidrive.hydration.OpenResult
 import org.krost.unidrive.hydration.RenameResult
 import org.krost.unidrive.hydration.RmdirResult
 import org.krost.unidrive.hydration.UnlinkResult
+import org.krost.unidrive.hydration.serialiseHydrationEvent
 import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
@@ -196,9 +197,41 @@ class IpcContractCorpusTest {
      * subscriber, one line each.
      */
     @Test
-    fun pause_session_and_events_match_corpus_over_live_socket() = runBlocking {
-        val pairs = loadSession("pause-cycle")
-        val expectedPaused = loadEventLine("paused")
+    fun pause_session_and_events_match_corpus_over_live_socket() = replayPauseSession("pause-cycle", pausedEvent = "paused")
+
+    /**
+     * `sessions/pause-timed.ndjson`: a pause with `until_ms`, its two refusals, the status that shows the end instant and
+     * the resume. The instant in the transcript is far in the future (the daemon is live), so it is pinned exactly.
+     */
+    @Test
+    fun timed_pause_session_and_events_match_corpus_over_live_socket() = replayPauseSession("pause-timed", pausedEvent = "paused-timed")
+
+    /**
+     * The line pushed when a timed pause runs out cannot be waited for on a live socket; `events/resumed-timeout.ndjson`
+     * is pinned against the serialiser both streams share, next to the other pause lines.
+     */
+    @Test
+    fun pause_event_lines_match_the_serialiser() {
+        fun same(
+            fixture: String,
+            event: HydrationEvent,
+        ) = assertJsonMatches(
+            expected = Json.parseToJsonElement(loadEventLine(fixture)),
+            actual = Json.parseToJsonElement(serialiseHydrationEvent(event)),
+            at = "events/$fixture",
+        )
+        same("paused", HydrationEvent.Paused("metered", 1_700_000_000_000L, true))
+        same("paused-timed", HydrationEvent.Paused("user", 1_700_000_000_000L, false, untilMs = 4_102_444_800_000L))
+        same("resumed", HydrationEvent.Resumed())
+        same("resumed-timeout", HydrationEvent.Resumed(HydrationEvent.Resumed.TIMEOUT))
+    }
+
+    private fun replayPauseSession(
+        sessionName: String,
+        pausedEvent: String,
+    ) = runBlocking {
+        val pairs = loadSession(sessionName)
+        val expectedPaused = loadEventLine(pausedEvent)
         val expectedResumed = loadEventLine("resumed")
         val tempDir = Files.createTempDirectory("ipc-contract-pause-test")
         val socketPath = tempDir.resolve("daemon.sock")
@@ -232,7 +265,7 @@ class IpcContractCorpusTest {
                     assertJsonMatches(
                         expected = Json.parseToJsonElement(expectedReply),
                         actual = Json.parseToJsonElement(readFirstLine(session, timeoutMs = 5_000)),
-                        at = "pause-cycle: reply to $request",
+                        at = "$sessionName: reply to $request",
                     )
                     val verb = ((Json.parseToJsonElement(request) as JsonObject)["verb"] as JsonPrimitive).content
                     val accepted = expectedReply.contains("\"ok\":true")

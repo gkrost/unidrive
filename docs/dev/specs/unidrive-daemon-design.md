@@ -381,7 +381,7 @@ capped at 20, `more` counts the rest. A folder is released, and leaves the list,
   {"dir": "/work", "file": "/work/.unidrive.ignore", "reason": "java.nio.file.AccessDeniedException: ..."}]}}}
 ```
 
-**The `paused` object** (additive; see §4.7) is present only while the daemon is paused: `"paused": {"reason": "metered", "since_ms": 1700000000000, "auto": true}`. A status line must show it instead of "up to date". `capabilities` lists `pause` on an engine that has the verbs.
+**The `paused` object** (additive; see §4.7) is present only while the daemon is paused: `"paused": {"reason": "metered", "since_ms": 1700000000000, "auto": true}`, plus `"until_ms": 1700003600000` (epoch ms) while the pause is timed and absent while it lasts until `daemon.resume`. A status line must show it instead of "up to date". `capabilities` lists `pause` on an engine that has the verbs.
 
 **`uploads.blocked`** (additive; the protocol version does not change). Some drives refuse an entry by its *name*, whatever its bytes: OneDrive stores names exactly but compares siblings on a key that ignores some characters (N'Ko, Tifinagh, Vai, Ethiopic, Adlam, Syriac, emoji, ...), so a second sibling that differs from an existing one only in such characters is refused. The engine first lands such an entry on the drive under a stable server name (an ASCII discriminator derived from the original name) and keeps the local name; only when that is refused too is the entry blocked, which is what this object reports. The object is **present only while something is blocked**; absent means nothing is.
 
@@ -428,6 +428,9 @@ A client knows *when* data should stop moving (a metered connection, power saver
 {"verb": "daemon.pause", "reason": "metered", "auto": true}
 {"ok": true, "paused": {"reason": "metered", "since_ms": 1700000000000, "auto": true}}
 
+{"verb": "daemon.pause", "reason": "user", "auto": false, "until_ms": 1700003600000}
+{"ok": true, "paused": {"reason": "user", "since_ms": 1700000000000, "auto": false, "until_ms": 1700003600000}}
+
 {"verb": "daemon.resume"}
 {"ok": true}
 ```
@@ -436,19 +439,24 @@ A client knows *when* data should stop moving (a metered connection, power saver
 |---|---|
 | `reason` | a short machine word the client turns into text (`metered`, `power_saver`, `user`): 1 to 32 characters of `a-z`, `0-9` and `_`. Required |
 | `auto` | true when a rule of the client paused, false when a person did. Optional, default false; anything but a JSON boolean is refused |
+| `until_ms` | a timed pause: the epoch ms (the unit of `since_ms`) at which the daemon resumes by itself. Optional; absent means the pause lasts until `daemon.resume`. A JSON integer later than the daemon's clock now, else refused. An absolute instant, never a duration: the client turns "for one hour" into `now + 1 h` and the reply echoes the instant it was given |
 
-A refused request answers `{"ok":false,"error":"<token>"}` and changes nothing: `missing_reason` (no `reason` member), `invalid_reason` (not a string, empty, longer than 32 or outside that character set), `invalid_auto`. Unknown members are ignored; a timed pause (`until`) is not part of this and would be one more optional member.
+A refused request answers `{"ok":false,"error":"<token>"}` and changes nothing: `missing_reason` (no `reason` member), `invalid_reason` (not a string, empty, longer than 32 or outside that character set), `invalid_auto`, `invalid_until` (not a JSON integer: a string, a fraction, `null`, a boolean), `until_in_past` (not later than the daemon's clock now). Unknown members are ignored. A refusal while paused leaves the pause in force, its timer included.
 
-**Idempotence.** `daemon.pause` while paused keeps the first `since_ms` (the pause began then) and takes the new `reason` and `auto`; the reply carries the resulting object. `daemon.resume` while running is a no-op success. Neither a repeated identical pause nor a resume of a running daemon is announced as an event.
+**Idempotence.** `daemon.pause` while paused keeps the first `since_ms` (the pause began then) and takes the new `reason`, `auto` and `until_ms`; the reply carries the resulting object. `daemon.resume` while running is a no-op success. Neither a repeated identical pause nor a resume of a running daemon is announced as an event.
+
+**The timer.** A request names the whole pause, so the last one wins: a `daemon.pause` with a new `until_ms` replaces the timer (earlier or later), and one without `until_ms` makes a timed pause untimed. That holds for a pause of a rule too: an automatic pause (`auto: true`) sent over a person's timed pause replaces it entirely, the daemon keeps no second pause underneath. The client owns that policy; when the timer runs out and the client's rule still applies it sends the pause again. `daemon.resume` cancels the timer. The timer lives in the daemon's memory like the pause: a restarted daemon runs, with no timer, and a client that wants the pause to survive a restart sends it again with the instant it remembers. The instant is on the wall clock, which the daemon reads at least every 30 seconds: a clock that was set forward, or a machine that slept through the instant, resumes the daemon within that interval of the next check; a clock set back postpones the resume to the instant on the new clock.
 
 **Events** (one line each, to every `sync.subscribe` subscriber and, on a mount profile, every `hydration.subscribe` subscriber, whatever its scope):
 
 ```json
 {"event": "paused", "reason": "metered", "since_ms": 1700000000000, "auto": true}
+{"event": "paused", "reason": "user", "since_ms": 1700000000000, "auto": false, "until_ms": 1700003600000}
 {"event": "resumed"}
+{"event": "resumed", "reason": "timeout"}
 ```
 
-`paused` is sent when a pause begins and when a pause that is already in force changes its `reason` or `auto`; `resumed` when a pause ends. The user notification is the client's job.
+`paused` is sent when a pause begins and when a pause that is already in force changes its `reason`, `auto` or `until_ms` (`until_ms` only for a timed pause); `resumed` when a pause ends. The `resumed` of `daemon.resume` has no `reason`; the one of a timed pause that ran out carries `"reason": "timeout"`. A `resumed` is sent once per pause, whichever ends it. The user notification is the client's job.
 
 **What a pause does.**
 

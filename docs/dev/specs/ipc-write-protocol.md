@@ -303,8 +303,9 @@ folder from its own authority — it would desync from the rows.
   sides key-order-insensitive). Lines written without a request live in
   `ipc-contract/connection/<token>.ndjson` (one line each; today
   `too_many_clients`), checked over a live socket by the same test.
-  The pause adds `ipc-contract/sessions/pause-cycle.ndjson` (request/reply pairs on one connection) and
-  `ipc-contract/events/{paused,resumed}.ndjson` (the lines the subscribers read).
+  The pause adds `ipc-contract/sessions/pause-{cycle,timed}.ndjson` (request/reply pairs on one connection) and
+  `ipc-contract/events/{paused,paused-timed,resumed,resumed-timeout}.ndjson` (the lines the subscribers read; the
+  timeout line is pinned against the serialiser, as a live socket cannot wait for it).
 - Connection cap and idle timeout: `IpcServerConnectionLimitsTest`.
 - Sequences (this document §3), at the SPI level against a real
   `HydrationImpl` + engine: the full write sequence and the safe-save

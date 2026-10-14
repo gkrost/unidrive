@@ -45,7 +45,7 @@ class HydrationEventTest {
             is HydrationEvent.Completed      -> "co"
             is HydrationEvent.ViewInvalidated -> "vi"
             is HydrationEvent.Paused         -> "pa"
-            HydrationEvent.Resumed           -> "re"
+            is HydrationEvent.Resumed        -> "re"
         }
         assertEquals("ing", s)
     }
@@ -193,8 +193,13 @@ class HydrationEventTest {
             """{"event":"paused","reason":"metered","since_ms":1700000000000,"auto":true}""",
             serialiseHydrationEvent(HydrationEvent.Paused(reason = "metered", sinceMs = 1_700_000_000_000L, auto = true)),
         )
-        assertEquals("""{"event":"resumed"}""", serialiseHydrationEvent(HydrationEvent.Resumed))
+        assertEquals(
+            """{"event":"paused","reason":"user","since_ms":1700000000000,"auto":false,"until_ms":1700003600000}""",
+            serialiseHydrationEvent(HydrationEvent.Paused("user", 1_700_000_000_000L, false, untilMs = 1_700_003_600_000L)),
+        )
+        assertEquals("""{"event":"resumed"}""", serialiseHydrationEvent(HydrationEvent.Resumed()))
+        assertEquals("""{"event":"resumed","reason":"timeout"}""", serialiseHydrationEvent(HydrationEvent.Resumed(HydrationEvent.Resumed.TIMEOUT)))
         assertEquals("", HydrationEvent.Paused("user", 1L, false).path)
-        assertEquals("", HydrationEvent.Resumed.path)
+        assertEquals("", HydrationEvent.Resumed().path)
     }
 }

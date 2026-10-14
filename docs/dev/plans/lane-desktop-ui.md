@@ -257,7 +257,7 @@ Re-read against the open issues and PRs; the section above is the previous wave.
 
 ### Owner decisions from the Windows client questionnaire (gkrost/unidrive-windows#258)
 - **Re-authentication while the daemon runs is solved here (#813):** `auth` hands the new credentials to the running daemon over IPC instead of refusing with `profile_in_use`. The daemon is not stopped. #743 is closed in favour of #813.
-- **Pause is un-postponed (#778):** manual pause/resume and `paused` in `daemon.status` start now. The timed pause #789 comes after.
+- **Pause is un-postponed (#778):** manual pause/resume and `paused` in `daemon.status` start now. The timed pause #789 comes after: `daemon.pause` takes an optional `until_ms` (absolute epoch ms), `paused` carries it while the pause is timed, and the daemon resumes by itself and announces `{"event":"resumed","reason":"timeout"}` (unidrive-daemon-design.md §4.7).
 - **The clients stay mount-only for v1:** no front-end needs mirror verbs.
 
 ### Next, in this order

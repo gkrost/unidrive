@@ -8,3 +8,9 @@
 {"ok":true,"paused":{"reason":"user","since_ms":1700000000000,"auto":false}}
 {"verb":"daemon.pause","reason":"metered","auto":true}
 {"ok":true,"paused":{"reason":"metered","since_ms":1700000000000,"auto":true}}
+{"verb":"daemon.pause","reason":"user","until_ms":1.5}
+{"ok":false,"error":"invalid_until"}
+{"verb":"daemon.pause","reason":"user","until_ms":0}
+{"ok":false,"error":"until_in_past"}
+{"verb":"daemon.pause","reason":"user","until_ms":4102444800000}
+{"ok":true,"paused":{"reason":"user","since_ms":1700000000000,"auto":false,"until_ms":4102444800000}}
