@@ -12,6 +12,7 @@ import java.nio.file.attribute.FileTime
 import java.time.Instant
 import org.krost.unidrive.engine.localNameIssue
 import org.krost.unidrive.sync.model.SyncEntry
+import org.krost.unidrive.io.withLocalIoRetryBlocking
 
 /**
  * Resolves a remote path (as received from cloud providers) against the sync root,
@@ -182,11 +183,12 @@ open class PlaceholderManager(
         }
         Files.createDirectories(local.parent)
 
-        Files.deleteIfExists(local)
-        Files.createFile(local)
+        // #802: a file another process still holds open used to fail the whole staging; a short lock is retried.
+        withLocalIoRetryBlocking { Files.deleteIfExists(local) }
+        withLocalIoRetryBlocking { Files.createFile(local) }
 
         if (modified != null) {
-            Files.setLastModifiedTime(local, FileTime.from(modified))
+            withLocalIoRetryBlocking { Files.setLastModifiedTime(local, FileTime.from(modified)) }
         }
     }
 
@@ -198,7 +200,7 @@ open class PlaceholderManager(
         source: Path,
         target: Path,
     ) {
-        Files.move(source, target)
+        withLocalIoRetryBlocking { Files.move(source, target) }
     }
 
     fun createFolder(
