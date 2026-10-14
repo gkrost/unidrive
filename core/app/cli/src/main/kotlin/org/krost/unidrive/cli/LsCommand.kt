@@ -5,11 +5,13 @@ import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.authenticateAndLog
+import org.krost.unidrive.engine.RemoteOperationGuard
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcAuthException
 import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
+import org.krost.unidrive.sync.StateDatabase
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
@@ -56,7 +58,7 @@ class LsCommand : Callable<Int> {
     override fun call(): Int {
         val normalized = normalizeLsPath(path)
         val profile = parent.resolveCurrentProfile()
-        val excludePatterns = parent.loadSyncConfig().effectiveExcludePatterns(profile.name)
+        val config = parent.loadSyncConfig()
         val socketPath = IpcServer.defaultSocketPath(profile.name)
 
         // Single source of truth: when a DAEMON serves this profile, read its
@@ -104,7 +106,19 @@ class LsCommand : Callable<Int> {
                 provider.close()
             }
         if (listing == null) return noSuchPath(normalized)
-        printChildren(listing, excludePatterns)
+        // The daemon's own guard (exclude patterns and, for a mount profile, the ignore rules), so the live
+        // listing marks what the daemon's listing marks.
+        val dbFile = parent.providerConfigDir().resolve("state.db")
+        val db = if (Files.exists(dbFile)) StateDatabase(dbFile).also { it.initialize() } else null
+        try {
+            val guard =
+                cliExclusionGuard(config, profile.name, profile.mode) { path ->
+                    db?.getEntry(path)?.let { !it.isFolder && it.remoteId != null } == true
+                }
+            printChildren(listing, guard)
+        } finally {
+            db?.close()
+        }
         return 0
     }
 
@@ -160,7 +174,7 @@ class LsCommand : Callable<Int> {
 
     private fun ViewEntryParsed.basename(): String = path.substringAfterLast('/')
 
-    private fun printChildren(children: List<CloudItem>, excludePatterns: List<String>) {
+    private fun printChildren(children: List<CloudItem>, guard: RemoteOperationGuard) {
         if (children.isEmpty()) return
         // Sort: folders first, then files, each alphabetically by name.
         // Matches the Reconciler's ordering so `ls` output lines up with what a
@@ -171,12 +185,12 @@ class LsCommand : Callable<Int> {
             )
         val nameWidth =
             sorted.maxOf {
-                displayName(it.name, it.isFolder, pathMatchesExcludePatterns(it.path, excludePatterns)).length
+                displayName(it.name, it.isFolder, guard.isExcludedPath(it.path, it.isFolder)).length
             }.coerceAtMost(60)
         for (item in sorted) {
             // Folder suffix is the classic ls-style trailing '/'; mtime is ISO-8601
             // (matches CloudItem.modified.toString()).
-            val displayName = displayName(item.name, item.isFolder, pathMatchesExcludePatterns(item.path, excludePatterns))
+            val displayName = displayName(item.name, item.isFolder, guard.isExcludedPath(item.path, item.isFolder))
             val size = if (item.isFolder) "" else CliProgressReporter.formatSize(item.size)
             val mtime = item.modified?.toString() ?: "-"
             println("%-${nameWidth}s  %10s  %s".format(displayName, size, mtime))
@@ -293,7 +307,7 @@ class LsCommand : Callable<Int> {
             Regex(
                 """\{"path":"((?:[^"\\]|\\.)*)","size":(-?\d+),"mtime_ms":(-?\d+),"hydrated":(?:true|false),"folder":(true|false)(?:,[^}]*)?\}""",
             )
-        private val EXCLUDED_REGEX = Regex(",\\\"excluded\\\":true(?:,|})")
+        private val EXCLUDED_REGEX = Regex(""""error":(?:true|false),"excluded":true(?:,|})""")
 
         /**
          * Parse the `entries` array out of a `hydration.list` ok reply. Mirrors

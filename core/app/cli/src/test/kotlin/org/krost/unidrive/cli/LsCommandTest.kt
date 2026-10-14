@@ -183,8 +183,41 @@ class LsCommandTest {
         assertTrue(entry.excluded)
         assertEquals("scratch.tmp [excluded]", LsCommand.displayName("scratch.tmp", isFolder = false, excluded = entry.excluded))
         assertEquals("scratch/ [excluded]", LsCommand.displayName("scratch", isFolder = true, excluded = true))
-        assertTrue(pathMatchesExcludePatterns("/scratch.tmp", listOf("*.tmp")))
-        assertFalse(pathMatchesExcludePatterns("/document.txt", listOf("*.tmp")))
+    }
+
+    @Test
+    fun `an excluded marker inside a string value is not read as the flag`() {
+        val reply =
+            """{"ok":true,"entries":[""" +
+                """{"path":"/a.txt","size":1,"mtime_ms":2,"hydrated":false,"folder":false,"remote_modified_ms":null,""" +
+                """"remote_id":",\"excluded\":true,","etag":null,"pending_upload":false,"error":false}""" +
+                "]}"
+
+        assertFalse(LsCommand.parseListEntries(reply).single().excluded)
+    }
+
+    @Test
+    fun `the exclusion guard marks ignore-rule folders and files like the daemon`() {
+        val cache = java.nio.file.Files.createTempDirectory("ls-ignore-cache")
+        try {
+            java.nio.file.Files.writeString(cache.resolve(".unidrive.ignore"), "build/
+")
+            val guard =
+                exclusionGuard(
+                    patterns = listOf("*.tmp"),
+                    ignoreSettings = org.krost.unidrive.sync.ignore.IgnoreSettings(),
+                    cacheDir = cache,
+                    inCloud = { false },
+                )
+
+            assertTrue(guard.isExcludedPath("/scratch.tmp", false))
+            assertTrue(guard.isExcludedPath("/build", true), "a build/ rule names the folder row")
+            assertTrue(guard.isExcludedPath("/build/out.bin", false))
+            assertFalse(guard.isExcludedPath("/build", false), "a file called build is not a folder")
+            assertFalse(guard.isExcludedPath("/document.txt", false))
+        } finally {
+            cache.toFile().deleteRecursively()
+        }
     }
 
     @Test

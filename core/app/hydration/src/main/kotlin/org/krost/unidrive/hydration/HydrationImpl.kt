@@ -356,9 +356,11 @@ class HydrationImpl(
         if (!resolvesInsideCache(path)) return OpenResult.Failed(HydrationError.InvalidPath)
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
-        if (mount.isExcludedPath(path)) {
+        // An excluded item is kept local: a copy this machine already holds is served, but its cloud content is
+        // never downloaded for a read.
+        if (mount.isExcludedPath(path, entry.isFolder) && !mount.servesFromLocalCopy(entry)) {
             val error = HydrationError.Excluded
-            _events.emit(HydrationEvent.Failed(path, error))
+            _events.emit(HydrationEvent.Skipped(path))
             _events.emit(
                 HydrationEvent.Completed(
                     path = path,

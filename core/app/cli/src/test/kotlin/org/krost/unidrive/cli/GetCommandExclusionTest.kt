@@ -6,16 +6,18 @@ import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class GetCommandExclusionTest {
-    @Test
-    fun `get skips an excluded remote path`() {
+    private class Run(val exit: Int, val out: String, val err: String)
+
+    private fun get(vararg args: String, setup: (remoteRoot: Path) -> Unit): Pair<Run, Path> {
         val configDir = Files.createTempDirectory("get-excluded-config")
         val localRoot = Files.createDirectories(configDir.resolve("local"))
         val remoteRoot = Files.createDirectories(configDir.resolve("remote"))
-        Files.writeString(remoteRoot.resolve("scratch.tmp"), "remote bytes")
+        setup(remoteRoot)
         Files.writeString(
             configDir.resolve("config.toml"),
             """
@@ -26,21 +28,51 @@ class GetCommandExclusionTest {
             exclude_patterns = ["*.tmp"]
             """.trimIndent() + "\n",
         )
-
-        val capturedError = ByteArrayOutputStream()
-        val originalError = System.err
+        val out = ByteArrayOutputStream()
+        val err = ByteArrayOutputStream()
+        val originalOut = System.out
+        val originalErr = System.err
         try {
-            System.setErr(PrintStream(capturedError, true, Charsets.UTF_8))
-
-            CommandLine(Main()).execute("-c", configDir.toString(), "-p", "test", "get", "/scratch.tmp")
-
-            assertTrue(capturedError.toString(Charsets.UTF_8).contains("excluded"))
-            assertFalse(Files.exists(localRoot.resolve("scratch.tmp")), "get must not download an excluded item")
+            System.setOut(PrintStream(out, true, Charsets.UTF_8))
+            System.setErr(PrintStream(err, true, Charsets.UTF_8))
+            val exit = CommandLine(Main()).execute("-c", configDir.toString(), "-p", "test", "get", *args)
+            return Run(exit, out.toString(Charsets.UTF_8), err.toString(Charsets.UTF_8)) to configDir
         } finally {
-            System.setErr(originalError)
+            System.setOut(originalOut)
+            System.setErr(originalErr)
+        }
+    }
+
+    @Test
+    fun `get skips an excluded remote path and exits non-zero`() {
+        val (run, configDir) = get("/scratch.tmp") { Files.writeString(it.resolve("scratch.tmp"), "remote bytes") }
+        try {
+            assertEquals("get: skipped excluded item: /scratch.tmp", run.err.trim())
+            assertEquals(GetCommand.EXCLUDED_EXIT, run.exit)
+            assertTrue(GetCommand.EXCLUDED_EXIT != 0)
+            assertFalse(run.out.contains("Downloading"))
+            assertFalse(Files.exists(configDir.resolve("local/scratch.tmp")), "get must not download an excluded item")
+        } finally {
             configDir.toFile().deleteRecursively()
         }
     }
 
-    private fun tomlPath(path: Path): String = path.toString().replace('\\', '/')
+    @Test
+    fun `get on a folder holding only excluded files skips them and exits zero`() {
+        val (run, configDir) = get("/docs") {
+            Files.createDirectories(it.resolve("docs"))
+            Files.writeString(it.resolve("docs/a.tmp"), "x")
+            Files.writeString(it.resolve("docs/b.tmp"), "y")
+        }
+        try {
+            assertEquals(0, run.exit)
+            assertTrue(run.out.contains("Skipped"), run.out)
+            assertFalse(Files.exists(configDir.resolve("local/docs/a.tmp")))
+            assertFalse(Files.exists(configDir.resolve("local/docs/b.tmp")))
+        } finally {
+            configDir.toFile().deleteRecursively()
+        }
+    }
+
+    private fun tomlPath(path: Path): String = path.toString().replace('\', '/')
 }

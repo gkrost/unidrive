@@ -71,8 +71,10 @@ sealed interface HydrationError {
      * locally): moving cloud content onto an excluded name would take a
      * synced object out of every sync action silently (the Reconciler and
      * LocalScanner skip excluded names), so the move is refused and both
-     * paths stay untouched. On open_read it is also a refusal: a cloud-only
-     * excluded object is not downloaded, and even a warm cache is not served.
+     * paths stay untouched. On open_read it is also a refusal, but only where a
+     * download would be needed: a cloud-only excluded object is not downloaded, while
+     * a file this machine holds in full (created locally, or synced and complete in
+     * the cache) is served from that local content.
      * Its [message] is the STABLE wire token `excluded`.
      * Changing this string breaks that cross-repo contract.
      */
