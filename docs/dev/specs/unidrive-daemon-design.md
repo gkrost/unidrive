@@ -334,7 +334,7 @@ A running enumeration is answered from memory, never from state.db, so a status 
 
 ```json
 {
-  "uploads": {"pending": 3, "in_flight": 1, "failed": 1, "oldest_pending_age_ms": 5400000},
+  "uploads": {"pending": 3, "in_flight": 1, "failed": 1, "oldest_pending_age_ms": 5400000, "as_of_ms": 1760000000000},
   "cache": {"bytes": 1288490188, "budget_bytes": 21474836480},
   "provider_health": {"last_contact_ms": 1700000000000}
 }
@@ -343,6 +343,7 @@ A running enumeration is answered from memory, never from state.db, so a status 
 | field | meaning |
 |---|---|
 | `uploads` | mount profiles only; absent on a mirror profile (no hydration layer) and until the upload queue has been read once after the start |
+| `uploads.as_of_ms` | #747: when the counts were read (epoch ms). A busy state.db serves the last good reading, so a front-end tells fresh from frozen by the stamp not advancing; absent until the first reading |
 | `uploads.pending` | paths whose bytes are not in the cloud yet and that an upload will take: every never-uploaded (`local:`) row, plus every path holding an upload slot (a dirty overwrite of an uploaded row has no such row). Queued, in flight and failed-awaiting-replay all count, **including the start-up replay's own uploads**. **Keep-local rows (`exclude_patterns`, ignore rules) and rows outside `sync_path` are not counted**: no upload will ever take them. `0` means nothing is waiting; a client that wants "everything is uploaded" also checks that `uploads` is present |
 | `uploads.in_flight` | transfer attempts that hold a transfer permit right now (a subset of `pending`); a path waiting for its turn, for the transfer budget or in a retry backoff is pending but not in flight |
 | `uploads.failed` | never-uploaded rows with a failed attempt on record (a subset of `pending`); a daemon restart replays them |
