@@ -4,6 +4,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.engine.HttpClientEngine
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.UserAgent
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.http.EndpointClassifier
 import org.krost.unidrive.http.RequestId
@@ -26,9 +27,10 @@ internal object GraphEndpoints {
         )
 }
 
-/** The Graph HTTP client: timeouts, the request id, and the attempt metrics reported through [tap]. */
+/** The Graph HTTP client: timeouts, the `User-Agent` [userAgent] on every request, the request id, and the attempt metrics reported through [tap]. */
 internal fun graphHttpClient(
     tap: RequestMetricsTap,
+    userAgent: String,
     engine: HttpClientEngine? = null,
 ): HttpClient {
     val configure: HttpClientConfig<*>.() -> Unit = {
@@ -37,6 +39,7 @@ internal fun graphHttpClient(
             socketTimeoutMillis = HttpDefaults.SOCKET_TIMEOUT_MS
             requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
         }
+        install(UserAgent) { agent = userAgent }
         install(RequestId) {
             metrics = tap
             provider = "onedrive"
