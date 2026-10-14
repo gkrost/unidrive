@@ -1,0 +1,4 @@
+{"verb":"auth.logout"}
+{"ok":true,"revoked":true,"credentials_removed":false}
+{"verb":"auth.logout","force":true}
+{"ok":true,"revoked":true,"credentials_removed":false}

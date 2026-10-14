@@ -83,7 +83,10 @@ class IpcContractCorpusTest {
     private val daemonVerbs =
         listOf(
             "daemon.status", "daemon.pause", "daemon.resume", "metrics.query", "sync.subscribe", "refresh.run", "sync.enumerate",
-            "history.list", "history.subscribe", "ignore.explain", "daemon.shutdown",
+            "history.list", "history.subscribe", "ignore.explain",
+            // auth.logout deletes the corpus daemon's (absent) credential files and is idempotent; it must
+            // run before daemon.shutdown, which stops the daemon the other verbs are replayed against.
+            "auth.logout", "daemon.shutdown",
         )
 
     @Test

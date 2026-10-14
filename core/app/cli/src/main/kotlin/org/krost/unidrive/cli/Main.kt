@@ -315,6 +315,19 @@ open class Main : Runnable {
         return createProviderFrom(profile.type, rp, tokenPath)
     }
 
+    /**
+     * [createProvider] for a lifecycle command's explicit target (logout's `--profile`): the same vault merge
+     * and construction, resolved by name instead of `-p`/default, so `--profile work` signs out `work` even
+     * when `-p` names (or defaults to) another profile. The name was resolved from the same config moments
+     * before; an unknown one is a caller bug.
+     */
+    internal fun createProviderForName(name: String): CloudProvider {
+        val profile =
+            requireNotNull(resolveProfile(name)) { "profile '$name' is not configured" }
+        val tokenPath = baseConfigDir.resolve(profile.name)
+        return createProviderFrom(profile.type, mergeVaultCreds(profile), tokenPath)
+    }
+
     fun resolveProfile(name: String): ProfileInfo? {
         val configFile = baseConfigDir.resolve("config.toml")
         val raw =
