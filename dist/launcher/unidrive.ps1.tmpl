@@ -73,5 +73,13 @@ for ($i = 0; $i -lt $passArgs.Count; $i++) {
     }
 }
 $javaArgs += @('-jar', '@JAR@')
-& java @javaArgs @passArgs
+# Redirected standard input (profile set ignore_rules from a file, auth login --password-stdin) must reach the JVM:
+# inside a script, piped-in input is $input and the native call does not see it on its own, so pipe it in. The
+# else branch keeps an interactive console attached (the masked password prompt, System.console() checks).
+# Windows PowerShell 5.1 quirk: once chcp 65001 is active, its redirected-input reader prepends a BOM to the first
+# line it pipes into the native command ($OutputEncoding does not stop it). Re-point the reader at a UTF-8 encoding
+# without a preamble, and pin $OutputEncoding the same way, so the bytes arrive as they are in the file.
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+if ([Console]::IsInputRedirected) { $input | & java @javaArgs @passArgs } else { & java @javaArgs @passArgs }
 exit $LASTEXITCODE
