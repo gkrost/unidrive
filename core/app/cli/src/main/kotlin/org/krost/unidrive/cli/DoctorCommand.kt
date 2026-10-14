@@ -206,7 +206,7 @@ class DoctorCommand : Runnable {
         // A legacy pid-only file (`<pid>\n`) still parses cleanly.
         val pid = pidStr.substringBefore(' ').toLongOrNull()
             ?: return CheckResult(name, Severity.WARN, "lock file contents not a PID: '$pidStr'", emptyList())
-        return if (isLockHolderAlive(pid)) {
+        return if (isLockHolderAlive(pid, lockPid)) {
             CheckResult(name, Severity.OK, "daemon alive (PID $pid)", emptyList())
         } else {
             CheckResult(

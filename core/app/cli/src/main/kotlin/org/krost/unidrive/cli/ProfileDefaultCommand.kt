@@ -81,6 +81,10 @@ class ProfileDefaultCommand : Callable<Int> {
         return Files.readString(configPath)
     }
 
+    private fun requireConfigExists(configPath: Path) {
+        if (!Files.exists(configPath)) throw ProfileCommandError("config_not_found", "no config.toml in ${configPath.parent}")
+    }
+
     private fun save(
         configPath: Path,
         text: String,
@@ -95,6 +99,8 @@ class ProfileDefaultCommand : Callable<Int> {
     private fun applyChange(): JsonObject {
         val target = requestedTarget()
         val configPath = profileCmd.parent.configBaseDir().resolve("config.toml")
+        requireConfigExists(configPath)
+        return ConfigFileTransaction.withLock(configPath) {
         val text = readConfigText(configPath)
         val raw = parseConfig(text, configPath)
         if (target != null && target !in raw.providers) {
@@ -109,11 +115,12 @@ class ProfileDefaultCommand : Callable<Int> {
         }
         if (edited != text) save(configPath, edited)
 
-        return buildJsonObject {
+        buildJsonObject {
             put("ok", true)
             put("default_profile", target)
             put("previous", raw.general.default_profile?.takeIf { it.isNotBlank() })
             put("message", if (target != null) "Default profile is now '$target'." else "Default profile cleared.")
+        }
         }
     }
 }

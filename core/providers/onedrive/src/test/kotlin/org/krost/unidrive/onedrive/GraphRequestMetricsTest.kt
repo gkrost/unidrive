@@ -191,8 +191,8 @@ class GraphRequestMetricsTest {
             val without = RequestMetricsTap()
             val with = RequestMetricsTap().also { it.sink = recorder }
             val engine = MockEngine { respond("""{"value":[]}""", HttpStatusCode.OK, json) }
-            val clientWithout = graphHttpClient(without, engine)
-            val clientWith = graphHttpClient(with, engine)
+            val clientWithout = graphHttpClient(without, OneDriveConfig.DEFAULT_USER_AGENT, engine)
+            val clientWith = graphHttpClient(with, OneDriveConfig.DEFAULT_USER_AGENT, engine)
             val url = "https://graph.microsoft.com/v1.0/me/drive/items/01ABCDEF!123/children"
 
             fun perRequestNanos(client: io.ktor.client.HttpClient): Double =

@@ -17,7 +17,6 @@ import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardOpenOption
 import java.util.concurrent.Callable
 
 @Command(
@@ -233,14 +232,25 @@ class ProfileAddCommand : Callable<Int> {
             }
         }
 
-        // Step 6: Generate and append TOML
+        // Step 6: Generate TOML, then re-read and revalidate under the shared config lock.
         val toml = generateProfileToml(type, name, syncRoot, creds, mode)
-
-        if (!Files.exists(configPath)) {
-            Files.createDirectories(configPath.parent)
-            Files.writeString(configPath, "[general]\n\n")
+        val wantsDefault =
+            if (raw.general.default_profile.isNullOrBlank()) {
+                print("Make '${name}' the default profile? [Y/n]: ")
+                val answer = console.readLine()?.trim()?.lowercase()
+                answer == null || answer.isEmpty() || answer == "y" || answer == "yes"
+            } else {
+                false
+            }
+        val writeResult = writeInteractiveProfile(configPath, name, type, mode, syncRoot, toml, wantsDefault)
+        if (writeResult == null) {
+            System.err.println("Error: config.toml could not be parsed.")
+            return
         }
-        Files.writeString(configPath, toml, StandardOpenOption.APPEND)
+        if (writeResult != "added" && writeResult != "default") {
+            System.err.println("Error: $writeResult")
+            return
+        }
 
         println()
         println("Profile '${AnsiHelper.bold(name)}' added.")
@@ -249,18 +259,59 @@ class ProfileAddCommand : Callable<Int> {
             println("  Next: run ${AnsiHelper.bold("unidrive -p $name auth")}")
         }
 
-        // #646: when no profile is the default yet, offer the new one — `unidrive status`
-        // without a default otherwise falls back to the implicit localfs profile and looks
-        // empty even though real profiles are configured.
-        if (raw.general.default_profile.isNullOrBlank()) {
-            print("Make '${name}' the default profile? [Y/n]: ")
-            val answer = console.readLine()?.trim()?.lowercase()
-            if (answer == null || answer.isEmpty() || answer == "y" || answer == "yes") {
-                Files.writeString(configPath, org.krost.unidrive.sync.setDefaultProfile(Files.readString(configPath), name))
-                println("  Default: ${AnsiHelper.bold(name)}")
-            }
-        }
+        if (writeResult == "default") println("  Default: ${AnsiHelper.bold(name)}")
     }
+
+    private fun writeInteractiveProfile(
+        configPath: Path,
+        name: String,
+        type: String,
+        mode: org.krost.unidrive.sync.ProfileMode,
+        syncRoot: String,
+        toml: String,
+        wantsDefault: Boolean,
+    ): String? =
+        ConfigFileTransaction.withLock(configPath) {
+            val latestText = if (Files.exists(configPath)) Files.readString(configPath) else "[general]\n\n"
+            val latest =
+                try {
+                    SyncConfig.parseRaw(latestText, configPath.toString())
+                } catch (_: Exception) {
+                    System.err.println("Error: config.toml could not be parsed.")
+                    return@withLock null
+                }
+            if (latest.providers.keys.any { it.equals(name, ignoreCase = true) }) {
+                return@withLock "Profile '$name' already exists."
+            }
+            val latestConflict =
+                SyncConfig.detectRootIsolationConflicts(
+                    latest.copy(
+                        providers =
+                            latest.providers + (
+                                name to
+                                    org.krost.unidrive.sync.RawProvider(
+                                        type = type,
+                                        mode = mode.wireName,
+                                        sync_root = syncRoot,
+                                    )
+                            ),
+                    ),
+                )
+            if (latestConflict != null) return@withLock latestConflict
+
+            val defaultNowMissing = latest.general.default_profile.isNullOrBlank()
+            val anchored =
+                if (wantsDefault && defaultNowMissing && latestText.lineSequence().none { it.trim() == "[general]" }) {
+                    "[general]\n\n$latestText"
+                } else {
+                    latestText
+                }
+            var updated = anchored.trimEnd('\n') + "\n\n" + toml
+            val makeDefault = wantsDefault && defaultNowMissing
+            if (makeDefault) updated = org.krost.unidrive.sync.setDefaultProfile(updated, name)
+            ConfigFileTransaction.writeAtomically(configPath, updated)
+            if (makeDefault) "default" else "added"
+        }
 
     private fun promptRequired(
         console: java.io.Console,
@@ -346,8 +397,9 @@ class ProfileListCommand : Callable<Int> {
         names = ["--json"],
         description = [
             "Print the profiles as one JSON object: {\"default_profile\":...,\"profiles\":[{name, type, mode, label, " +
-                "sync_root, sync_path, hydration_cache_max_bytes, daemon_poll_seconds, auth}]}. Read-only; " +
-                "unknown values are null, never a made-up default.",
+                "sync_root, sync_path, hydration_cache_max_bytes, daemon_poll_seconds, honor_gitignore, ignore_rules, auth}]}. " +
+                "Read-only; unknown values are null, never a made-up default (honor_gitignore and ignore_rules " +
+                "report their effective default, false and [], when unset).",
         ],
     )
     var json: Boolean = false

@@ -65,12 +65,27 @@ interface CloudProvider {
         destination: Path,
     ): Long
 
+    /** Download with optional SHA-256 of plaintext captured while the provider writes the staged file. */
+    suspend fun downloadWithHash(
+        remotePath: String,
+        destination: Path,
+        targetMtimeMillis: Long? = null,
+    ): DownloadReceipt = DownloadReceipt(download(remotePath, destination))
+
     /** Download by known remote ID, skipping metadata lookup if the provider supports it. */
     suspend fun downloadById(
         remoteId: String,
         remotePath: String,
         destination: Path,
     ): Long = download(remotePath, destination)
+
+    /** ID-addressed form of [downloadWithHash], preserving the existing fast path where supported. */
+    suspend fun downloadByIdWithHash(
+        remoteId: String,
+        remotePath: String,
+        destination: Path,
+        targetMtimeMillis: Long? = null,
+    ): DownloadReceipt = DownloadReceipt(downloadById(remoteId, remotePath, destination))
 
     /**
      * Upload a local file to [remotePath].

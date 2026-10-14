@@ -2,6 +2,7 @@ package org.krost.unidrive.engine
 
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.DownloadReceipt
 import org.krost.unidrive.HashAlgorithm
 import org.krost.unidrive.sync.HashVerifier
 import org.krost.unidrive.sync.model.SyncEntry
@@ -27,6 +28,20 @@ object Transfers {
             provider.downloadById(item.id, remotePath, destination)
         } else {
             provider.download(remotePath, destination)
+        }
+
+    /** Download while allowing the provider to return a hash of the plaintext it staged. */
+    suspend fun downloadByIdOrPathWithHash(
+        provider: CloudProvider,
+        item: CloudItem,
+        remotePath: String,
+        destination: Path,
+        targetMtimeMillis: Long? = null,
+    ): DownloadReceipt =
+        if (item.id.isNotEmpty()) {
+            provider.downloadByIdWithHash(item.id, remotePath, destination, targetMtimeMillis)
+        } else {
+            provider.downloadWithHash(remotePath, destination, targetMtimeMillis)
         }
 
     /** mtime and size of a file about to be uploaded, or null when it cannot be read. */

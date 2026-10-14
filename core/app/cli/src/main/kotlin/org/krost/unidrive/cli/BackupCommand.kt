@@ -81,27 +81,25 @@ class BackupAddCommand : Runnable {
             |  trash_retention_days = 30
             """.trimMargin()
 
-        val existing = if (Files.exists(configFile)) Files.readString(configFile) else ""
-        val hasSection = existing.contains("$backupSection")
-
-        if (hasSection) {
-            System.err.println("Warning: profile '$backupName' already exists. Updating.")
-        }
-
-        val newContent =
-            if (hasSection) {
-                existing
-            } else if (existing.isNotEmpty()) {
-                existing + "\n\n" + config
-            } else {
-                """
+        var hasSection = false
+        ConfigFileTransaction.withLock(configFile) {
+            val existing = if (Files.exists(configFile)) Files.readString(configFile) else ""
+            hasSection = existing.contains("$backupSection")
+            val newContent =
+                if (hasSection) {
+                    existing
+                } else if (existing.isNotEmpty()) {
+                    existing + "\n\n" + config
+                } else {
+                    """
             |[general]
             |
             $config
                 """.trimMargin()
-            }
-
-        Files.writeString(configFile, newContent)
+                }
+            ConfigFileTransaction.writeAtomically(configFile, newContent)
+        }
+        if (hasSection) System.err.println("Warning: profile '$backupName' already exists. Updating.")
         println("Backup profile '$backupName' created:")
         println("  Provider:    $providerType")
         println("  Direction:  upload only")

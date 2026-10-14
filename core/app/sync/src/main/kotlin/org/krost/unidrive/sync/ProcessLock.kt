@@ -5,6 +5,7 @@ import java.nio.channels.FileLock
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.time.Instant
 import kotlin.time.Duration
 import kotlin.time.DurationUnit
 import kotlin.time.toDuration
@@ -176,7 +177,7 @@ class ProcessLock(
      */
     fun readLiveHolderInfo(): HolderInfo? =
         readHolderInfo()?.takeIf { info ->
-            runCatching { ProcessHandle.of(info.pid).map { it.isAlive }.orElse(false) }.getOrDefault(false)
+            runCatching { isLockHolder(info.pid, pidFile) }.getOrDefault(false)
         }
 
     /**
@@ -271,4 +272,43 @@ class ProcessLock(
             return ProcessLock(lockFile)
         }
     }
+}
+
+/**
+ * What the operating system tells about a running process. Each field is null when the platform does not
+ * disclose it (another user's process, a restricted token).
+ */
+data class ProcessFacts(val startInstant: Instant?, val command: String?)
+
+/** The live process with [pid], or null when none runs. Seam for [isLockHolder]; tests pass a fake. */
+fun lookupProcess(pid: Long): ProcessFacts? =
+    ProcessHandle.of(pid).filter { it.isAlive }.map { handle ->
+        ProcessFacts(
+            startInstant = handle.info().startInstant().orElse(null),
+            command = handle.info().command().orElse(null),
+        )
+    }.orElse(null)
+
+/** A process whose start is later than the lock's write by more than this cannot have written it. */
+private const val START_SLACK_MS = 2_000L
+
+/**
+ * True when the live process with [pid] can be the writer of [pidFile]. A pid alone does not prove it: a holder that died
+ * without cleanup leaves its pid behind and the system hands the number to an unrelated process. The process is not the
+ * writer when it started after the file was last written, or when its command is not a unidrive/java one. A fact the
+ * platform withholds is not held against the process, so an old-format file or an undisclosed start time falls back to
+ * "a process with this pid runs".
+ */
+fun isLockHolder(
+    pid: Long,
+    pidFile: Path,
+    lookup: (Long) -> ProcessFacts? = ::lookupProcess,
+): Boolean {
+    val facts = lookup(pid) ?: return false
+    val written = runCatching { Files.getLastModifiedTime(pidFile).toInstant() }.getOrNull()
+    val started = facts.startInstant
+    if (written != null && started != null && started.isAfter(written.plusMillis(START_SLACK_MS))) return false
+    val command = facts.command?.lowercase()
+    if (command != null && !command.contains("java") && !command.contains("unidrive")) return false
+    return true
 }

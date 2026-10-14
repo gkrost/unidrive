@@ -287,7 +287,7 @@ class OAuthService(
         }
 
         val tokenResponse = json.decodeFromString<TokenResponse>(response.bodyAsText())
-        val token = tokenResponse.toToken()
+        val token = tokenResponse.toToken().let { it.copy(refreshToken = it.refreshToken ?: refreshToken) }
         if (!token.hasPlausibleAccessTokenShape()) {
             throw AuthenticationException(
                 "Refresh endpoint returned 2xx with a suspiciously short access_token " +
