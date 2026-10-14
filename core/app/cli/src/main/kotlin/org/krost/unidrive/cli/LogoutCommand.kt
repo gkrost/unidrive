@@ -17,6 +17,7 @@ import picocli.CommandLine.Command
 import picocli.CommandLine.Option
 import picocli.CommandLine.ParentCommand
 import java.nio.ByteBuffer
+import java.nio.channels.SocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.Callable
@@ -63,6 +64,9 @@ class LogoutCommand : Callable<Int> {
         // --keep-state is the compatibility form of the default; it wins over --delete-state.
         val delete = deleteState && !keepState
         if (json) {
+            // The generic catch is the last resort of the front-end contract: whatever else goes wrong is
+            // still one JSON refusal, with the exception's type only (its message could quote a response).
+            @Suppress("TooGenericExceptionCaught")
             return try {
                 emitJson(logout(parent, profile, delete, forcePending).json)
                 0
@@ -77,8 +81,6 @@ class LogoutCommand : Callable<Int> {
                 )
                 1
             } catch (e: Exception) {
-                // A front-end parses stdout: whatever else goes wrong is still one JSON refusal, with the
-                // exception's type only (its message could quote a response or a path).
                 emitJson(lifecycleErrorJson(LifecycleError("internal_error", "unexpected failure: ${e.javaClass.simpleName}")))
                 1
             }
@@ -194,30 +196,44 @@ internal fun logout(
         ProfileRemover.Holder.OTHER ->
             throw LifecycleError("profile_in_use", "profile '${target.name}' is in use by another unidrive process; stop it first")
 
-        ProfileRemover.Holder.DAEMON -> {
-            if (deleteState) {
-                throw LifecycleError(
-                    "daemon_running",
-                    "the sync state of the running daemon of profile '${target.name}' cannot be deleted; " +
-                        "stop it first (`unidrive -p ${target.name} daemon stop`), then run logout --delete-state",
-                )
-            }
-            val reply = LogoutHooks.requestLogout(IpcEndpoint(socket, target.profileDir, target.name), forcePending)
-            if (reply != null) return signedOutByDaemon(target, reply)
-            // No answer — the daemon may have stopped while it was asked: only a profile that is free now
-            // falls through to the local form, anything still holding it is a refusal.
-            if (ProfileRemover.holderOf(target.profileDir, socket) != ProfileRemover.Holder.NONE) {
-                throw LifecycleError(
-                    "daemon_running",
-                    "the daemon of profile '${target.name}' did not answer the sign-out; " +
-                        "stop it first (`unidrive -p ${target.name} daemon stop`)",
-                )
-            }
-        }
+        // The daemon hands out the sign-out; null means it stopped while it was asked and the
+        // profile is free now — the local form below takes over.
+        ProfileRemover.Holder.DAEMON -> askRunningDaemon(target, socket, deleteState, forcePending)?.let { return it }
 
         ProfileRemover.Holder.NONE -> {}
     }
     return withProfileLock(target) { logoutStoppedProfile(main, target, deleteState, forcePending) }
+}
+
+/**
+ * Hands the sign-out to the running daemon on [socket]: `--delete-state` is refused against it (a
+ * running daemon's state cannot be deleted), its reply decides the outcome, and a daemon that does
+ * not answer but still holds the profile is a `daemon_running` refusal. Null when the daemon went
+ * away between the holder check and its answer.
+ */
+private fun askRunningDaemon(
+    target: ProfileTarget,
+    socket: Path,
+    deleteState: Boolean,
+    forcePending: Boolean,
+): LogoutResult? {
+    if (deleteState) {
+        throw LifecycleError(
+            "daemon_running",
+            "the sync state of the running daemon of profile '${target.name}' cannot be deleted; " +
+                "stop it first (`unidrive -p ${target.name} daemon stop`), then run logout --delete-state",
+        )
+    }
+    val reply = LogoutHooks.requestLogout(IpcEndpoint(socket, target.profileDir, target.name), forcePending)
+    if (reply != null) return signedOutByDaemon(target, reply)
+    if (ProfileRemover.holderOf(target.profileDir, socket) != ProfileRemover.Holder.NONE) {
+        throw LifecycleError(
+            "daemon_running",
+            "the daemon of profile '${target.name}' did not answer the sign-out; " +
+                "stop it first (`unidrive -p ${target.name} daemon stop`)",
+        )
+    }
+    return null
 }
 
 /** The daemon's answer to `auth.logout`: a success reply becomes the command's, a refusal passes through. */
@@ -237,11 +253,19 @@ private fun signedOutByDaemon(
             }
         return LogoutResult(json, emptyList(), viaDaemon = true)
     }
+    throw daemonRefusal(target, reply)
+}
+
+/** The daemon's refusal of `auth.logout`, worded for the command; unknown tokens pass through unchanged. */
+private fun daemonRefusal(
+    target: ProfileTarget,
+    reply: JsonObject,
+): LifecycleError =
     when (val token = (reply["error"] as? JsonPrimitive)?.takeIf { it.isString }?.content) {
         "uploads_pending" -> {
             val pending = (reply["pending"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
             val failed = (reply["failed"] as? JsonPrimitive)?.content?.toIntOrNull() ?: 0
-            throw LifecycleError(
+            LifecycleError(
                 "uploads_pending",
                 "profile '${target.name}' still has uploads that never reached the cloud ($pending pending, $failed of them failed); " +
                     "let them finish, or run again with --force-pending",
@@ -253,23 +277,22 @@ private fun signedOutByDaemon(
             )
         }
         "credential_protection_unavailable" ->
-            throw LifecycleError(
+            LifecycleError(
                 token,
                 "the credential marker of profile '${target.name}' could not be removed from the OS secret store; unlock it and retry",
             )
         "unknown_verb" ->
-            throw LifecycleError(
+            LifecycleError(
                 "daemon_running",
                 "the running daemon of profile '${target.name}' is older than this command and cannot sign out over IPC; " +
                     "stop it first (`unidrive -p ${target.name} daemon stop`)",
             )
         else ->
-            throw LifecycleError(
+            LifecycleError(
                 token ?: "daemon_logout_failed",
                 "the daemon of profile '${target.name}' refused the sign-out${token?.let { " ($it)" } ?: ""}",
             )
     }
-}
 
 /** The sign-out of a stopped profile, under the profile lock. The destructive form deletes the sync state. */
 private fun logoutStoppedProfile(
@@ -323,37 +346,55 @@ internal fun sendAuthLogout(
         IpcAuthClient.connect(endpoint, IpcAuth.Scope.FULL).use { channel ->
             channel.configureBlocking(false)
             val request = if (force) """{"verb":"auth.logout","force":true}""" else """{"verb":"auth.logout"}"""
-            val out = ByteBuffer.wrap((request + "\n").toByteArray())
             val deadline = System.currentTimeMillis() + timeoutMs
-            while (out.hasRemaining()) {
-                channel.write(out)
-                if (out.hasRemaining()) {
-                    if (System.currentTimeMillis() >= deadline) return null
-                    Thread.sleep(10)
-                }
-            }
-            val collected = StringBuilder()
-            while (System.currentTimeMillis() < deadline) {
-                val buf = ByteBuffer.allocate(4096)
-                val n = channel.read(buf)
-                if (n < 0) break
-                if (n > 0) {
-                    buf.flip()
-                    collected.append(String(buf.array(), 0, buf.limit()))
-                    val newline = collected.indexOf('\n')
-                    if (newline >= 0) {
-                        val line = collected.substring(0, newline)
-                        return runCatching { Json.parseToJsonElement(line) as? JsonObject }.getOrNull()
-                    }
-                } else {
-                    Thread.sleep(10)
-                }
-            }
-            null
+            if (!writeRequest(channel, ByteBuffer.wrap((request + "\n").toByteArray()), deadline)) return null
+            readReplyLine(channel, deadline)
         }
     } catch (_: Exception) {
         null
     }
+}
+
+/** The whole [request] written by [deadline], or false when the daemon stopped taking it. */
+private fun writeRequest(
+    channel: SocketChannel,
+    request: ByteBuffer,
+    deadline: Long,
+): Boolean {
+    while (request.hasRemaining()) {
+        channel.write(request)
+        if (request.hasRemaining()) {
+            if (System.currentTimeMillis() >= deadline) return false
+            Thread.sleep(10)
+        }
+    }
+    return true
+}
+
+/** One JSON reply line read by [deadline], or null; what arrives past the deadline is nothing. */
+private fun readReplyLine(
+    channel: SocketChannel,
+    deadline: Long,
+): JsonObject? {
+    val collected = StringBuilder()
+    val buf = ByteBuffer.allocate(4096)
+    while (System.currentTimeMillis() < deadline) {
+        val n = channel.read(buf)
+        if (n < 0) break
+        if (n > 0) {
+            buf.flip()
+            collected.append(String(buf.array(), 0, buf.limit()))
+            buf.clear()
+            val newline = collected.indexOf('\n')
+            if (newline >= 0) {
+                val line = collected.substring(0, newline)
+                return runCatching { Json.parseToJsonElement(line) as? JsonObject }.getOrNull()
+            }
+        } else {
+            Thread.sleep(10)
+        }
+    }
+    return null
 }
 
 /** A JSON boolean member, or null when it is absent or not a boolean literal. */

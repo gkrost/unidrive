@@ -52,6 +52,9 @@ internal class AuthLogoutRpcHandler(
                 return """{"ok":false,"error":"uploads_pending","pending":$pending,"failed":$failed}"""
             }
         }
+        // Any failure of the revocation attempt (the provider unreachable, the revocation refused) means
+        // "not confirmed": the sign-out still goes on with the local cleanup, and the reply says false.
+        @Suppress("TooGenericExceptionCaught")
         val revoked =
             try {
                 val provider = providerFactory()
@@ -67,7 +70,6 @@ internal class AuthLogoutRpcHandler(
                 log.warn("auth.logout: the credential marker of '{}' could not be removed from the secret store: {}", profileDir, e.message)
                 return CREDENTIAL_PROTECTION
             } catch (e: Exception) {
-                // Revocation failed (the provider could not be reached etc.) — clean up locally anyway.
                 log.warn("auth.logout: revoking the token of '{}' failed: {}", profileDir, e.message)
                 false
             }
