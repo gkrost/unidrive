@@ -639,6 +639,7 @@ dependencies {
     implementation(project(":providers:internxt"))
     implementation(project(":providers:onedrive"))
     implementation(project(":providers:localfs"))
+    implementation(project(":providers:s3"))
     implementation(project(":app:sync"))
     // StateDatabase, SyncEntry, PathNormalizer and SyncScope live in :app:engine-core (#560 U2).
     implementation(project(":app:engine-core"))
