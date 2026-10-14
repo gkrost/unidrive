@@ -27,6 +27,9 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
 
     testImplementation(project(":providers:onedrive"))
+
+    // #644: the plugin's log lines are asserted through a logback ListAppender.
+    testImplementation(libs.logback.classic)
 }
 
 tasks.test {

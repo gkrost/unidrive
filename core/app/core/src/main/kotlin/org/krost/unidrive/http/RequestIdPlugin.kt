@@ -54,6 +54,8 @@ val RequestId =
         val metrics = pluginConfig.metrics
         val provider = pluginConfig.provider
         val endpoints = pluginConfig.endpoints
+        val profile = pluginConfig.profile
+        val serverRequestIdHeaders = pluginConfig.serverRequestIdHeaders
         val retries = RetryTracker()
 
         // Attempt metrics. The Send hook wraps one trip to the engine: it sees the failure of a request that never
@@ -136,6 +138,11 @@ val RequestId =
             val elapsed =
                 response.responseTime.timestamp - response.requestTime.timestamp
             val status = response.status.value
+            // #644: the profile travels in the message itself, independent of the thread's MDC (hydration
+            // downloads and other worker threads have none), so a shared log splits per account. The server's
+            // own request id (first present header of [RequestIdConfig.serverRequestIdHeaders]) rides along
+            // so a slow call can be handed to the provider's support. Both segments are empty when unknown,
+            // which keeps the line byte for byte the old format for clients that do not name them.
             // UD-773: append payload byte counts to the close line so log analysers can
             // derive bytes/sec throughput per provider/host instead of just ops/sec. Goes
             // AFTER the `(Nms)` chunk so existing regexes that end at `\d+ms\)` still match.
@@ -145,11 +152,16 @@ val RequestId =
             val upBytes = request.content.contentLength
             val dnBytes = response.contentLength()
             val sizeSegment = formatSizeSegment(upBytes, dnBytes)
+            val profileSegment = profile?.let { " [$it]" } ?: ""
+            val serverId = serverRequestIdHeaders.firstNotNullOfOrNull { response.headers[it] }
+            val srvSegment = serverId?.let { " srv=$it" } ?: ""
             val level = if (status >= HttpStatusCode.BadRequest.value) "WARN" else "DEBUG"
             if (level == "WARN") {
                 log.warn(
-                    "← req={} {} {} ({}ms){}",
+                    "← req={}{}{} {} {} ({}ms){}",
                     id ?: "--------",
+                    profileSegment,
+                    srvSegment,
                     status,
                     response.status.description,
                     elapsed,
@@ -157,8 +169,10 @@ val RequestId =
                 )
             } else {
                 log.debug(
-                    "← req={} {} ({}ms){}",
+                    "← req={}{}{} {} ({}ms){}",
                     id ?: "--------",
+                    profileSegment,
+                    srvSegment,
                     status,
                     elapsed,
                     sizeSegment,
@@ -167,17 +181,30 @@ val RequestId =
         }
     }
 
-/** Settings of [RequestId]; every one is optional. */
-class RequestIdConfig {
-    /** Where attempts are reported once the tap has a sink; null for a client that reports nothing. */
-    var metrics: RequestMetricsTap? = null
+    /** Settings of [RequestId]; every one is optional. */
+    class RequestIdConfig {
+        /** Where attempts are reported once the tap has a sink; null for a client that reports nothing. */
+        var metrics: RequestMetricsTap? = null
 
-    /** The provider id written into every attempt. */
-    var provider: String = "unknown"
+        /** The provider id written into every attempt. */
+        var provider: String = "unknown"
 
-    /** Names the endpoints of this client's API; the default hides every path ([EndpointClassifier.OPAQUE]). */
-    var endpoints: EndpointClassifier = EndpointClassifier.OPAQUE
-}
+        /** Names the endpoints of this client's API; the default hides every path ([EndpointClassifier.OPAQUE]). */
+        var endpoints: EndpointClassifier = EndpointClassifier.OPAQUE
+
+        /**
+         * The profile name printed into the response line (`[profile]`); null (the default) keeps the line in
+         * the old format. The name travels in the message because the MDC does not reach every worker thread.
+         */
+        var profile: String? = null
+
+        /**
+         * Response headers that may carry the server's own request id, tried in order; the first present
+         * value is printed as `srv=<id>` (empty when none). Redaction rule as ever: the URL stays
+         * query-free, the header value comes from the response, not from anything the request carried.
+         */
+        var serverRequestIdHeaders: List<String> = emptyList()
+    }
 
 /**
  * UD-773: format the `up=N dn=M` segment for the RequestId close line.

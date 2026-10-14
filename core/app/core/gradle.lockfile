@@ -2,8 +2,8 @@
 # Manual edits can break the build and are not advised.
 # This file is expected to be part of source control.
 # To regenerate this file, run: ./gradlew :app:core:dependencies --write-locks
-ch.qos.logback:logback-classic:1.6.5=testRuntimeClasspath
-ch.qos.logback:logback-core:1.6.5=testRuntimeClasspath
+ch.qos.logback:logback-classic:1.6.5=testCompileClasspath,testRuntimeClasspath
+ch.qos.logback:logback-core:1.6.5=testCompileClasspath,testRuntimeClasspath
 com.charleskorn.kaml:kaml-jvm:0.79.0=testRuntimeClasspath
 com.charleskorn.kaml:kaml:0.79.0=testRuntimeClasspath
 com.squareup.okio:okio-jvm:3.12.0=testRuntimeClasspath

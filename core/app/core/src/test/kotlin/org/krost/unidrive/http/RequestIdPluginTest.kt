@@ -1,5 +1,8 @@
 package org.krost.unidrive.http
 
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -9,10 +12,13 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
+import org.slf4j.LoggerFactory
+import org.slf4j.MDC
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -128,4 +134,119 @@ class RequestIdPluginTest {
             redact("https://a.example/path?token=secret"),
         )
     }
+
+    // #644: the response line carries the profile and the server's own request id in the message itself,
+    // because the MDC does not reach every worker thread. A client that names neither logs the old format.
+    private suspend fun capturedLines(block: suspend () -> Unit): List<String> {
+        val logger = LoggerFactory.getLogger("org.krost.unidrive.http.RequestId") as Logger
+        val appender = ListAppender<ILoggingEvent>()
+        appender.start()
+        logger.addAppender(appender)
+        try {
+            block()
+            return appender.list.map { it.formattedMessage }
+        } finally {
+            logger.detachAppender(appender)
+        }
+    }
+
+    private fun responding(headers: Pair<String, String>? = null) =
+        MockEngine { request ->
+            respond(
+                content = "ok",
+                status = HttpStatusCode.OK,
+                headers =
+                    if (headers == null) {
+                        headersOf("Content-Type" to listOf("text/plain"))
+                    } else {
+                        headersOf(headers.first to listOf(headers.second), "Content-Type" to listOf("text/plain"))
+                    },
+            )
+        }
+
+    @Test
+    fun `two clients with different profiles log their own name from a thread without MDC`() =
+        runTest {
+            assertNull(MDC.get("profile"), "precondition: the test thread carries no profile MDC")
+            fun client(name: String) =
+                HttpClient(responding()) {
+                    install(RequestId) { profile = name }
+                }
+            val alpha = client("alpha")
+            val beta = client("beta")
+            val lines =
+                capturedLines {
+                    alpha.get("https://example.invalid/a")
+                    beta.get("https://example.invalid/b")
+                }
+            assertTrue(lines.any { it.startsWith("← req=") && it.contains(" [alpha] 200 ") }, "alpha's own line: $lines")
+            assertTrue(lines.any { it.startsWith("← req=") && it.contains(" [beta] 200 ") }, "beta's own line: $lines")
+            assertTrue(lines.none { it.contains("[alpha]") && it.contains("[beta]") }, "no line mixes the names: $lines")
+            alpha.close()
+            beta.close()
+        }
+
+    @Test
+    fun `a client without a profile logs the old format byte for byte`() =
+        runTest {
+            val client = HttpClient(responding()) { install(RequestId) }
+            val lines =
+                capturedLines {
+                    client.get("https://example.invalid/a")
+                }
+            val close = lines.last { it.startsWith("←") }
+            assertTrue(Regex("""^← req=[^ ]+ 200 \(\d+ms\)( up=\S+ dn=\S+)?$""").matches(close), "the old close line, unchanged: $close")
+            assertTrue("![" !in close && " srv=" !in close, "no new segments: $close")
+            client.close()
+        }
+
+    @Test
+    fun `a response carrying the server request id logs srv, one without logs none`() =
+        runTest {
+            val withHeader =
+                HttpClient(responding("x-request-id" to "srv-abc-123")) {
+                    install(RequestId) {
+                        profile = "alpha"
+                        serverRequestIdHeaders = listOf("x-request-id")
+                    }
+                }
+            val withoutHeader =
+                HttpClient(responding()) {
+                    install(RequestId) {
+                        profile = "alpha"
+                        serverRequestIdHeaders = listOf("x-request-id")
+                    }
+                }
+            val withLines =
+                capturedLines {
+                    withHeader.get("https://example.invalid/a")
+                }.last { it.startsWith("←") }
+            val withoutLines =
+                capturedLines {
+                    withoutHeader.get("https://example.invalid/b")
+                }.last { it.startsWith("←") }
+            assertTrue(" srv=srv-abc-123 " in " $withLines", "the server id is on the line: $withLines")
+            assertTrue(Regex("""^← req=[^ ]+ \[alpha\] srv=srv-abc-123 200 \(\d+ms\)( up=\S+ dn=\S+)?$""").matches(withLines), "full shape: $withLines")
+            assertTrue(" srv=" !in withoutLines, "no header, no segment: $withoutLines")
+            withHeader.close()
+            withoutHeader.close()
+        }
+
+    @Test
+    fun `no query string reaches the new log segments`() =
+        runTest {
+            val client =
+                HttpClient(responding()) {
+                    install(RequestId) {
+                        profile = "alpha"
+                        serverRequestIdHeaders = listOf("x-request-id")
+                    }
+                }
+            val lines =
+                capturedLines {
+                    client.get("https://example.invalid/a?token=SECRET-VALUE")
+                }
+            assertTrue(lines.none { "SECRET-VALUE" in it }, "the redaction rule covers every line: $lines")
+            client.close()
+        }
 }
