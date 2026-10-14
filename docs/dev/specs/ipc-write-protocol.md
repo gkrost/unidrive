@@ -58,9 +58,16 @@ code. Request/reply byte shapes are pinned by the golden corpus under
 
 - Write verbs that open state (`hydration.create`, `hydration.open_write`,
   `hydration.open_write_begin`) are issued with a client-supplied opaque
-  `handle_id`. Handles are scoped to the connection: when the connection
-  drops, the daemon releases that connection's handles automatically (no
-  close storm after a crash).
+  `handle_id`. Handles live on the connection that opened them: when the
+  connection drops, the daemon releases that connection's handles
+  automatically (no close storm after a crash).
+- #438: `hydration.close_handle` may arrive on another connection than the
+  open (a pooled client hands out any idle connection). The daemon looks on
+  the caller's connection first, then on the others — a handle id is the
+  client's own name, so a match on another connection is taken only when it
+  is unique across them, and one client's close never releases another
+  client's handle with the same id. A close that finds nothing anywhere
+  still answers ok.
 - One connection per mount is the expected shape; a client correlates its own
   `handle_id` on the `completed` event to the write it started.
 - `hydration.close_handle` releases a handle early (optional; the daemon

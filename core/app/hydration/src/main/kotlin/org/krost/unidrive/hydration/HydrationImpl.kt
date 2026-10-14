@@ -1135,7 +1135,15 @@ class HydrationImpl(
         // #728: the client wrote through this handle, not through the engine: its bytes only become
         // visible here, and the trigger below must see them (a close of a read handle accounts the same
         // size again, a no-op).
-        openSets[connectionId]?.remove(handleId)?.let { accountCacheFileOnDisk(it) }
+        // #438: a pooled client can close on a connection other than the one that served open_read, so the
+        // caller's own connection is looked up first and a miss falls through to the others. A handle id is
+        // the client's own name (wh-N): a match on another connection counts only when it is unique across
+        // them, so a close from one client never releases the handle of another using the same id. A close
+        // that finds nothing anywhere still succeeds — the close is idempotent.
+        val path =
+            openSets[connectionId]?.remove(handleId)
+                ?: openSets.values.filter { it.containsKey(handleId) }.singleOrNull()?.remove(handleId)
+        path?.let { accountCacheFileOnDisk(it) }
         requestEviction()
     }
 
