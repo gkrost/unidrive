@@ -803,10 +803,17 @@ class RemoteGather(
      * in. The aliases come from the change set's top-level names, and a chunk on its own may not
      * contain the top-level folder an aliased path inside it needs — deriving per chunk would key
      * that path at its canonical name, where LocalScanner can never find it on disk.
+     *
+     * [guardContext] is the same story for the #601 parent guard: it asks whether the parent was
+     * delivered (alive or deleted) in this enumeration, and a chunk's own map does not hold a
+     * parent that landed in an earlier chunk — a deleted parent would read as absent and fall back
+     * to its still-present row, letting the dead folder's stale child through. Defaults to the
+     * chunk itself (the unchunked call).
      */
     fun updateRemoteEntries(
         remoteChanges: Map<String, CloudItem>,
         remoteToLocalTop: Map<String, String>,
+        guardContext: Map<String, CloudItem> = remoteChanges,
     ): RemoteMerge {
         // #115: the remoteChanges keys are canonical remote paths. An aliased item is
         // persisted at its REAL-LOCAL path (with the canonical in remote_path),
@@ -821,7 +828,7 @@ class RemoteGather(
         val moved = mutableListOf<RemoteMerge.Move>()
         for ((path, item) in remoteChanges) {
             if (item.deleted) continue // skip deleted items
-            if (staleDeltaItem(path, item, remoteChanges)) continue
+            if (staleDeltaItem(path, item, guardContext)) continue
             val realLocalPath = applyReverseFolders(path, folderOverrides).takeIf { it != path } ?: applyReverseTop(path, remoteToLocalTop)
             val isAliased = realLocalPath != path
             // Match an existing row by effective remote path (handles aliased

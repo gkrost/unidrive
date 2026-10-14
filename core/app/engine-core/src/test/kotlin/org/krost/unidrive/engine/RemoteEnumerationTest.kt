@@ -178,6 +178,38 @@ class RemoteEnumerationTest {
         }
 
     @Test
+    fun `a stale child of a parent deleted in an earlier chunk is still skipped`() =
+        runTest {
+            // #601 across a chunk boundary: /p is delivered deleted, its child still reports the
+            // dead folder as parent. The guard must see the deletion in the FULL change set, not
+            // fall back to the still-present row whose id equals the child's parentId.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/p",
+                    remoteId = "p-dead",
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = true,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.items =
+                listOf(
+                    file("p-dead", "/p").copy(isFolder = true, size = 0, deleted = true),
+                    file("c1", "/p/c.txt").copy(parentId = "p-dead"),
+                )
+
+            enumeration(mergeChunkRows = 1).enumerate(reset = false)
+
+            assertNull(db.getEntry("/p/c.txt"), "the dead folder's child must not be resurrected")
+        }
+
+    @Test
     fun `a complete first listing lands in state, promotes the cursor and announces the paths`() =
         runTest {
             provider.items = listOf(file("1", "/a.txt"), file("2", "/b.txt"))

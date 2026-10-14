@@ -251,7 +251,7 @@ class RemoteEnumeration(
                 .chunked(mergeChunkRows)
                 .map { chunk ->
                     val chunkMap = buildMap<String, CloudItem>(chunk.size) { chunk.forEach { put(it.key, it.value) } }
-                    db.batch { gather.updateRemoteEntries(chunkMap, canonicalToLocalTop) }
+                    db.batch { gather.updateRemoteEntries(chunkMap, canonicalToLocalTop, remoteChanges) }
                 }
         upsertedViewPaths = buildSet { merges.forEach { addAll(it.changedPaths) } }
         movedView =
