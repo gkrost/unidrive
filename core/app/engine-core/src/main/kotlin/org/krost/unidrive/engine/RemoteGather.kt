@@ -795,15 +795,25 @@ class RemoteGather(
         )
     }
 
-    fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>): RemoteMerge {
-        // #115: the remoteChanges keys are canonical remote paths. Build a
-        // canonical→real-local reverse map so a newly-arrived aliased item is
+    fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>): RemoteMerge =
+        updateRemoteEntries(remoteChanges, localTopAliases(remoteChanges))
+
+    /**
+     * #147: the chunked caller derives the alias map once from the FULL change set and passes it
+     * in. The aliases come from the change set's top-level names, and a chunk on its own may not
+     * contain the top-level folder an aliased path inside it needs — deriving per chunk would key
+     * that path at its canonical name, where LocalScanner can never find it on disk.
+     */
+    fun updateRemoteEntries(
+        remoteChanges: Map<String, CloudItem>,
+        remoteToLocalTop: Map<String, String>,
+    ): RemoteMerge {
+        // #115: the remoteChanges keys are canonical remote paths. An aliased item is
         // persisted at its REAL-LOCAL path (with the canonical in remote_path),
         // not as a phantom canonical-keyed row that LocalScanner can never find
         // on disk. Existing rows are matched by effective remote path so the
         // merge preserves their real-local path + remote_path. No alias active
         // → both helpers are identity and this is byte-identical to pre-#115.
-        val remoteToLocalTop = localTopAliases(remoteChanges)
         // Folders the drive holds under another name than their local one (a name it refused, landed under a server
         // name): a NEW item beneath such a folder arrives at the server path and is keyed at the local path.
         val folderOverrides = db.foldersWithRemotePath().sortedByDescending { it.second.length }

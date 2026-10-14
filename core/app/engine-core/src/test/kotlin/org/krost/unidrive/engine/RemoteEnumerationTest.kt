@@ -52,41 +52,46 @@ class RemoteEnumerationTest {
 
     private fun cachePath(path: String): Path = tmp.resolve("cache").resolve(path.removePrefix("/"))
 
-    private fun gather() =
-        RemoteGather(
-            provider = provider,
-            db = db,
-            guard =
-                RemoteOperationGuard(
-                    standingScope = emptyList(),
-                    syncPaths = emptyList(),
-                    excludePatterns = emptyList(),
-                    maxConcurrentTransfers = 2,
-                    matchesGlob = { _, _ -> false },
-                ),
-            options = RemoteGather.Options(providerId = "test"),
-            listener =
-                object : RemoteGather.Listener {
-                    override fun onViewInvalidated(
-                        changedPaths: Set<String>,
-                        full: Boolean,
-                        moved: List<RemoteGather.RemoteMerge.Move>,
-                    ) {
-                        invalidations += changedPaths to full
-                        invalidationMoves += moved
-                    }
-                },
-            log = LoggerFactory.getLogger(RemoteEnumerationTest::class.java),
-        )
+    private fun gather(
+        localTopAliases: (Map<String, CloudItem>) -> Map<String, String> = { emptyMap() },
+    ) = RemoteGather(
+        provider = provider,
+        db = db,
+        guard =
+            RemoteOperationGuard(
+                standingScope = emptyList(),
+                syncPaths = emptyList(),
+                excludePatterns = emptyList(),
+                maxConcurrentTransfers = 2,
+                matchesGlob = { _, _ -> false },
+            ),
+        options = RemoteGather.Options(providerId = "test"),
+        localTopAliases = localTopAliases,
+        listener =
+            object : RemoteGather.Listener {
+                override fun onViewInvalidated(
+                    changedPaths: Set<String>,
+                    full: Boolean,
+                    moved: List<RemoteGather.RemoteMerge.Move>,
+                ) {
+                    invalidations += changedPaths to full
+                    invalidationMoves += moved
+                }
+            },
+        log = LoggerFactory.getLogger(RemoteEnumerationTest::class.java),
+    )
 
-    private fun enumeration(gather: RemoteGather = gather()) =
-        RemoteEnumeration(
-            gather = gather,
-            db = db,
-            tracker = EnumerationTracker(),
-            reapGuards = RemoteEnumeration.ReapGuards(uploadInFlight = { it in inFlight }, cachePathOf = ::cachePath),
-            log = LoggerFactory.getLogger(RemoteEnumerationTest::class.java),
-        )
+    private fun enumeration(
+        gather: RemoteGather = gather(),
+        mergeChunkRows: Int = RemoteEnumeration.MERGE_CHUNK_ROWS,
+    ) = RemoteEnumeration(
+        gather = gather,
+        db = db,
+        tracker = EnumerationTracker(),
+        reapGuards = RemoteEnumeration.ReapGuards(uploadInFlight = { it in inFlight }, cachePathOf = ::cachePath),
+        log = LoggerFactory.getLogger(RemoteEnumerationTest::class.java),
+        mergeChunkRows = mergeChunkRows,
+    )
 
     private fun file(
         id: String,
@@ -111,6 +116,66 @@ class RemoteEnumerationTest {
         Files.setLastModifiedTime(p, FileTime.fromMillis(0))
         return p
     }
+
+    // ---- #147: the merge runs in transactions of mergeChunkRows rows ----
+
+    @Test
+    fun `a chunk without its top-level folder still keys an aliased path at its real-local path`() =
+        runTest {
+            // One row per transaction: the aliased child merges in a chunk of its own, so a
+            // per-chunk alias derivation would see no top-level folder and key it at the
+            // canonical name, where LocalScanner can never find it on disk.
+            val aliased =
+                gather(localTopAliases = { changes ->
+                    if (changes.keys.any { it == "/Bilder" }) mapOf("Bilder" to "Pictures") else emptyMap()
+                })
+            provider.items = listOf(file("1", "/Bilder"), file("2", "/Bilder/x.jpg"))
+
+            val result = enumeration(aliased, mergeChunkRows = 1).enumerate(reset = false)
+
+            assertTrue(result.ok)
+            assertEquals(2, result.upserted)
+            assertEquals("1", db.getEntry("/Pictures")?.remoteId, "the aliased top folder lands at its local name")
+            val child = db.getEntry("/Pictures/x.jpg")
+            assertNotNull(child, "the child must not be keyed at its canonical path by its own chunk")
+            assertEquals("/Bilder/x.jpg", child.remotePath, "with the canonical path recorded as remotePath")
+            assertNull(db.getEntry("/Bilder/x.jpg"))
+        }
+
+    @Test
+    fun `a child merges against the parent row its own pass just wrote across a chunk boundary`() =
+        runTest {
+            // #601 shape: the folder at /p was deleted remotely and re-created under the same
+            // name with a new id; the stale row is in state.db. Parent and child land in
+            // different transactions here — the child's parent guard must fall back to the DB
+            // and see the fresh parent id, not the dead row's.
+            db.upsertEntry(
+                org.krost.unidrive.sync.model.SyncEntry(
+                    path = "/p",
+                    remoteId = "p-dead",
+                    remoteHash = null,
+                    remoteSize = 0,
+                    remoteModified = null,
+                    localMtime = null,
+                    localSize = null,
+                    isFolder = true,
+                    isPinned = false,
+                    isHydrated = false,
+                    lastSynced = Instant.now(),
+                ),
+            )
+            provider.items =
+                listOf(
+                    file("p-new", "/p").copy(isFolder = true, size = 0),
+                    file("c1", "/p/c.txt").copy(parentId = "p-new"),
+                )
+
+            val result = enumeration(mergeChunkRows = 1).enumerate(reset = false)
+
+            assertTrue(result.ok)
+            assertEquals("p-new", db.getEntry("/p")?.remoteId)
+            assertNotNull(db.getEntry("/p/c.txt"), "the child must not be skipped by the stale parent row")
+        }
 
     @Test
     fun `a complete first listing lands in state, promotes the cursor and announces the paths`() =
