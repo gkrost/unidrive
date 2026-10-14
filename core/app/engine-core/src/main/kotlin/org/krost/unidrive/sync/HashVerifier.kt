@@ -29,6 +29,7 @@ object HashVerifier {
             org.krost.unidrive.HashAlgorithm.QuickXor -> verifyQuickXorHash(localPath, remoteHash)
             org.krost.unidrive.HashAlgorithm.Md5Hex -> verifyS3ETag(localPath, remoteHash)
             org.krost.unidrive.HashAlgorithm.Sha256Hex -> verifySha256Hex(localPath, remoteHash)
+            org.krost.unidrive.HashAlgorithm.DropboxContentHash -> computeDropboxContentHash(localPath).equals(remoteHash, ignoreCase = true)
         }
     }
 
@@ -50,6 +51,7 @@ object HashVerifier {
             org.krost.unidrive.HashAlgorithm.QuickXor -> computeQuickXorHash(localPath) == remoteHash
             org.krost.unidrive.HashAlgorithm.Md5Hex -> computeMd5Hex(localPath).equals(remoteHash, ignoreCase = true)
             org.krost.unidrive.HashAlgorithm.Sha256Hex -> computeSha256Hex(localPath).equals(remoteHash, ignoreCase = true)
+            org.krost.unidrive.HashAlgorithm.DropboxContentHash -> computeDropboxContentHash(localPath).equals(remoteHash, ignoreCase = true)
         }
     }
 
@@ -89,6 +91,7 @@ object HashVerifier {
             org.krost.unidrive.HashAlgorithm.QuickXor -> computeQuickXorHash(path)
             org.krost.unidrive.HashAlgorithm.Md5Hex -> computeMd5Hex(path)
             org.krost.unidrive.HashAlgorithm.Sha256Hex -> computeSha256Hex(path)
+            org.krost.unidrive.HashAlgorithm.DropboxContentHash -> computeDropboxContentHash(path)
             null -> null
         }
 
@@ -102,6 +105,54 @@ object HashVerifier {
             }
         }
         return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** Dropbox's `content_hash` of [path] (see [org.krost.unidrive.HashAlgorithm.DropboxContentHash]). */
+    fun computeDropboxContentHash(path: Path): String {
+        val hasher = DropboxContentHasher()
+        Files.newInputStream(path).use { input ->
+            val buffer = ByteArray(64 * 1024)
+            var read: Int
+            while (input.read(buffer).also { read = it } != -1) {
+                hasher.update(buffer, read)
+            }
+        }
+        return hasher.digestHex()
+    }
+
+    /** SHA-256 per 4 MiB block, then SHA-256 over the block digests in order. */
+    private class DropboxContentHasher {
+        private val overall = MessageDigest.getInstance("SHA-256")
+        private val block = MessageDigest.getInstance("SHA-256")
+        private var inBlock = 0
+
+        fun update(
+            buffer: ByteArray,
+            length: Int,
+        ) {
+            var offset = 0
+            while (offset < length) {
+                val take = minOf(length - offset, BLOCK_BYTES - inBlock)
+                block.update(buffer, offset, take)
+                inBlock += take
+                offset += take
+                if (inBlock == BLOCK_BYTES) closeBlock()
+            }
+        }
+
+        fun digestHex(): String {
+            if (inBlock > 0) closeBlock()
+            return overall.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        private fun closeBlock() {
+            overall.update(block.digest())
+            inBlock = 0
+        }
+
+        companion object {
+            private const val BLOCK_BYTES = 4 * 1024 * 1024
+        }
     }
 
     fun computeMd5Hex(path: Path): String {

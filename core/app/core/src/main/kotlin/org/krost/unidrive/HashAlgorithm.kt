@@ -26,4 +26,11 @@ sealed class HashAlgorithm {
 
     /** SHA-256, lowercase hex. Reserved for future providers. */
     object Sha256Hex : HashAlgorithm()
+
+    /**
+     * Dropbox's `content_hash`, lowercase hex: the file is split into 4 MiB blocks (the last one may be shorter),
+     * each block is hashed with SHA-256, and the SHA-256 of the concatenated block digests is the result. An empty
+     * file has no blocks, so its hash is the SHA-256 of nothing.
+     */
+    object DropboxContentHash : HashAlgorithm()
 }

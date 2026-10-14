@@ -158,12 +158,13 @@ internal object LegacyInventory {
 
     /**
      * The provider's content-hash algorithm, by type, so the inventory never constructs a provider (no credentials,
-     * no network). Must agree with `CloudProvider.hashAlgorithm()`: OneDrive stores quickXor in `remote_hash`;
+     * no network). Must agree with `CloudProvider.hashAlgorithm()`: OneDrive stores quickXor in `remote_hash`, Dropbox its content hash;
      * Internxt stores a version token there, localfs nothing.
      */
     fun contentHashAlgorithm(providerType: String): HashAlgorithm? =
         when (providerType.lowercase()) {
             "onedrive" -> HashAlgorithm.QuickXor
+            "dropbox" -> HashAlgorithm.DropboxContentHash
             else -> null
         }
 
@@ -542,6 +543,7 @@ internal object LegacyInventory {
                     HashAlgorithm.QuickXor -> "quickXor"
                     HashAlgorithm.Md5Hex -> "md5"
                     HashAlgorithm.Sha256Hex -> "sha256"
+                    HashAlgorithm.DropboxContentHash -> "dropboxContentHash"
                     null -> null
                 },
             lock = lockFacts,
