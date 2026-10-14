@@ -1,5 +1,10 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.sync.ProcessFacts
+import org.krost.unidrive.sync.isLockHolder
+import java.nio.file.Files
+import java.nio.file.attribute.FileTime
+import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -78,6 +83,69 @@ class DaemonCommandTest {
             block(pidFile)
         } finally {
             dir.toFile().deleteRecursively()
+        }
+    }
+
+    // ── a recycled pid is not the daemon ─────────────────────────────────────
+
+    private fun withLockWrittenAt(written: Instant, block: (java.nio.file.Path) -> Unit) =
+        withPidFile("4242 daemon\n") { pidFile ->
+            Files.setLastModifiedTime(pidFile, FileTime.from(written))
+            block(pidFile)
+        }
+
+    private val lockWritten = Instant.parse("2000-01-01T10:00:00Z")
+
+    @Test
+    fun `a live pid that started after the lock was written is a stale lock`() {
+        withLockWrittenAt(lockWritten) { pidFile ->
+            val stranger = ProcessFacts(lockWritten.plusSeconds(3600), "C:/Windows/System32/wsl.exe")
+            val check = checkDaemonLock("p", pidFile, lookup = { stranger })
+            assertTrue(check is DaemonLockCheck.NotRunning && check.message.contains("stale lock"), "$check")
+        }
+    }
+
+    @Test
+    fun `a live pid whose command is not a java or unidrive process is a stale lock`() {
+        withLockWrittenAt(lockWritten) { pidFile ->
+            val stranger = ProcessFacts(lockWritten.minusSeconds(60), "C:/Windows/System32/wsl.exe")
+            assertFalse(isLockHolder(4242, pidFile) { stranger })
+        }
+    }
+
+    @Test
+    fun `a live pid that started before the lock was written is the daemon`() {
+        withLockWrittenAt(lockWritten) { pidFile ->
+            val daemon = ProcessFacts(lockWritten.minusSeconds(1), "/opt/jdk/bin/java -jar unidrive.jar daemon run")
+            assertEquals(DaemonLockCheck.Running(4242), checkDaemonLock("p", pidFile, lookup = { daemon }))
+        }
+    }
+
+    @Test
+    fun `facts the platform withholds fall back to a process with this pid runs`() {
+        withLockWrittenAt(lockWritten) { pidFile ->
+            assertTrue(isLockHolder(4242, pidFile) { ProcessFacts(null, null) })
+        }
+    }
+
+    @Test
+    fun `an old-format pid-only lock keeps the identity check`() {
+        withPidFile("4242\n") { pidFile ->
+            Files.setLastModifiedTime(pidFile, FileTime.from(lockWritten))
+            val stranger = ProcessFacts(lockWritten.plusSeconds(3600), null)
+            assertFalse(isLockHolder(4242, pidFile) { stranger })
+        }
+    }
+
+    // `daemon stop` only signals a process that isLockHolder accepts. This JVM stands in for the stranger:
+    // a lock written long before it started is not its lock. Nothing is signalled.
+    @Test
+    fun `this process is not the holder of a lock written before it started`() {
+        val ownPid = ProcessHandle.current().pid()
+        withPidFile("$ownPid daemon\n") { pidFile ->
+            Files.setLastModifiedTime(pidFile, FileTime.from(Instant.parse("2000-01-01T00:00:00Z")))
+            assertFalse(isLockHolder(ownPid, pidFile))
+            assertTrue(checkDaemonLock("p", pidFile) is DaemonLockCheck.NotRunning)
         }
     }
 

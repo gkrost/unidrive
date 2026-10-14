@@ -323,7 +323,7 @@ internal object LegacyConversion {
         val pidFile = setup.profileDir.resolve(".lock").resolveSibling(".lock.pid")
         when (val lock = readLockPid(pidFile)) {
             is LockPidReadResult.Present -> {
-                if (isLockHolderAlive(lock.contents.pid)) {
+                if (isLockHolderAlive(lock.contents.pid, pidFile)) {
                     System.err.println(
                         "Error: profile '${setup.profileName}' is in use by PID ${lock.contents.pid} " +
                             "(${lock.contents.modeToken ?: "unknown mode"}). Stop it first: " +

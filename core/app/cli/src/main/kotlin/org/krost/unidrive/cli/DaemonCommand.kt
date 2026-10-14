@@ -5,6 +5,9 @@ import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcAuthException
 import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
+import org.krost.unidrive.sync.ProcessFacts
+import org.krost.unidrive.sync.isLockHolder
+import org.krost.unidrive.sync.lookupProcess
 import org.krost.unidrive.sync.SyncEngine
 import picocli.CommandLine.Command
 import picocli.CommandLine.Option
@@ -285,8 +288,9 @@ class DaemonStopCommand : Runnable {
         // below because that guard is only meaningful for a LIVE daemon — a dead
         // daemon's IPC server is already gone, so its mount is already orphaned
         // and refusing to clean up the stale lock helps nobody.
-        val handle = ProcessHandle.of(pid).orElse(null)
+        val handle = if (isLockHolder(pid, pidFile)) ProcessHandle.of(pid).orElse(null) else null
         if (handle == null || !handle.isAlive) {
+            // Also the recycled-pid case: a live process that is not the lock's writer is never signalled.
             println("daemon for profile '${profile.name}' (PID $pid) is not running (stale .lock.pid); cleaning up")
             runCatching { Files.deleteIfExists(pidFile) }
             removeLeftoverSocket(profile.name)
@@ -474,8 +478,12 @@ internal fun readLockPid(pidFile: java.nio.file.Path): LockPidReadResult {
     return LockPidReadResult.Present(LockPidContents(pid, modeToken))
 }
 
-/** True when a process with [pid] is currently running. Shared by `daemon status` and `doctor`. */
-internal fun isLockHolderAlive(pid: Long): Boolean = ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
+/** True when [pid] is a running process that can be the writer of [pidFile]. Shared by `daemon status`, `doctor` and `migrate`. */
+internal fun isLockHolderAlive(
+    pid: Long,
+    pidFile: java.nio.file.Path,
+    lookup: (Long) -> ProcessFacts? = ::lookupProcess,
+): Boolean = isLockHolder(pid, pidFile, lookup)
 
 /** What `daemon status` learns from the `.lock.pid` sidecar, before it asks the daemon anything. */
 internal sealed class DaemonLockCheck {
@@ -492,7 +500,8 @@ internal sealed class DaemonLockCheck {
 internal fun checkDaemonLock(
     profileName: String,
     pidFile: java.nio.file.Path,
-    isAlive: (Long) -> Boolean = ::isLockHolderAlive,
+    lookup: (Long) -> ProcessFacts? = ::lookupProcess,
+    isAlive: (Long) -> Boolean = { isLockHolderAlive(it, pidFile, lookup) },
 ): DaemonLockCheck =
     when (val result = readLockPid(pidFile)) {
         is LockPidReadResult.Absent -> DaemonLockCheck.NotRunning("no daemon running for profile '$profileName'")
