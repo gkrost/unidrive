@@ -133,8 +133,15 @@ class GraphApiService(
         return json.decodeFromString<DriveItem>(body)
     }
 
+    // The URL of the item [id]: in the caller's own drive, or, for a shared-with-me item (see [SharedItemId]),
+    // in the drive that holds it.
+    private fun itemUrl(id: String): String {
+        val shared = SharedItemId.parse(id) ?: return "$baseUrl/me/drive/items/$id"
+        return "$baseUrl/drives/${shared.driveId.encodeURLPathPart()}/items/${shared.itemId.encodeURLPathPart()}"
+    }
+
     suspend fun getItemById(id: String): DriveItem {
-        val response = authenticatedRequest("$baseUrl/me/drive/items/$id")
+        val response = authenticatedRequest(itemUrl(id))
         val body = response.bodyAsText()
         return json.decodeFromString<DriveItem>(body)
     }
@@ -215,7 +222,7 @@ class GraphApiService(
     ): Long {
         val item = getItemById(itemId)
         var downloadedBytes = 0L
-        var url = item.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
+        var url = item.downloadUrl ?: "${itemUrl(itemId)}/content"
         var authNeeded = item.downloadUrl == null
         var flakeAttempts = 0
         var throttleAttempts = 0
@@ -342,7 +349,7 @@ class GraphApiService(
                             itemId,
                         )
                         val fresh = getItemById(itemId)
-                        url = fresh.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
+                        url = fresh.downloadUrl ?: "${itemUrl(itemId)}/content"
                         authNeeded = fresh.downloadUrl == null
                         continue
                     }
@@ -385,7 +392,7 @@ class GraphApiService(
                         e.message,
                     )
                     val fresh = getItemById(itemId)
-                    url = fresh.downloadUrl ?: "$baseUrl/me/drive/items/$itemId/content"
+                    url = fresh.downloadUrl ?: "${itemUrl(itemId)}/content"
                     authNeeded = fresh.downloadUrl == null
                     continue
                 }
@@ -441,6 +448,8 @@ class GraphApiService(
         fileSystemInfo: FileSystemInfo? = null,
         conflictBehavior: String = "replace",
         ifMatchETag: String? = null,
+        // The existing item to replace in place, when the upload is an update addressed by id (see [SharedItemId]).
+        itemId: String? = null,
     ): DriveItem {
         log.debug("Upload (simple): {} ({} bytes, conflictBehavior={})", remotePath, content.size, conflictBehavior)
         val cleanPath = remotePath.removePrefix("/")
@@ -453,8 +462,14 @@ class GraphApiService(
         // file must not 409), "fail" for a CREATE so a pre-existing remote at the path is never
         // blind-overwritten (UD-366 data-loss), with the create-collision keep-both handled by
         // OneDriveProvider.upload.
+        val contentUrl =
+            if (itemId != null) {
+                "${itemUrl(itemId)}/content"
+            } else {
+                "$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=$conflictBehavior"
+            }
         val response =
-            sendThrottled("$baseUrl/me/drive/root:/$encoded:/content?@microsoft.graph.conflictBehavior=$conflictBehavior", HttpMethod.Put) {
+            sendThrottled(contentUrl, HttpMethod.Put) {
                 timeout {
                     requestTimeoutMillis = uploadTimeoutMs
                     socketTimeoutMillis = uploadTimeoutMs
@@ -480,7 +495,7 @@ class GraphApiService(
         val item = json.decodeFromString<DriveItem>(body)
         // A content-PUT cannot carry the fileSystemInfo facet inline; round-tripping
         // local mtime/ctime requires a follow-up PATCH on the just-created item.
-        return if (fileSystemInfo != null) patchFileSystemInfo(item.id, fileSystemInfo) else item
+        return if (fileSystemInfo != null) patchFileSystemInfo(itemId ?: item.id, fileSystemInfo) else item
     }
 
     private suspend fun patchFileSystemInfo(
@@ -495,7 +510,7 @@ class GraphApiService(
                 }
             }
         val response =
-            sendThrottled("$baseUrl/me/drive/items/$itemId", HttpMethod.Patch) {
+            sendThrottled(itemUrl(itemId), HttpMethod.Patch) {
                 contentType(ContentType.Application.Json)
                 setBody(body.toString())
             }
@@ -513,7 +528,7 @@ class GraphApiService(
 
     suspend fun deleteItem(itemId: String, ifMatchETag: String? = null) {
         val response =
-            sendThrottled("$baseUrl/me/drive/items/$itemId", HttpMethod.Delete) {
+            sendThrottled(itemUrl(itemId), HttpMethod.Delete) {
                 // #291: If-Match guards the delete against a concurrent edit between plan and apply.
                 // A non-null eTag makes Graph return 412 Precondition Failed if the item moved on,
                 // rather than destroying a version the engine never saw. Null = legacy unconditional.
@@ -562,6 +577,19 @@ class GraphApiService(
         return json.decodeFromString<DriveItem>(response.bodyAsText())
     }
 
+    // A shared item can be renamed where it is. A new folder would be one of the caller's own drive, and an item
+    // cannot be moved from another user's drive into it with a PATCH.
+    private fun requireRenameOnly(
+        itemId: String,
+        changesFolder: Boolean,
+        oldPath: String?,
+        newPath: String,
+    ) {
+        if (changesFolder && SharedItemId.isShared(itemId)) {
+            throw ProviderException("OneDrive cannot move the shared item '$oldPath' to '$newPath': a shared item can only be renamed in place")
+        }
+    }
+
     suspend fun moveItem(
         itemId: String,
         newPath: String,
@@ -573,11 +601,13 @@ class GraphApiService(
         val newName = cleanPath.substringAfterLast("/")
         val newParentPath = cleanPath.substringBeforeLast("/", "")
         val oldParentPath = oldPath?.removePrefix("/")?.substringBeforeLast("/", "")
+        val changesFolder = oldParentPath == null || newParentPath != oldParentPath
+        requireRenameOnly(itemId, changesFolder, oldPath, newPath)
 
         val body =
             buildJsonObject {
                 put("name", newName)
-                if (oldParentPath == null || newParentPath != oldParentPath) {
+                if (changesFolder) {
                     val parentItem =
                         if (newParentPath.isEmpty()) {
                             getItemByPath("")
@@ -591,7 +621,7 @@ class GraphApiService(
             }
 
         val response =
-            sendThrottled("$baseUrl/me/drive/items/$itemId", HttpMethod.Patch) {
+            sendThrottled(itemUrl(itemId), HttpMethod.Patch) {
                 contentType(ContentType.Application.Json)
                 // If-Match makes the PATCH conditional on the caller's view of the item being
                 // current. A concurrent edit between getItemByPath and moveItem flips the
@@ -619,11 +649,10 @@ class GraphApiService(
         fileSystemInfo: FileSystemInfo? = null,
         conflictBehavior: String = "replace",
         ifMatchETag: String? = null,
+        itemId: String? = null,
     ): DriveItem {
         val fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
         log.debug("Upload (chunked): {} ({} bytes, conflictBehavior={})", remotePath, fileSize, conflictBehavior)
-        val cleanPath = remotePath.removePrefix("/")
-        val encoded = encodePath(cleanPath)
 
         // Two attempts: the probe-then-PUT race window means a session reported alive at
         // resolveUploadSession can be gone by the first chunk. A second attempt with a
@@ -631,7 +660,7 @@ class GraphApiService(
         var lastSessionGone: GraphApiException? = null
         repeat(2) { attempt ->
             try {
-                return uploadLargeFileOnce(localPath, remotePath, encoded, fileSize, onProgress, fileSystemInfo, conflictBehavior, ifMatchETag)
+                return uploadLargeFileOnce(localPath, UploadTarget(remotePath, itemId), fileSize, onProgress, fileSystemInfo, conflictBehavior, ifMatchETag)
             } catch (e: GraphApiException) {
                 val isSessionGone = e.statusCode == 404 || e.statusCode == 410
                 if (attempt == 0 && isSessionGone) {
@@ -654,15 +683,17 @@ class GraphApiService(
 
     private suspend fun uploadLargeFileOnce(
         localPath: Path,
-        remotePath: String,
-        encoded: String,
+        target: UploadTarget,
         fileSize: Long,
         onProgress: ((Long, Long) -> Unit)?,
         fileSystemInfo: FileSystemInfo?,
         conflictBehavior: String = "replace",
         ifMatchETag: String? = null,
     ): DriveItem {
-        val (uploadUrl, initialOffset) = resolveUploadSession(localPath, remotePath, encoded, fileSize, fileSystemInfo, conflictBehavior, ifMatchETag)
+        val remotePath = target.remotePath
+        val itemId = target.itemId
+        val (uploadUrl, initialOffset) =
+            resolveUploadSession(localPath, target, fileSize, fileSystemInfo, conflictBehavior, ifMatchETag)
         val chunkSize = 10L * 1024 * 1024 // 10 MiB (multiple of 320 KiB)
         if (initialOffset > 0) log.debug("Upload resuming at offset {} / {} bytes", initialOffset, fileSize)
         var offset = initialOffset
@@ -713,7 +744,12 @@ class GraphApiService(
             throw e
         }
 
-        val uploadedItem = result ?: if (finalChunkConfirmedByProbe) getItemByPath(remotePath) else null
+        val uploadedItem =
+            result ?: if (finalChunkConfirmedByProbe) {
+                if (itemId != null) getItemById(itemId) else getItemByPath(remotePath)
+            } else {
+                null
+            }
         sessionStore.delete(remotePath)
         return uploadedItem ?: throw GraphApiException("Upload session completed but no DriveItem returned")
     }
@@ -725,13 +761,15 @@ class GraphApiService(
      */
     private suspend fun resolveUploadSession(
         localPath: Path,
-        remotePath: String,
-        encoded: String,
+        target: UploadTarget,
         fileSize: Long,
         fileSystemInfo: FileSystemInfo? = null,
         conflictBehavior: String = "replace",
         ifMatchETag: String? = null,
     ): Pair<String, Long> {
+        val remotePath = target.remotePath
+        val itemId = target.itemId
+        val encoded = encodePath(remotePath.removePrefix("/"))
         val localMtimeMillis = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toMillis() }
         val storedSession = sessionStore.getSession(remotePath)
         // Bind the session to the local file's identity: resuming a session whose committed
@@ -811,7 +849,10 @@ class GraphApiService(
                 }
             }
         val sessionResponse =
-            sendThrottled("$baseUrl/me/drive/root:/$encoded:/createUploadSession", HttpMethod.Post) {
+            sendThrottled(
+                if (itemId != null) "${itemUrl(itemId)}/createUploadSession" else "$baseUrl/me/drive/root:/$encoded:/createUploadSession",
+                HttpMethod.Post,
+            ) {
                 contentType(ContentType.Application.Json)
                 // If-Match makes the session-create conditional on the caller's view of the item
                 // being current. A concurrent edit between the metadata fetch and this call flips
@@ -1314,6 +1355,12 @@ class GraphApiException(
     val statusCode: Int = 0,
     requestId: String? = null,
 ) : ProviderException(message, requestId = requestId)
+
+// Where an upload lands: [remotePath] names the file, [itemId] (when set) is the existing item it replaces in place.
+private class UploadTarget(
+    val remotePath: String,
+    val itemId: String?,
+)
 
 private sealed interface ChunkUploadResult {
     data class Response(val response: HttpResponse) : ChunkUploadResult

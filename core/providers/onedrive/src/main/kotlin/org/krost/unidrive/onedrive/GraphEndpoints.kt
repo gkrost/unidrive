@@ -21,7 +21,7 @@ internal object GraphEndpoints {
             apiHosts = setOf(java.net.URI(OneDriveConfig.GRAPH_BASE_URL).host),
             literals =
                 setOf(
-                    OneDriveConfig.GRAPH_VERSION, "me", "drive", "root", "items", "children", "content", "delta",
+                    OneDriveConfig.GRAPH_VERSION, "me", "drive", "drives", "root", "items", "children", "content", "delta",
                     "createUploadSession", "createLink", "permissions", "sharedWithMe", "subscriptions",
                 ),
         )
