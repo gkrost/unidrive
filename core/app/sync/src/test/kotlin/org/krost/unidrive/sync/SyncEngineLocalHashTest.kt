@@ -346,4 +346,53 @@ class SyncEngineLocalHashTest {
             assertEquals(sha256(renamed), db.getEntry("/after.txt")?.localHash)
             assertTrue(provider.uploadedPaths.isEmpty(), "a remote rename must never turn into an upload")
         }
+
+    // ---- #439: a detected move is verified against the delete row's recorded local hash ----
+
+    @Test
+    fun `a same-size replacement for a deleted file is not converted into a remote move when the row has a hash`() =
+        runTest {
+            val eng = engine()
+            downloadFile(eng, "a.txt", "original-content".toByteArray())
+            assertNotNull(
+                db.getEntry("/a.txt")?.localHash,
+                "precondition: the downloaded row carries the #396 local hash",
+            )
+
+            quietRemote("cursor-2")
+            Files.delete(syncRoot.resolve("a.txt"))
+            // Same length as the deleted file, different bytes — the #296 shape an
+            // anchor+size match cannot tell apart from a move on its own.
+            Files.writeString(syncRoot.resolve("b.txt"), "replaced-content")
+            eng.syncOnce()
+
+            assertTrue(provider.movedPaths.isEmpty(), "different bytes must not be renamed into place")
+            assertTrue(provider.deletedPaths.contains("/a.txt"), "the deletion must still reach the remote")
+            assertTrue(provider.uploadedPaths.contains("/b.txt"), "the replacement's own bytes must be uploaded")
+            assertContentEquals(
+                "replaced-content".toByteArray(),
+                provider.files["/b.txt"],
+                "the remote must end up with the replacement's content, not the deleted file's",
+            )
+        }
+
+    @Test
+    fun `a move pair without a recorded local hash keeps the anchor+size behaviour`() =
+        runTest {
+            val eng = engine()
+            downloadFile(eng, "a.txt", "original-content".toByteArray())
+            // A row from before the engine recorded local hashes.
+            db.upsertEntry(db.getEntry("/a.txt")!!.copy(localHash = null))
+
+            quietRemote("cursor-2")
+            Files.delete(syncRoot.resolve("a.txt"))
+            Files.writeString(syncRoot.resolve("b.txt"), "replaced-content")
+            eng.syncOnce()
+
+            assertEquals(
+                listOf("/a.txt" to "/b.txt"),
+                provider.movedPaths,
+                "without a recorded hash the conversion is unverified, as before the gate",
+            )
+        }
 }

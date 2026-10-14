@@ -46,6 +46,16 @@ class Reconciler(
     // (hash of the local file, provider algorithm, vs the remote item's hash). Null keeps the
     // plain conflict — a provider without a content hash has nothing to compare.
     private val sameContent: ((localFile: java.nio.file.Path, remoteItem: CloudItem) -> Boolean)? = null,
+    // #439: SHA-256 of a local file, compared against a delete row's recorded localHash (#396)
+    // before a DeleteRemote+Upload pair is converted into a file MoveRemote. Null when the file
+    // cannot be read — an unverifiable candidate counts as a mismatch, the safe side.
+    private val localHashOf: (java.nio.file.Path) -> String? = {
+        try {
+            HashVerifier.computeSha256Hex(it)
+        } catch (_: java.io.IOException) {
+            null
+        }
+    },
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
@@ -1184,6 +1194,9 @@ class Reconciler(
                     up to info.size
                 }.groupBy({ it.second }, { it.first })
 
+        // #439: hash each upload candidate at most once, even when several deletes consider it.
+        val candidateHashes = HashMap<String, String?>()
+
         val matchedUploads = mutableSetOf<String>()
         for (del in deletes) {
             if (del.path in matchedFolderDeletes) continue
@@ -1214,7 +1227,17 @@ class Reconciler(
             // 2+ anchored candidates → ambiguous; guessing wrong converts a real
             // file into a rename of unrelated bytes. Fall back to the independent
             // DeleteRemote + Upload — correct, just less efficient.
-            val candidate = candidates.singleOrNull() ?: continue
+            //
+            // #439/#296: when the delete row carries the engine's own SHA-256 (#396), the pair
+            // is only a move if the candidate still holds those bytes. An unrelated same-size,
+            // same-name file used to be converted anyway: the cloud kept the deleted file's
+            // bytes under the new name and the new file's content was never sent until an
+            // unrelated later touch. A mismatch — or an unreadable candidate — keeps the
+            // independent actions; rows without a recorded hash keep the anchor+size behaviour.
+            val candidate =
+                candidates.singleOrNull()?.takeIf {
+                    movesVerifiedBytes(entry, it.path, candidateHashes)
+                } ?: continue
             actions.remove(del)
             actions.remove(candidate)
             actions.add(
@@ -1230,6 +1253,18 @@ class Reconciler(
             )
             matchedUploads.add(candidate.path)
         }
+    }
+
+    // #439: does [candidatePath] hold the bytes the delete row's localHash (#396) describes?
+    // A row without a recorded hash is unverified (true) — the anchor+size signal alone, as
+    // before this gate existed.
+    private fun movesVerifiedBytes(
+        entry: SyncEntry,
+        candidatePath: String,
+        hashes: MutableMap<String, String?>,
+    ): Boolean {
+        val recorded = entry.localHash ?: return true
+        return hashes.getOrPut(candidatePath) { localHashOf(resolveLocal(candidatePath)) } == recorded
     }
 
     private fun detectRemoteRenames(
