@@ -104,6 +104,27 @@ class OneDriveProvider(
             throw e
         }
 
+    // A shared-with-me item cannot be found by its path (it is not in the caller's drive), so it is always fetched by
+    // its id. The other items keep the path-resolving download.
+    override suspend fun downloadById(
+        remoteId: String,
+        remotePath: String,
+        destination: Path,
+    ): Long {
+        if (!SharedItemId.isShared(remoteId)) return super.downloadById(remoteId, remotePath, destination)
+        return try {
+            graphApi.downloadFile(remoteId, destination)
+        } catch (e: GraphApiException) {
+            if (e.isItemNotFound()) {
+                throw PermanentDownloadFailureException(
+                    "OneDrive shared item at '$remotePath' is gone (404 itemNotFound): the download can never succeed until the row is re-resolved",
+                    cause = e,
+                )
+            }
+            throw e
+        }
+    }
+
     private suspend fun downloadResolved(
         remotePath: String,
         destination: Path,
@@ -186,12 +207,14 @@ class OneDriveProvider(
         // A CREATE (existingRemoteId == null) uploads with "fail" so a pre-existing remote at
         // the path is never blind-overwritten (UD-366 data-loss); the create-collision is then
         // resolved by keeping BOTH below.
-        suspend fun put(conflictBehavior: String, etag: String? = null, target: String = remotePath) =
+        // A shared-with-me item is updated in place by its id, in the drive that holds it; there is no path to put it at.
+        val sharedId = existingRemoteId?.takeIf { SharedItemId.isShared(it) }
+        suspend fun put(conflictBehavior: String, etag: String? = null, target: String = remotePath, itemId: String? = null) =
             if (fileSize <= 4 * 1024 * 1024) {
                 val content = Files.readAllBytes(localPath)
-                graphApi.uploadSimple(target, content, fsInfo, conflictBehavior, etag)
+                graphApi.uploadSimple(target, content, fsInfo, conflictBehavior, etag, itemId)
             } else {
-                graphApi.uploadLargeFile(localPath, target, onProgress, fsInfo, conflictBehavior, etag)
+                graphApi.uploadLargeFile(localPath, target, onProgress, fsInfo, conflictBehavior, etag, itemId)
             }
 
         // The drive refused the NAME as equal to a sibling's (a similar name; see [OneDriveServerNames]). Keep-both
@@ -232,10 +255,16 @@ class OneDriveProvider(
             // engine's stale-view window — see #291 for the plan-time-persistence limitation).
             val guardETag =
                 ifMatchETag
-                    ?: runCatching { itemAt(remotePath) }.getOrNull()?.eTag
+                    ?: runCatching { if (sharedId != null) graphApi.getItemById(sharedId) else itemAt(remotePath) }.getOrNull()?.eTag
             return try {
-                put("replace", guardETag).toCloudItem()
+                if (sharedId != null) {
+                    put("replace", guardETag, itemId = sharedId).toCloudItem().copy(id = sharedId, path = remotePath)
+                } else {
+                    put("replace", guardETag).toCloudItem()
+                }
             } catch (e: GraphApiException) {
+                // A keep-both copy would land in the caller's own drive, not beside the shared item: the refusal stands.
+                if (e.statusCode == 412 && sharedId != null) throw e
                 if (e.statusCode == 412) {
                     // #291: 412 Precondition Failed means a concurrent remote edit landed after the
                     // engine planned this replace. Overwriting it would be the classic lost update.
@@ -309,6 +338,13 @@ class OneDriveProvider(
         // Null (the legacy default and the current engine call sites, which persist no plan-time
         // eTag) preserves the unconditional delete-by-id.
         graphApi.deleteItem(item.id, ifMatchETag)
+    }
+
+    override suspend fun deleteById(
+        remoteId: String,
+        remotePath: String,
+    ) {
+        if (SharedItemId.isShared(remoteId)) graphApi.deleteItem(remoteId) else delete(remotePath)
     }
 
     override suspend fun createFolder(path: String): CloudItem {
@@ -422,6 +458,17 @@ class OneDriveProvider(
         rejectUnsupportedName(toPath)
         val item = itemAt(fromPath)
         return graphApi.moveItem(item.id, toPath, fromPath, ifMatchETag = item.eTag).toCloudItem()
+    }
+
+    override suspend fun moveById(
+        remoteId: String,
+        fromPath: String,
+        toPath: String,
+    ): CloudItem {
+        if (!SharedItemId.isShared(remoteId)) return move(fromPath, toPath)
+        rejectUnsupportedName(toPath)
+        val eTag = graphApi.getItemById(remoteId).eTag
+        return graphApi.moveItem(remoteId, toPath, fromPath, ifMatchETag = eTag).toCloudItem().copy(id = remoteId, path = toPath)
     }
 
     private fun rejectUnsupportedName(path: String) {
@@ -540,23 +587,7 @@ class OneDriveProvider(
                 .filterNot { noteAndSkipVault(it) }
                 .map { it.toCloudItem() }
 
-        val sharedItems =
-            graphApi.listSharedWithMe().map { item ->
-                val sharedPath = "/Shared/${item.name ?: "unnamed"}"
-                val modifiedSource = item.fileSystemInfo?.lastModifiedDateTime ?: item.lastModifiedDateTime
-                val createdSource = item.fileSystemInfo?.createdDateTime ?: item.createdDateTime
-                CloudItem(
-                    id = "shared:${item.id}",
-                    name = item.name ?: "unnamed",
-                    path = sharedPath,
-                    size = item.size,
-                    isFolder = item.isFolder,
-                    modified = modifiedSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
-                    created = createdSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
-                    hash = item.file?.hashes?.quickXorHash ?: item.file?.hashes?.sha256Hash,
-                    mimeType = item.file?.mimeType,
-                )
-            }
+        val sharedItems = graphApi.listSharedWithMe().mapNotNull { it.toSharedCloudItem() }
         log.debug("Delta: {} shared items", sharedItems.size)
 
         return CapabilityResult.Success(
@@ -583,6 +614,39 @@ class OneDriveProvider(
                 throw e
             }
         }
+
+    // A shared-with-me entry as the engine sees it. The entry itself is a stub in the caller's drive; the item is
+    // `remoteItem`, and its drive is `remoteItem.parentReference.driveId` (on OneDrive Business the stub has no
+    // parentReference at all, and the file or folder facet and the hashes are only on `remoteItem`). The pair is
+    // what addresses the item (see [SharedItemId]); an entry without it cannot be reached by any call, so it is left out.
+    private fun DriveItem.toSharedCloudItem(): CloudItem? {
+        val remote = remoteItem
+        val itemId = remote?.id?.takeIf { it.isNotEmpty() }
+        val driveId = (remote?.parentReference?.driveId ?: remote?.driveId)?.takeIf { it.isNotEmpty() }
+        if (remote == null || itemId == null || driveId == null) {
+            log.warn("Skipping shared-with-me entry '{}': it names no remote drive and item, so it cannot be addressed", name ?: "(unnamed)")
+            return null
+        }
+        val displayName = name ?: remote.name ?: "unnamed"
+        val hashes = file?.hashes ?: remote.file?.hashes
+        val modifiedSource =
+            fileSystemInfo?.lastModifiedDateTime ?: remote.fileSystemInfo?.lastModifiedDateTime
+                ?: lastModifiedDateTime ?: remote.lastModifiedDateTime
+        val createdSource =
+            fileSystemInfo?.createdDateTime ?: remote.fileSystemInfo?.createdDateTime
+                ?: createdDateTime ?: remote.createdDateTime
+        return CloudItem(
+            id = SharedItemRef(driveId, itemId).id,
+            name = displayName,
+            path = "/Shared/$displayName",
+            size = if (size > 0) size else remote.size ?: 0,
+            isFolder = folder != null || remote.folder != null,
+            modified = modifiedSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
+            created = createdSource?.let { runCatching { Instant.parse(it) }.getOrNull() },
+            hash = hashes?.quickXorHash ?: hashes?.sha256Hash,
+            mimeType = file?.mimeType ?: remote.file?.mimeType,
+        )
+    }
 
     // #287: a deletion tombstone is never the root item. Graph's documented minimal
     // tombstone shape carries just id + removal marker — parentReference, when present

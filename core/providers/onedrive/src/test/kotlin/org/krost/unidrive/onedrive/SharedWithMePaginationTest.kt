@@ -24,7 +24,7 @@ class SharedWithMePaginationTest {
     private fun sharedItem(
         id: String,
         hashes: String = "",
-    ): String = """{"id":"$id","name":"n-$id","size":10,"file":{"mimeType":"text/plain"$hashes}}"""
+    ): String = """{"id":"stub-$id","name":"n-$id","size":10,"remoteItem":{"id":"r-$id","parentReference":{"driveId":"d-$id"},"file":{"mimeType":"text/plain"$hashes}}}"""
 
     private fun page(
         items: List<String>,
@@ -77,7 +77,7 @@ class SharedWithMePaginationTest {
 
             val items = service.listSharedWithMe()
 
-            assertEquals(listOf("a", "b", "c"), items.map { it.id })
+            assertEquals(listOf("stub-a", "stub-b", "stub-c"), items.map { it.id })
             assertEquals(2, seen.size)
             assertTrue(seen[1].contains("skiptoken=PAGE2"), "second request must be the nextLink, was ${seen[1]}")
             service.close()
@@ -132,10 +132,10 @@ class SharedWithMePaginationTest {
 
             val page = assertIs<CapabilityResult.Success<org.krost.unidrive.DeltaPage>>(result).value
             val byId = page.items.associateBy { it.id }
-            assertEquals(setOf("shared:s1", "shared:s2", "shared:s3"), byId.keys)
-            assertEquals("QX1", byId["shared:s1"]?.hash)
-            assertEquals("QX2", byId["shared:s2"]?.hash)
-            assertEquals("SHA3", byId["shared:s3"]?.hash, "sha256Hash is the fallback when quickXorHash is absent")
+            assertEquals(setOf("shared:d-s1:r-s1", "shared:d-s2:r-s2", "shared:d-s3:r-s3"), byId.keys)
+            assertEquals("QX1", byId["shared:d-s1:r-s1"]?.hash)
+            assertEquals("QX2", byId["shared:d-s2:r-s2"]?.hash)
+            assertEquals("SHA3", byId["shared:d-s3:r-s3"]?.hash, "sha256Hash is the fallback when quickXorHash is absent")
             provider.close()
         }
 }

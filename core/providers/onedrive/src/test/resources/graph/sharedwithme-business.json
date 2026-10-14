@@ -1,0 +1,50 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(driveItem)",
+  "value": [
+    {
+      "id": "01ABCDEFGHIJKLMNOPQRSTUVWXYZ0001",
+      "name": "Q3 budget.xlsx",
+      "createdBy": { "user": { "displayName": "Pat Colleague" } },
+      "lastModifiedDateTime": "2025-09-12T14:21:09Z",
+      "size": 83011,
+      "remoteItem": {
+        "id": "01Z6X7Y8W9V0U1T2S3R4Q5P6O7N8M9L0",
+        "name": "Q3 budget.xlsx",
+        "size": 83011,
+        "webUrl": "https://contoso-my.sharepoint.com/personal/pat_contoso_com/Documents/Q3%20budget.xlsx",
+        "createdDateTime": "2025-09-01T07:00:00Z",
+        "lastModifiedDateTime": "2025-09-12T14:21:09Z",
+        "fileSystemInfo": {
+          "createdDateTime": "2025-09-01T07:00:00Z",
+          "lastModifiedDateTime": "2025-09-12T14:21:09Z"
+        },
+        "file": {
+          "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "hashes": { "quickXorHash": "QnVzaW5lc3NRdWlja1hvcjEyMw==" }
+        },
+        "parentReference": {
+          "driveId": "b!Tq3m-8XkZr9PLwq1Ef2g_dHs0aBcDeFgHiJkLmNoPqRsTuVwXyZ012345678",
+          "driveType": "business"
+        },
+        "shared": { "sharedDateTime": "2025-09-10T10:00:00Z" }
+      }
+    },
+    {
+      "id": "01ABCDEFGHIJKLMNOPQRSTUVWXYZ0002",
+      "name": "Project Atlas",
+      "lastModifiedDateTime": "2025-08-20T08:30:00Z",
+      "size": 4096,
+      "remoteItem": {
+        "id": "01A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5",
+        "name": "Project Atlas",
+        "size": 4096,
+        "folder": { "childCount": 12 },
+        "parentReference": {
+          "driveId": "b!Zk9_3pQrStUvWx-YzAbCdEfGhIjKlMnOpQrStUvWxYz987654321",
+          "driveType": "business"
+        },
+        "shared": { "sharedDateTime": "2025-08-19T10:00:00Z" }
+      }
+    }
+  ]
+}

@@ -134,6 +134,12 @@ data class RemoteItem(
     @SerialName("id") val id: String? = null,
     @SerialName("name") val name: String? = null,
     @SerialName("driveId") val driveId: String? = null,
+    @SerialName("size") val size: Long? = null,
+    @SerialName("lastModifiedDateTime") val lastModifiedDateTime: String? = null,
+    @SerialName("createdDateTime") val createdDateTime: String? = null,
+    @SerialName("fileSystemInfo") val fileSystemInfo: FileSystemInfo? = null,
+    // The drive that holds the item: for a shared-with-me item this is the only place it appears.
+    @SerialName("parentReference") val parentReference: ParentReference? = null,
     @SerialName("folder") val folder: FolderDetails? = null,
     @SerialName("file") val file: FileDetails? = null,
 )

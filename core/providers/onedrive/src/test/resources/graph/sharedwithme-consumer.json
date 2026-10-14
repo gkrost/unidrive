@@ -1,0 +1,49 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#Collection(driveItem)",
+  "value": [
+    {
+      "id": "A1B2C3D4E5F60718!s9f8e7d6c5b4a39281",
+      "name": "Holiday photos.zip",
+      "size": 52428800,
+      "createdDateTime": "2025-03-02T10:15:30.1Z",
+      "lastModifiedDateTime": "2025-03-04T08:00:00Z",
+      "webUrl": "https://1drv.ms/u/s!AhgH5vXQsLOhoEEXAMPLE",
+      "file": { "mimeType": "application/zip" },
+      "remoteItem": {
+        "id": "C0FFEE0123456789!1042",
+        "name": "Holiday photos.zip",
+        "size": 52428800,
+        "createdDateTime": "2025-03-01T09:00:00Z",
+        "lastModifiedDateTime": "2025-03-03T09:00:00Z",
+        "fileSystemInfo": {
+          "createdDateTime": "2025-03-01T09:00:00Z",
+          "lastModifiedDateTime": "2025-03-03T09:00:00Z"
+        },
+        "file": {
+          "mimeType": "application/zip",
+          "hashes": { "quickXorHash": "cXVpY2t4b3JoYXNoMTIzNDU=", "sha1Hash": "0123456789ABCDEF0123456789ABCDEF01234567" }
+        },
+        "parentReference": { "driveId": "c0ffee0123456789", "driveType": "personal" },
+        "shared": { "owner": { "user": { "displayName": "Alex Owner", "id": "c0ffee0123456789" } } },
+        "webUrl": "https://1drv.ms/u/s!AhgH5vXQsLOhoEEXAMPLE"
+      }
+    },
+    {
+      "id": "A1B2C3D4E5F60718!s11aa22bb33cc44dd5",
+      "name": "Family archive",
+      "size": 1048576,
+      "createdDateTime": "2025-02-01T12:00:00Z",
+      "lastModifiedDateTime": "2025-02-02T12:00:00Z",
+      "webUrl": "https://1drv.ms/f/s!AhgH5vXQsLOhoEFOLDER",
+      "folder": { "childCount": 7 },
+      "remoteItem": {
+        "id": "D00D00D00D00D00D!77",
+        "name": "Family archive",
+        "size": 1048576,
+        "folder": { "childCount": 7 },
+        "parentReference": { "driveId": "d00d00d00d00d00d", "driveType": "personal" },
+        "shared": { "owner": { "user": { "displayName": "Sam Owner", "id": "d00d00d00d00d00d" } } }
+      }
+    }
+  ]
+}
