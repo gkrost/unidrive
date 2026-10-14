@@ -207,9 +207,13 @@ class HistoryReaderTest {
         finished(history, "/a", 1_000, 2_000)
         assertTrue(history.flush())
         val r = reader(history)
-        // The writer has a backlog; a query on the reader's own connection answers regardless.
+        // The writer has a backlog; a query on the reader's own connection answers from committed
+        // rows without waiting for the writer thread. The queue drops instead of blocking, so how
+        // many of the 2000 backlog rows are committed by the time the query runs is scheduling —
+        // only that at least the flushed /a is visible is deterministic.
         repeat(2_000) { finished(history, "/bulk$it", 3_000L + it, 3_001L + it) }
-        assertEquals(5, r.query(HistoryQuery(limit = 5)).rows.size)
+        val during = r.query(HistoryQuery(limit = 5)).rows
+        assertTrue(during.isNotEmpty(), "the reader answers from its own connection while the writer has a backlog")
         assertTrue(history.flush())
         assertEquals(HistoryQuery.MAX_LIMIT, r.query(HistoryQuery(limit = HistoryQuery.MAX_LIMIT)).rows.size)
     }
