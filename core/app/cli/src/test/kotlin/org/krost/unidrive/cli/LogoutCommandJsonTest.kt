@@ -193,6 +193,20 @@ class LogoutCommandJsonTest {
     }
 
     @Test
+    fun `credentials_removed does not count the deleted state files`() {
+        populate()
+        writeState()
+        Files.deleteIfExists(workDir.resolve("credentials.json"))
+        Files.deleteIfExists(workDir.resolve("device-flow.json"))
+
+        assertEquals(0, run("logout", "--json", "--delete-state"), stderr())
+
+        val r = json()
+        assertFalse(r.getValue("credentials_removed").jsonPrimitive.boolean)
+        assertFalse(Files.exists(workDir.resolve("state.db")))
+    }
+
+    @Test
     fun `keep-state wins over delete-state`() {
         populate()
         writeState()

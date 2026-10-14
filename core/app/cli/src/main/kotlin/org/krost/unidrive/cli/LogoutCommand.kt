@@ -309,7 +309,8 @@ private fun logoutStoppedProfile(
         } finally {
             runCatching { provider.close() }
         }
-    val removed = deleteCredentialFiles(target.profileDir).toMutableList()
+    val removedCredentials = deleteCredentialFiles(target.profileDir)
+    val removed = removedCredentials.toMutableList()
     var stateKept = true
     if (delete) {
         removed += deleteStateFiles(target.profileDir)
@@ -319,7 +320,7 @@ private fun logoutStoppedProfile(
         buildJsonObject {
             put("ok", true)
             put("profile", target.name)
-            put("credentials_removed", removed.isNotEmpty())
+            put("credentials_removed", removedCredentials.isNotEmpty())
             put("revoked", when (revoked) {
                 Revocation.REVOKED -> JsonPrimitive(true)
                 Revocation.FAILED -> JsonPrimitive(false)
@@ -339,7 +340,9 @@ private fun logoutStoppedProfile(
 internal fun sendAuthLogout(
     endpoint: IpcEndpoint,
     force: Boolean,
-    timeoutMs: Long = 5_000,
+    // Long enough for the daemon to finish its token revocation (a network round trip) before answering;
+    // giving up early would read as an unanswered daemon although the sign-out went through.
+    timeoutMs: Long = 30_000,
 ): JsonObject? {
     if (!Files.exists(endpoint.socketPath)) return null
     return try {
