@@ -54,7 +54,7 @@ class S3Exception(
     val status: Int,
     val code: String,
     requestId: String? = null,
-) : ProviderException(message, requestId = requestId)
+) : ProviderException(message, requestId = requestId, httpStatus = status)
 
 /** One object as a listing or a HEAD reports it. [etag] is without quotes; [mtime] is `x-amz-meta-mtime` when a HEAD read it. */
 data class S3Object(

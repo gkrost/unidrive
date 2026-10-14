@@ -1354,7 +1354,7 @@ class GraphApiException(
     message: String,
     val statusCode: Int = 0,
     requestId: String? = null,
-) : ProviderException(message, requestId = requestId)
+) : ProviderException(message, requestId = requestId, httpStatus = statusCode.takeIf { it > 0 })
 
 // Where an upload lands: [remotePath] names the file, [itemId] (when set) is the existing item it replaces in place.
 private class UploadTarget(

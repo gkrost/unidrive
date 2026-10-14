@@ -324,6 +324,7 @@ Read-only verb; takes no parameters; never returns `ok: false` (a daemon that ca
 | `eta_s`, `eta_kind` | seconds left while listing. `lower_bound`: only the known queue of the folder walk is counted, the real value can be larger. `estimate`: the totals of a previous complete full enumeration give the size of the whole. Absent when neither is known |
 | `last_success_at_ms` | end of the last completed enumeration (epoch ms) |
 | `last_error` | the reason the last attempt failed, until a success: one line, at most 200 characters, with paths, quoted names, addresses and URLs replaced by placeholders |
+| `last_error_code` | #878: a machine-readable cause for the failure, until a success: `http_<status>` for an API error (`http_408`), `auth_rejected` when the provider refused the credentials, otherwise the transport class (`timeout`, `dns`, `tls`, `connect`, `reset`, `io`). Absent when unknown; the field is additive and the wording stays the client's |
 | `next_attempt_at_ms` | while `failed` and the poller runs: when it tries again (epoch ms, the jittered sleep it takes) |
 
 The reply also carries `poll_interval_ms` (additive, #463): the effective interval of the remote poll in ms, `0` when it is off. The poll's schedule after a failure is `enumeration.next_attempt_at_ms`.
