@@ -5,6 +5,9 @@ import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Instant
+import org.krost.unidrive.sync.StateDatabase
+import org.krost.unidrive.sync.model.SyncEntry
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -13,11 +16,16 @@ import kotlin.test.assertTrue
 class GetCommandExclusionTest {
     private class Run(val exit: Int, val out: String, val err: String)
 
-    private fun get(vararg args: String, setup: (remoteRoot: Path) -> Unit): Pair<Run, Path> {
+    private fun get(
+        vararg args: String,
+        seed: (profileDir: Path) -> Unit = {},
+        setup: (remoteRoot: Path) -> Unit,
+    ): Pair<Run, Path> {
         val configDir = Files.createTempDirectory("get-excluded-config")
         val localRoot = Files.createDirectories(configDir.resolve("local"))
         val remoteRoot = Files.createDirectories(configDir.resolve("remote"))
         setup(remoteRoot)
+        seed(Files.createDirectories(configDir.resolve("test")))
         Files.writeString(
             configDir.resolve("config.toml"),
             """
@@ -59,7 +67,22 @@ class GetCommandExclusionTest {
 
     @Test
     fun `get on a folder holding only excluded files skips them and exits zero`() {
-        val (run, configDir) = get("/docs") {
+        val (run, configDir) = get(
+            "/docs",
+            seed = { profileDir ->
+                // What a sync would have recorded: the folder and its two files, not yet downloaded.
+                StateDatabase(profileDir.resolve("state.db")).also { db ->
+                    db.initialize()
+                    try {
+                        db.upsertEntry(row("/docs", isFolder = true))
+                        db.upsertEntry(row("/docs/a.tmp", isFolder = false))
+                        db.upsertEntry(row("/docs/b.tmp", isFolder = false))
+                    } finally {
+                        db.close()
+                    }
+                }
+            },
+        ) {
             Files.createDirectories(it.resolve("docs"))
             Files.writeString(it.resolve("docs/a.tmp"), "x")
             Files.writeString(it.resolve("docs/b.tmp"), "y")
@@ -74,5 +97,20 @@ class GetCommandExclusionTest {
         }
     }
 
-    private fun tomlPath(path: Path): String = path.toString().replace('\', '/')
+    private fun row(path: String, isFolder: Boolean) =
+        SyncEntry(
+            path = path,
+            remoteId = "r-$path",
+            remoteHash = null,
+            remoteSize = if (isFolder) 0 else 1,
+            remoteModified = null,
+            localMtime = null,
+            localSize = null,
+            isFolder = isFolder,
+            isPinned = false,
+            isHydrated = false,
+            lastSynced = Instant.now(),
+        )
+
+    private fun tomlPath(path: Path): String = path.toString().replace('\\', '/')
 }

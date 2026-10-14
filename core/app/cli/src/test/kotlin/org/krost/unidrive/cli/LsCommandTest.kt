@@ -200,8 +200,7 @@ class LsCommandTest {
     fun `the exclusion guard marks ignore-rule folders and files like the daemon`() {
         val cache = java.nio.file.Files.createTempDirectory("ls-ignore-cache")
         try {
-            java.nio.file.Files.writeString(cache.resolve(".unidrive.ignore"), "build/
-")
+            java.nio.file.Files.writeString(cache.resolve(".unidrive.ignore"), "build/\n")
             val guard =
                 exclusionGuard(
                     patterns = listOf("*.tmp"),
