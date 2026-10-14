@@ -1,0 +1,8 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>TooManyFunctions:S3Api.kt$S3Api : AutoCloseable</ID>
+    <ID>TooManyFunctions:S3Provider.kt$S3Provider : CloudProvider</ID>
+  </CurrentIssues>
+</SmellBaseline>

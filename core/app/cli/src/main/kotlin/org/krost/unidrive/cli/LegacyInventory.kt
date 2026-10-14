@@ -158,8 +158,11 @@ internal object LegacyInventory {
 
     /**
      * The provider's content-hash algorithm, by type, so the inventory never constructs a provider (no credentials,
-     * no network). Must agree with `CloudProvider.hashAlgorithm()`: OneDrive stores quickXor in `remote_hash`, Dropbox its content hash;
-     * Internxt stores a version token there, localfs nothing.
+     * no network). Must agree with `CloudProvider.hashAlgorithm()`: OneDrive stores quickXor in `remote_hash`, Dropbox
+     * its content hash; Internxt stores a version token there, localfs nothing. S3 deliberately maps to none: its ETag
+     * is an MD5 only for a plain single-part upload (multipart ETags carry a `-N` suffix, SSE-KMS ones are opaque), and
+     * `HashVerifier.matches` treats a multipart ETag as equal, so the inventory would call unverified rows clean; size
+     * alone classifies them instead.
      */
     fun contentHashAlgorithm(providerType: String): HashAlgorithm? =
         when (providerType.lowercase()) {
