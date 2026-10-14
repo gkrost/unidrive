@@ -36,6 +36,9 @@ class RemoteEnumeration(
     private val reapGuards: ReapGuards,
     // The engine's logger, so the moved log lines keep their logger name.
     private val log: Logger,
+    // #147: how many remote rows one merge transaction upserts. Tests drive chunk
+    // boundaries with a handful of items; production uses the companion default.
+    private val mergeChunkRows: Int = MERGE_CHUNK_ROWS,
 ) {
     /**
      * What the reap asks the hydration layer before it evicts a cache file. Both are
@@ -231,13 +234,35 @@ class RemoteEnumeration(
         // map them through the alias reverse map like the reap paths.
         var upsertedViewPaths: Set<String> = emptySet()
         var movedView: List<RemoteMerge.Move> = emptyList()
-        db.batch {
-            val merge = gather.updateRemoteEntries(remoteChanges)
-            upsertedViewPaths = merge.changedPaths
-            movedView =
+        // #147: the merge runs in chunks of separate transactions. One batch over a full
+        // enumeration held StateDatabase's monitor for the whole merge — a reset over
+        // hundreds of thousands of rows stalled every concurrent mount read for the
+        // run's length. Each chunk's commit releases the monitor, so a reader waits at
+        // most one chunk. The merge is row-at-a-time and the gather has already
+        // persisted the cursor before this point, so a chunk boundary adds no new crash
+        // exposure: untouched rows keep their previous truth and the next enumeration
+        // re-derives them. Entries sort ancestors-first so the #601 parent guard's DB
+        // fallback reads a parent row this pass already updated, and the alias map
+        // derives once from the full change set (see the RemoteGather overload) — a
+        // chunk on its own may not contain the top-level folder an aliased path needs.
+        val merges =
+            remoteChanges.entries
+                .sortedBy { it.key }
+                .chunked(mergeChunkRows)
+                .map { chunk ->
+                    val chunkMap = buildMap<String, CloudItem>(chunk.size) { chunk.forEach { put(it.key, it.value) } }
+                    db.batch { gather.updateRemoteEntries(chunkMap, canonicalToLocalTop, remoteChanges) }
+                }
+        upsertedViewPaths = buildSet { merges.forEach { addAll(it.changedPaths) } }
+        movedView =
+            merges.flatMap { merge ->
                 merge.moved.map {
                     RemoteMerge.Move(applyReverseTop(it.from, canonicalToLocalTop), applyReverseTop(it.to, canonicalToLocalTop))
                 }
+            }
+        // The reap needs the merge committed and runs as its own transaction; a crash
+        // between the chunks and this batch leaves the reap to the next enumeration.
+        db.batch {
             if (complete) {
                 // Reap ONLY on a complete enumeration (spec §3.1). The deleted items are
                 // already present in remoteChanges: RemoteGather.gather runs
@@ -343,6 +368,10 @@ class RemoteEnumeration(
         // rows) to deleted defers reaping until a second complete enumeration corroborates.
         const val BULK_REAP_ABSOLUTE: Int = 50
         const val BULK_REAP_FRACTION: Double = 0.20
+
+        // #147: rows per merge transaction. Bounded so a concurrent mount read waits at
+        // most one chunk's commit rather than a whole-enumeration batch.
+        const val MERGE_CHUNK_ROWS: Int = 5_000
 
         // sync_state keys: what the last complete full enumeration found (live items, live folders)
         // and how long its listing took, the estimate behind the next one's ETA. Not the

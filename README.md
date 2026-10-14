@@ -88,7 +88,7 @@ Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/l
 - `auth` — OAuth/token provisioning
 - `profile` — multi-profile management (`add`, `list`, `remove`)
 - `backup` — backup profiles (`add`, `list`)
-- `logout` — destroy session, invalidate credentials
+- `logout` — sign out: revoke the token, remove stored credentials; the sync state is kept (`--delete-state` removes it), and a running daemon performs the sign-out over IPC (`--json` for front-ends)
 
 ### Sync
 - `sync` — run the sync engine (`SyncEngine`, the engine the MVP ships); the frozen tracking-set engine is reachable only as `ts`

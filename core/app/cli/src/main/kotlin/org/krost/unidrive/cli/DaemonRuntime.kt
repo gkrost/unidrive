@@ -604,6 +604,19 @@ class DaemonRuntime(
                 server.registerHandler("daemon.pause") { _, json -> pauseHandler.pause(json) }
                 server.registerHandler("daemon.resume") { _, _ -> pauseHandler.resume() }
 
+                // auth.logout (§4.10): sign the account out while the daemon keeps running — the daemon is the
+                // profile-lock holder, so the credential removal is its job (the CLI hands it over over IPC).
+                // It refuses while uploads are pending (without credentials they cannot finish) and never
+                // touches state.db. Both modes: a mirror daemon is signed out like a mount one.
+                val logoutHandler =
+                    AuthLogoutRpcHandler(
+                        profileDir = ipcTokenDir,
+                        db = db!!,
+                        providerFactory = providerFactory,
+                        markUnauthenticated = { provider.isAuthenticated = false },
+                    )
+                server.registerHandler(AuthLogoutRpcHandler.VERB) { _, json -> logoutHandler.handle(json) }
+
                 // metrics.query (#654): the per-minute roll-ups of the provider's request attempts. A mount profile with an open
                 // history records them; a mirror daemon (no history) answers "not recording", never zeros.
                 val requestMetrics = transferHistory?.requestMetrics()?.also { provider.attachRequestMetrics(it) }

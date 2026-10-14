@@ -396,6 +396,8 @@ class DaemonRuntimeTest {
                     """{"verb":"ignore.explain","path":"/startup/build/out.o"}""",
                     // No handler exists for this verb; the client must still learn that.
                     """{"verb":"daemon.statusx"}""",
+                    // §4.10: signs the stub account out (the corpus pins the reply shape); the daemon keeps running.
+                    """{"verb":"auth.logout"}""",
                     """{"verb":"daemon.shutdown"}""",
                 )
                 // The IPC verb classes (IpcAuth) name exactly these verbs: each reaches a handler below,

@@ -91,7 +91,7 @@ Classified by the exact wire string; a verb that is not listed is `admin` (defau
 |---|---|
 | read | `daemon.status`, `hydration.list`, `hydration.last_synced`, `hydration.subscribe`, `sync.subscribe`, `hydration.open_read`, `history.list`, `history.subscribe`, `metrics.query`, `ignore.explain` |
 | write | `hydration.hydrate`, `hydration.dehydrate`, `hydration.create`, `hydration.open_write`, `hydration.open_write_begin`, `hydration.close_handle`, `hydration.mkdir`, `hydration.unlink`, `hydration.rmdir`, `hydration.rename`, `hydration.cancel`, `sync.enumerate` |
-| admin | `daemon.shutdown`, `daemon.pause`, `daemon.resume`, `refresh.run` |
+| admin | `daemon.shutdown`, `daemon.pause`, `daemon.resume`, `refresh.run`, `auth.logout` |
 
 Scope `full` may call every verb; scope `read` only the read class. A refused request gets
 `{"ok":false,"error":"forbidden","scope":"read"}` and the connection stays open. For a `read`

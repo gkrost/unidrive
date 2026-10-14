@@ -38,6 +38,25 @@ open class AuthenticationException(
 ) : ProviderException(message, cause, requestId)
 
 /**
+ * The credentials are missing or expired and the only way forward is an interactive sign-in — but
+ * the caller has no interactive terminal to answer one. Raised instead of prompting on stdin, so a
+ * daemon/mount start (hidden window, systemd, a front-end) fails fast instead of camping forever on
+ * a read nobody will ever answer. An `AuthenticationException`, so every existing handler keeps its
+ * behaviour; front-ends additionally match [REASON] in the message or the start log and offer their
+ * own sign-in flow (`unidrive -p <profile> auth` on a terminal, `auth login` without one).
+ */
+open class AuthRequiredException(
+    message: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : AuthenticationException(message, cause, requestId) {
+    companion object {
+        /** The stable reason token a front-end greps the start log for. */
+        const val REASON = "auth_required"
+    }
+}
+
+/**
  * Signals a transient network failure (DNS blip, connection reset, timeout)
  * during an operation that retrying may recover — distinct from a permanent
  * auth failure. It is deliberately NOT an [AuthenticationException]: a

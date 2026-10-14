@@ -795,15 +795,32 @@ class RemoteGather(
         )
     }
 
-    fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>): RemoteMerge {
-        // #115: the remoteChanges keys are canonical remote paths. Build a
-        // canonical→real-local reverse map so a newly-arrived aliased item is
+    fun updateRemoteEntries(remoteChanges: Map<String, CloudItem>): RemoteMerge =
+        updateRemoteEntries(remoteChanges, localTopAliases(remoteChanges))
+
+    /**
+     * #147: the chunked caller derives the alias map once from the FULL change set and passes it
+     * in. The aliases come from the change set's top-level names, and a chunk on its own may not
+     * contain the top-level folder an aliased path inside it needs — deriving per chunk would key
+     * that path at its canonical name, where LocalScanner can never find it on disk.
+     *
+     * [guardContext] is the same story for the #601 parent guard: it asks whether the parent was
+     * delivered (alive or deleted) in this enumeration, and a chunk's own map does not hold a
+     * parent that landed in an earlier chunk — a deleted parent would read as absent and fall back
+     * to its still-present row, letting the dead folder's stale child through. Defaults to the
+     * chunk itself (the unchunked call).
+     */
+    fun updateRemoteEntries(
+        remoteChanges: Map<String, CloudItem>,
+        remoteToLocalTop: Map<String, String>,
+        guardContext: Map<String, CloudItem> = remoteChanges,
+    ): RemoteMerge {
+        // #115: the remoteChanges keys are canonical remote paths. An aliased item is
         // persisted at its REAL-LOCAL path (with the canonical in remote_path),
         // not as a phantom canonical-keyed row that LocalScanner can never find
         // on disk. Existing rows are matched by effective remote path so the
         // merge preserves their real-local path + remote_path. No alias active
         // → both helpers are identity and this is byte-identical to pre-#115.
-        val remoteToLocalTop = localTopAliases(remoteChanges)
         // Folders the drive holds under another name than their local one (a name it refused, landed under a server
         // name): a NEW item beneath such a folder arrives at the server path and is keyed at the local path.
         val folderOverrides = db.foldersWithRemotePath().sortedByDescending { it.second.length }
@@ -811,36 +828,7 @@ class RemoteGather(
         val moved = mutableListOf<RemoteMerge.Move>()
         for ((path, item) in remoteChanges) {
             if (item.deleted) continue // skip deleted items
-            // #601: the lagging-delta parent guard. Internxt does not cascade a folder's
-            // deletion to its children (the server flags the folder alone), so a trashed
-            // folder's child keeps reporting EXISTS with the DEAD folder as its parent id.
-            // When such a stale row arrives after the path was re-created under the same
-            // name, the path-keyed upsert resurrects the dead file inside the new folder.
-            // An item is therefore upserted as alive only when its own parent id matches
-            // the remote id of the live row at its parent path. Unknown parents pass:
-            // a first enumeration may deliver a child before its parent row exists, and
-            // the next complete enumeration re-derives the truth. Providers whose items
-            // carry no parent id (OneDrive's mapper) are unaffected — null passes.
-            val parentPath = path.substringBeforeLast('/', missingDelimiterValue = "/")
-            if (item.parentId != null && parentPath != "/") {
-                val incomingParent = remoteChanges[parentPath]
-                val liveParentId =
-                    when {
-                        incomingParent?.deleted == true -> null
-                        incomingParent != null -> incomingParent.id
-                        else -> db.getEntryByRemotePath(parentPath)?.remoteId
-                    }
-                if (incomingParent?.deleted == true || (liveParentId != null && liveParentId != item.parentId)) {
-                    log.debug(
-                        "#601: skipped stale delta item {}: parent id {} does not match the live row at {} ({})",
-                        path,
-                        item.parentId,
-                        parentPath,
-                        liveParentId,
-                    )
-                    continue
-                }
-            }
+            if (staleDeltaItem(path, item, guardContext)) continue
             val realLocalPath = applyReverseFolders(path, folderOverrides).takeIf { it != path } ?: applyReverseTop(path, remoteToLocalTop)
             val isAliased = realLocalPath != path
             // Match an existing row by effective remote path (handles aliased
@@ -936,6 +924,44 @@ class RemoteGather(
             }
         }
         return RemoteMerge(changedPaths = changed, moved = moved)
+    }
+
+    // #601: the lagging-delta parent guard. Internxt does not cascade a folder's
+    // deletion to its children (the server flags the folder alone), so a trashed
+    // folder's child keeps reporting EXISTS with the DEAD folder as its parent id.
+    // When such a stale row arrives after the path was re-created under the same
+    // name, the path-keyed upsert resurrects the dead file inside the new folder.
+    // An item is therefore upserted as alive only when its own parent id matches
+    // the remote id of the live row at its parent path. Unknown parents pass:
+    // a first enumeration may deliver a child before its parent row exists, and
+    // the next complete enumeration re-derives the truth. Providers whose items
+    // carry no parent id (OneDrive's mapper) are unaffected — null passes.
+    // True when [item] at [path] is that stale case, and the caller must skip it.
+    private fun staleDeltaItem(
+        path: String,
+        item: CloudItem,
+        remoteChanges: Map<String, CloudItem>,
+    ): Boolean {
+        val parentPath = path.substringBeforeLast('/', missingDelimiterValue = "/")
+        if (item.parentId == null || parentPath == "/") return false
+        val incomingParent = remoteChanges[parentPath]
+        val liveParentId =
+            when {
+                incomingParent?.deleted == true -> null
+                incomingParent != null -> incomingParent.id
+                else -> db.getEntryByRemotePath(parentPath)?.remoteId
+            }
+        if (incomingParent?.deleted == true || (liveParentId != null && liveParentId != item.parentId)) {
+            log.debug(
+                "#601: skipped stale delta item {}: parent id {} does not match the live row at {} ({})",
+                path,
+                item.parentId,
+                parentPath,
+                liveParentId,
+            )
+            return true
+        }
+        return false
     }
 
     companion object {

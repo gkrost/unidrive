@@ -1,5 +1,7 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.AuthRequiredException
+import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
 import org.krost.unidrive.sync.IpcAuthException
@@ -68,6 +70,16 @@ class DaemonRunCommand : Runnable {
         // #603 (U4): the hosting contract. The daemon serves both modes, but a profile without a mode is
         // refused before any provider write, token rotation or mutable startup recovery.
         val mode = parent.requireAnyProfileMode(profile, "daemon run")
+        // #865: a daemon start never runs an interactive sign-in. When the offline credential
+        // check says the profile cannot authenticate without one, refuse here — typed reason on
+        // stderr (the start log a front-end reads), non-zero exit — instead of letting the
+        // provider camp on its prompt. useVault = true because the start's own provider creation
+        // merges vault credentials; a vault-stored S3 key must not read as "missing" here.
+        val health = parent.checkCredentialHealth(profile, parent.providerConfigDir(), useVault = true)
+        daemonStartCredentialRefusal(profile.name, health)?.let { refusal ->
+            System.err.println(refusal)
+            kotlin.system.exitProcess(parent.MODE_REFUSAL_EXIT)
+        }
         val config = parent.loadSyncConfig()
         // Owner-only permissions, also for what an earlier version created: the credentials and the
         // profile folder, the IPC folder (defaultSocketPath), then the hydration cache and the logs.
@@ -549,4 +561,39 @@ internal fun applyPositionalProfile(parent: Main, positional: String?) {
         parent.provider = positional
         parent.invalidateProfileCaches()
     }
+}
+
+/**
+ * #865: the one-line start refusal when the profile's offline credential health says the daemon
+ * cannot authenticate without an interactive sign-in; null = the start may proceed. "Expired" is
+ * decided by the same remainingMs-exact mapping daemon.status's credential_health uses
+ * ([CredentialHealthMonitor.toReading]), so a start and a running daemon mean the same thing by
+ * "expired" — a credential still inside its validity (EXPIRING) never refuses a start.
+ *
+ * The line names the profile, carries the stable [AuthRequiredException.REASON] token for a
+ * front-end to match in the start log, and ends with the sign-in-again remedy.
+ */
+internal fun daemonStartCredentialRefusal(
+    profileName: String,
+    health: CredentialHealth,
+): String? {
+    val needsSignIn =
+        when (CredentialHealthMonitor.toReading(health, checkedAtMs = 0L).state) {
+            CredentialHealthMonitor.State.OK, CredentialHealthMonitor.State.EXPIRING -> false
+            CredentialHealthMonitor.State.EXPIRED,
+            CredentialHealthMonitor.State.MISSING,
+            CredentialHealthMonitor.State.UNKNOWN,
+            -> true
+        }
+    if (!needsSignIn) return null
+    val detail =
+        when (health) {
+            is CredentialHealth.Missing -> health.message
+            is CredentialHealth.Warning -> health.message
+            is CredentialHealth.ExpiresIn -> health.message
+            is CredentialHealth.Ok -> "credential check inconclusive"
+        }
+    return "Error: unidrive daemon: ${AuthRequiredException.REASON}: profile '$profileName' needs a " +
+        "sign-in before it can start ($detail); refusing to prompt without an interactive terminal. " +
+        "Sign in again: unidrive -p $profileName auth"
 }

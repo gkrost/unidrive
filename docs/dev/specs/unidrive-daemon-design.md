@@ -532,6 +532,23 @@ Each subscriber has a bounded queue (256 snapshots). When one falls behind, the 
 
 READ class. The per-minute roll-ups of this daemon's provider request attempts (counts, outcome classes, header and total time p50/p95, bytes), read from the profile's `telemetry.db`. A mount daemon records them; a mirror daemon answers `recording:false` and an empty series. No data is an empty series with `has_data:false`, never zeros. The request, the reply, what an attempt is, the retention windows and the byte budget shared with the transfer history are in `request-metrics.md`.
 
+### 4.10 `auth.logout`
+
+ADMIN class, both profile modes. A front-end signs an account out while its daemon is running: the daemon is the profile-lock holder, so the credential removal is its job — the CLI hands it over instead of refusing, the way `logout` used to (and a running account is exactly the case a front-end's sign-out button meets most).
+
+The request is `{"verb": "auth.logout"}`, or `{"verb": "auth.logout", "force": true}` to sign out past pending uploads. The daemon refuses while its state.db still holds uploads on their way — without credentials they cannot finish, and `profile remove` counts them by the same rule (pending minus failed; failed rows alone do not block):
+
+```json
+{"verb": "auth.logout"}
+{"ok":false,"error":"uploads_pending","pending":3,"failed":1}
+{"verb": "auth.logout", "force": true}
+{"ok":true,"revoked":true,"credentials_removed":true}
+```
+
+On acceptance the daemon revokes the provider's token with a freshly built provider (the way the quota refresh builds one), then deletes the credential files (`token.json`, `credentials.json`, `device-flow.json`) from the profile folder. `revoked` is `true` when the provider confirmed the revocation, `false` when it could not be reached or refused it (the local cleanup goes on either way), `null` when the profile was already signed out. `credentials_removed` says whether any credential file was deleted (a repeated sign-out answers `false`). A credential marker whose OS secret-store item cannot be removed refuses the whole sign-out with `{"ok":false,"error":"credential_protection_unavailable"}` — nothing is deleted, and it can be retried once the store is unlocked.
+
+The daemon never touches `state.db` or `failures.jsonl` (a front-end's sign-out must not lose the sync state, and the daemon holds state.db open) and keeps running: the engine's provider is marked unauthenticated at once, so `daemon.status` reports `authenticated:false`, and the next credential-health check reports the missing credentials. Transfers after the sign-out fail with authentication errors until the account signs in again — the reply plus `daemon.status` are what a front-end words "this account is signed out" from.
+
 ## 5. Invariants and failure modes
 
 ### 5.1 Invariants

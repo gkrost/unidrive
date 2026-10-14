@@ -44,7 +44,8 @@ internal object ProfileRemoveHooks {
  * as kept. Nothing it returns or throws carries a secret, only names and counts.
  */
 internal object ProfileRemover {
-    private enum class Holder { NONE, DAEMON, OTHER }
+    /** Who holds a profile: nobody, a daemon (the socket answers or the lock says so), or another unidrive process. Shared by `logout`. */
+    internal enum class Holder { NONE, DAEMON, OTHER }
 
     /** What [remove] did. */
     class Result(
@@ -96,8 +97,9 @@ internal object ProfileRemover {
      * the rows are those the daemon reports as `uploads.pending` (same query); `failed` is the subset with a failed
      * attempt on record. Failed uploads alone do not block: the user decides about those. A missing state.db has
      * nothing pending; one that exists but cannot be read is refused, since nothing can be said about it.
+     * Shared with `logout`, which refuses for the same reason (without credentials the pending uploads cannot finish).
      */
-    private fun refuseIfUploadsPending(
+    internal fun refuseIfUploadsPending(
         profileDir: Path,
         name: String,
     ) {
@@ -160,7 +162,8 @@ internal object ProfileRemover {
         }
     }
 
-    private fun holderOf(
+    /** Who holds [profileDir]: nobody, a daemon (shared with `logout`, which hands a sign-out to it), or another unidrive process. */
+    internal fun holderOf(
         profileDir: Path,
         socket: Path,
     ): Holder {

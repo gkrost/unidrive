@@ -218,7 +218,7 @@ class IpcAuth(
                     "hydration.open_write_begin", "hydration.close_handle", "hydration.mkdir", "hydration.unlink",
                     "hydration.rmdir", "hydration.rename", "hydration.cancel", "sync.enumerate",
                 ).forEach { put(it, VerbClass.WRITE) }
-                listOf("daemon.shutdown", "daemon.pause", "daemon.resume", "refresh.run").forEach { put(it, VerbClass.ADMIN) }
+                listOf("daemon.shutdown", "daemon.pause", "daemon.resume", "refresh.run", "auth.logout").forEach { put(it, VerbClass.ADMIN) }
             }
 
         fun classOf(verb: String): VerbClass = VERB_CLASSES[verb] ?: VerbClass.ADMIN
