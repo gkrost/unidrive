@@ -7,6 +7,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonPrimitive
+import org.krost.unidrive.AuthRequiredException
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import java.nio.file.Files
 import java.nio.file.Path
@@ -716,5 +717,30 @@ class InternxtAuthServiceTest {
         val function: suspend (InternxtConfig, String, String, String?) -> InternxtCredentials =
             ::authenticateInternxt
         assertNotNull(function)
+    }
+
+    // #865: the interactive sign-in is terminal-only. A daemon or mount start of a profile with
+    // expired credentials has no console and used to camp on the email prompt forever; the
+    // invariant is that it fails with the typed reason instead of reading stdin at all. The
+    // Gradle test JVM has no console, which is exactly the refused situation; a run with one
+    // would hang on the prompt, so the test stands down there rather than fake a console.
+    @Test
+    fun `interactive auth without a console fails with the typed auth-required reason`(): Unit = runBlocking {
+        if (System.console() != null) return@runBlocking
+        val tmp = Files.createTempDirectory("internxt-auth-headless-")
+        try {
+            seedCredentials(tmp, jwt = "expired-jwt")
+            val auth = CountingAuthService(InternxtConfig(credentialProtector = null, tokenPath = tmp))
+            auth.initialize()
+
+            val e = assertFailsWith<AuthRequiredException> { auth.authenticateInteractive() }
+            val message = assertNotNull(e.message)
+            assertTrue(message.startsWith("auth_required:"), "message must carry the typed reason; got: $message")
+            assertTrue(message.contains(tmp.fileName.toString()), "message must name the profile; got: $message")
+            assertTrue(message.contains("expired"), "message must say the credentials are expired; got: $message")
+            assertTrue(message.contains("Sign in again"), "message must carry the remedy; got: $message")
+        } finally {
+            Files.walk(tmp).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
     }
 }

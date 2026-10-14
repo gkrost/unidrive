@@ -1,5 +1,6 @@
 package org.krost.unidrive.cli
 
+import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.sync.ProcessFacts
 import org.krost.unidrive.sync.isLockHolder
 import java.nio.file.Files
@@ -8,6 +9,7 @@ import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -280,5 +282,34 @@ class DaemonCommandTest {
             "only a unidrive-mount co-daemon counts; an unrelated process must not match",
         )
         assertEquals(false, StaleMountDetector.cmdlineServesSocket(emptyList(), socket))
+    }
+
+    // ── daemon start: no interactive sign-in (#865) ───────────────────────────
+
+    // Invariant: a daemon start proceeds exactly when the credentials can authenticate without
+    // an interactive sign-in. Expired/missing/unreadable credentials must produce the typed
+    // auth_required refusal — profile named, remedy attached — that a front-end greps the start
+    // log for; a credential that is fine or merely near expiry must never refuse a start.
+    @Test
+    fun `daemon-start-refuses-expired-credentials-with-typed-auth-required-reason`() {
+        val refusal = assertNotNull(daemonStartCredentialRefusal("p", CredentialHealth.ExpiresIn(0, "JWT expired")))
+        assertTrue(refusal.contains("auth_required"), "must carry the typed reason; got: $refusal")
+        assertTrue(refusal.contains("'p'"), "must name the profile; got: $refusal")
+        assertTrue(refusal.contains("JWT expired"), "must carry the check's detail; got: $refusal")
+        assertTrue(refusal.contains("Sign in again: unidrive -p p auth"), "must carry the remedy; got: $refusal")
+    }
+
+    @Test
+    fun `daemon-start-refuses-missing-and-unreadable-credentials`() {
+        assertNotNull(daemonStartCredentialRefusal("p", CredentialHealth.Missing("No credentials file")))
+        assertNotNull(daemonStartCredentialRefusal("p", CredentialHealth.Warning("token file does not parse")))
+    }
+
+    @Test
+    fun `daemon-start-proceeds-on-ok-and-expiring-credentials`() {
+        assertEquals(null, daemonStartCredentialRefusal("p", CredentialHealth.Ok))
+        // Time still left, exact or hour-granular: the daemon can authenticate and refresh.
+        assertEquals(null, daemonStartCredentialRefusal("p", CredentialHealth.ExpiresIn(2, "2h", remainingMs = 7_200_000)))
+        assertEquals(null, daemonStartCredentialRefusal("p", CredentialHealth.ExpiresIn(3, "3h")))
     }
 }
