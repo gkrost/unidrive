@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#437 (first half: cancel; the download progress events are a follow-up issue to file after P26 fixes the SPI shape) |
 | Labels | enhancement, sev:medium, area:mount, kind:reliability, windows |
 | Size | M |
-| Priority | rank 36 of 53 (UX group), wave 4 |
+| Priority | rank 36 of 54 (UX group), wave 4 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P18, P17, P08, P35 (`HydrationImpl`), P26; same file family (take them one after the other, order in README): P18, P17, P08, P35, P03, P06, P02 |

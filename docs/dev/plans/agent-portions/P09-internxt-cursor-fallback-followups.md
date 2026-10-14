@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#879 (the main fix is in progress by draft PR #880, branch `fix/879-cursor-fallback`; it is NOT part of this portion) |
 | Labels | bug, area:internxt, kind:reliability |
 | Size | M |
-| Priority | rank 9 of 53 (first-sync group), wave 2 |
+| Priority | rank 9 of 54 (first-sync group), wave 2 |
 | Status | ready after PR #880 is merged |
 | Depends on | PR #880 merged (same code: `InternxtCursorListing.kt`, `InternxtProvider.cursorFullDelta`, `InternxtApiService`) |
 | Not in parallel with | P12, P21; same file family (take them one after the other, order in README): P15, P16, P22, P21, P24, P25, P05, P31, P32 |

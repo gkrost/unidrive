@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#628 (findings 1-3 are delivered: OOM policy PR #639, one flag list, diagnostics PR #667; the AppCDS bullet is P51) |
 | Labels | documentation, area:cli, area:dist, kind:observability, lane:research |
 | Size | S-M |
-| Priority | rank 52 of 53 (release group), wave 4 |
+| Priority | rank 52 of 54 (release group), wave 4 |
 | Status | blocked on owner decision |
 | Depends on | the owner decision below |
 | Not in parallel with | P51, P53 (build scripts), every portion in flight (a new gate touches all modules' warnings); same file family (take them one after the other, order in README): P51, P53 |

@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#860 (asks 1 and 2; asks 3 and 4, a Windows-operation writer and a safe retry, are design decisions listed below) |
 | Labels | enhancement (desktop-UI lane; needed by gkrost/unidrive-windows#263) |
 | Size | M (L with asks 3 and 4) |
-| Priority | rank 38 of 53 (UX group), wave 3 |
+| Priority | rank 38 of 54 (UX group), wave 3 |
 | Status | ready (asks 3 and 4 are decisions) |
 | Depends on | nothing |
 | Not in parallel with | any edit of `HistoryReader` / `HistoryListRequest` / `TransferModel` |

@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#491 |
 | Labels | bug, sev:medium, area:sync, kind:correctness, lane:nfc-freshness |
 | Size | M |
-| Priority | rank 3 of 53 (correctness group), wave 4 |
+| Priority | rank 3 of 54 (correctness group), wave 4 |
 | Status | blocked on owner decision |
 | Depends on | the owner decision below |
 | Not in parallel with | P04 (identity rules), P18, P35 (`HydrationImpl`); same file family (take them one after the other, order in README): P18, P17, P08, P35, P36, P06, P02 |

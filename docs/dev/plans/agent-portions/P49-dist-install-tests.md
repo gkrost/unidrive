@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#745, gkrost/unidrive#746 |
 | Labels | sev:low, area:dist (#745 kind:test, #746 kind:reliability) |
 | Size | S (two commits) |
-| Priority | rank 49 of 53 (tests group), wave 1 |
+| Priority | rank 49 of 54 (tests group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | any edit of `dist/install.sh` (including #107, not packaged: blocked on the sibling release) |

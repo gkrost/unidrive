@@ -5,7 +5,7 @@
 | Issues | none filed yet: file one before starting ("enumeration: next_attempt_at_ms is lost after a manual retry"); related gkrost/unidrive-windows#439 |
 | Labels | bug, kind:reliability, kind:observability |
 | Size | S-M |
-| Priority | rank 11 of 53 (first-sync group), wave 2 |
+| Priority | rank 11 of 54 (first-sync group), wave 2 |
 | Status | ready after the error-code portion |
 | Depends on | P10 merged (same tracker/status files) |
 | Not in parallel with | P12, P13; same file family (take them one after the other, order in README): P10, P12, P13 |

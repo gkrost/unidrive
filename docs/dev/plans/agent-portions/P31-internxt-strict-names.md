@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#577 |
 | Labels | enhancement, sev:medium, area:internxt, kind:correctness |
 | Size | M |
-| Priority | rank 31 of 53 (correctness group), wave 4 |
+| Priority | rank 31 of 54 (correctness group), wave 4 |
 | Status | ready (key name: decision proposed) |
 | Depends on | nothing; step 1 refreshes the rules before any code |
 | Not in parallel with | P05, P24 (`InternxtProvider` upload path); same file family (take them one after the other, order in README): P09, P15, P16, P22, P21, P24, P25, P05, P32 |

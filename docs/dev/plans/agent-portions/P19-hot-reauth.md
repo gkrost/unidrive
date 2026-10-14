@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#813 |
 | Labels | enhancement (desktop-UI lane) |
 | Size | M |
-| Priority | rank 19 of 53 (first-sync group), wave 3 |
+| Priority | rank 19 of 54 (first-sync group), wave 3 |
 | Status | ready (pick A or B on the issue first) |
 | Depends on | PR #876 is merged (it adds the admin verb `auth.logout`, a template) |
 | Not in parallel with | P34 (`AuthLifecycle.kt`), P01 (stdin password), P42 (`DaemonRuntime.kt`); same file family (take them one after the other, order in README): P34 |

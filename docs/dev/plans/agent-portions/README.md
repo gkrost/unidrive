@@ -15,7 +15,7 @@ main; a portion therefore never depends on them. Where they are stale, see "Stal
 
 | What | Issue | State |
 |---|---|---|
-| [PR #880](https://github.com/gkrost/unidrive/pull/880) (draft) | #879 Internxt first scan resumes a cursor the server times out on | in progress; its follow-ups are [P09](P09-internxt-cursor-fallback-followups.md) |
+| [PR #880](https://github.com/gkrost/unidrive/pull/880) | #879 Internxt first scan resumes a cursor the server times out on | in progress; its follow-ups are [P09](P09-internxt-cursor-fallback-followups.md) |
 | [PR #877](https://github.com/gkrost/unidrive/pull/877) | #321 120 s reap grace (the sweep also defers rows written after the gather started) | in progress; nothing further after it merges |
 
 Do not start a portion that edits the same files before the PR is merged: `InternxtCursorListing.kt`, `InternxtProvider.kt`,
@@ -83,12 +83,13 @@ issue to be filed first (the portion says so).
 | [P51](P51-runtime-image-cds.md) Packaged runtime image: a class-data-sharing archive, measured first | #688 | 51 / wave 3 | S for the code, M for the measurement | - | ready (measure first) |
 | [P52](P52-kotlin-warnings-gate.md) A compiler-warning gate for the Kotlin modules (audit #628 finding 4) | #628 | 52 / wave 4 | S-M | owner decision | blocked on owner decision |
 | [P53](P53-reproducible-jar-and-sbom.md) Release engineering: a reproducible shadowJar and an SBOM | #339 | 53 / wave 4 | S for the flags, M with the build-time fix and the SBOM | owner decisions (build instant, SBOM plugin) | ready for the flags, blocked on owner decision for the SBOM |
+| [P54](P54-history-reader-writer-race.md) Tests: the HistoryReaderTest writer-visibility assertion stops racing the writer thread | #882 | 54 / wave 1 | S | - | ready |
 
 ## Not packaged
 
-Every remaining open issue appears here exactly once (55 issues).
+Every remaining open issue appears here exactly once (54 issues).
 
-### Close candidates: already fixed on main, obsolete or superseded (16)
+### Close candidates: already fixed on main, obsolete or superseded (15)
 - #131 obsolete: `HttpRetryBudget` is an instance class with every constant a constructor parameter; OneDrive, Internxt, Dropbox and S3 pass their own budgets. A per-profile knob would be a different feature (see #130).
 - #150 fixed by #721 (61a2fe93): redeploy warning, co-daemon `RUST_LOG` default, profile MDC on hydration uploads.
 - #206 superseded: the poll runs by default (`daemon_poll_seconds` 60), the `mode` model was replaced by `docs/adr/independent-profiles.md`; a "last refreshed" line in `status` would be an S leftover if wanted.
@@ -104,7 +105,6 @@ Every remaining open issue appears here exactly once (55 issues).
 - #805 fixed by #829 (a6c6f87e): local OneDrive name rules, the typed refusal is consumed by the mirror engine, `status --pending`.
 - #831 fixed: the named assertion is gone, the test was reworked in #829 and #828.
 - #832 fixed by #834 (a367bdab); one optional residual flush budget in the sibling test `a full queue drops ...`.
-- #864 fixed by #876 (a0c6c4d3): `logout --json`, `auth.logout`, keep-state default.
 
 ### Epic, umbrella, audit or snapshot with no work of its own (12)
 - #99 post-MVP umbrella of the frozen tracking-set engine (only #168 and #270 are open children; #168 is in [P44](P44-small-test-gaps.md)).
@@ -149,7 +149,7 @@ wave, portions of the same file family (table below) run one after the other, in
 | Wave | Portions |
 |---|---|
 | 0 (in flight) | PR #880 (#879), PR #877 (#321) |
-| 1 (start now) | P01, P07, P10, P14, P18, P20, P33, P34, P41, P43, P44, P48, P49, P50 |
+| 1 (start now) | P01, P07, P10, P14, P18, P20, P33, P34, P41, P43, P44, P48, P49, P50, P54 |
 | 2 | P09 (after #880), P11 (after P10), P17 (after P18), P28, P29, P37 (after #877), P39, P45, P47; P02 once decided |
 | 3 | P08, P12, P13, P15, P16, P19 (after P34), P22, P23 (after #877), P26, P27, P38, P51; P04 once decided |
 | 4 | P21, P24, P25, P30, P31, P32, P35, P36, P42, P46, P52, P53; decision-blocked: P03, P05, P06, P40 |
@@ -169,7 +169,7 @@ File families that must not run in parallel (take the portions in the order writ
 | HTTP plugins and budget | `RequestIdPlugin.kt`, `HttpRetryBudget.kt`, provider API classes | P41, P10, P28, P21 |
 | Build and launchers | `core/app/cli/build.gradle.kts`, `dist/launcher/*` | P01 (templates only), P51, P52, P53 |
 
-P14, P43, P44, P45, P46, P47, P48, P49 and P50 are file-disjoint from the rest (P47 touches many test files but no production file apart
+P14, P43, P44, P45, P46, P47, P48, P49, P50 and P54 are file-disjoint from the rest (P47 touches many test files but no production file apart
 from defaulted constructor parameters).
 
 ## Stale planning documents
@@ -204,3 +204,4 @@ Also from the report, folded in: the 408 is missing from `TRANSIENT_STATUSES` al
 - Server-side facts stay `[unverified]` until the owner runs the live checks named in P09 (status-less page body), P25 (Range on the signed URL), P46 (Scaleway checks) and P14 (heap histogram).
 - The capture numbers come from the run folders of 2026-10-14 (engine log, status JSON, process sampler CSV, a copy of the Internxt `state.db`); nothing from the live profile folders was read.
 - Whether the owner clicked Retry now at 17:49:5x (attempt 5) is inferred from the missing poller log line, see P11.
+- Re-verified mechanically the same day, at `a0c6c4d3`: every cited file path resolves on main (the missing ones are the drift findings of P28 and P50 and the untracked planning documents named above), and every issue open at the time of packaging appears exactly once — packaged or under "Not packaged". #882 was filed after packaging and became [P54](P54-history-reader-writer-race.md); #864 was closed by #876 and left the not-packaged list. Line numbers remain hints.

@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#511 |
 | Labels | bug, sev:medium, area:onedrive, area:mount, kind:correctness |
 | Size | M (OneDrive only; Internxt, Dropbox and S3 keep their present token) |
-| Priority | rank 2 of 53 (correctness group), wave 2 |
+| Priority | rank 2 of 54 (correctness group), wave 2 |
 | Status | blocked on owner decision |
 | Depends on | nothing merged first; the owner decision on the column name below |
 | Not in parallel with | P29 (`OneDriveProvider`), P20 (`StateDatabase`); anything editing `HydrationImpl.list` / `openForWrite`; same file family (take them one after the other, order in README): P18, P17, P08, P35, P36, P03, P06, P28, P29, P26, P30 |

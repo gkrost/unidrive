@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#153 and rows 2, 4, 6 of gkrost/unidrive#839 (rows 1, 3, 5, 7 of #839 are not in this portion: row 1 see P30, row 3 see P26, rows 5 and 7 are decisions, see Open decisions) |
 | Labels | enhancement, sev:low, area:onedrive, kind:correctness |
 | Size | M |
-| Priority | rank 29 of 53 (correctness group), wave 2 |
+| Priority | rank 29 of 54 (correctness group), wave 2 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P28, P30, P26, P02 (all edit `GraphApiService` / `OneDriveProvider`); same file family (take them one after the other, order in README): P28, P26, P02, P30 |

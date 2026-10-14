@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#395 |
 | Labels | enhancement, sev:low, area:sync, area:cli |
 | Size | M (the NFC part alone is S and can be its own commit) |
-| Priority | rank 39 of 53 (UX group), wave 2 |
+| Priority | rank 39 of 54 (UX group), wave 2 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P37, P04 (`Reconciler.kt`/identity), P40 (`Main.kt`); same file family (take them one after the other, order in README): P23, P37, P04, P20, P40, P32 |

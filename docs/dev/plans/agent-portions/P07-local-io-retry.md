@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#802 |
 | Labels | bug, sev:medium, area:sync, kind:reliability, windows |
 | Size | M |
-| Priority | rank 7 of 53 (correctness group), wave 1 |
+| Priority | rank 7 of 54 (correctness group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P29, P02 (`OneDriveProvider`), P05 (`UploadTombstoneStore`) |

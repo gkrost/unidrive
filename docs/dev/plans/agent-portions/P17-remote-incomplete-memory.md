@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#696 (related, not covered: #556 is a data census, see the index) |
 | Labels | area:internxt, kind:reliability |
 | Size | M |
-| Priority | rank 17 of 53 (first-sync group), wave 2 |
+| Priority | rank 17 of 54 (first-sync group), wave 2 |
 | Status | ready after the close-handle portion |
 | Depends on | nothing |
 | Not in parallel with | P18, P08, P36 (all edit `HydrationImpl.kt`); same file family (take them one after the other, order in README): P18, P08, P35, P36, P03, P06, P02 |

@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#626 (items 1 and 3; items 2, 4 and 5 are resolved on main) |
 | Labels | bug, sev:low, area:sync, area:mount, kind:reliability, kind:test |
 | Size | S |
-| Priority | rank 48 of 53 (tests group), wave 1 |
+| Priority | rank 48 of 54 (tests group), wave 1 |
 | Status | ready (check the harden branch first) |
 | Depends on | check the remote branch `harden/validate-client-paths` first (it changes the cache-path containment; its status decides whether item 3 may start) |
 | Not in parallel with | any change of `CacheFolder.kt` / `CachePaths.kt`, `SyncCommand.kt` |

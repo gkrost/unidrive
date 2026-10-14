@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#125 (with #839 row 3 and #846 item 2; the other items of #846 are P27) |
 | Labels | enhancement, sev:medium, area:onedrive, kind:efficiency |
 | Size | M |
-| Priority | rank 26 of 53 (efficiency group), wave 3 |
+| Priority | rank 26 of 54 (efficiency group), wave 3 |
 | Status | ready (SPI shape: decision proposed) |
 | Depends on | nothing; decide the SPI shape first (below) |
 | Not in parallel with | P27 (`CloudProvider.kt`), P29 (`downloadFile`), P02, P25; same file family (take them one after the other, order in README): P28, P29, P02, P30, P27 |

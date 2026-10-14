@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#753 (private origin: unidrive-windows#253) |
 | Labels | enhancement, sev:medium, area:cli, kind:reliability, lane:cli-trust |
 | Size | M |
-| Priority | rank 20 of 53 (first-sync group), wave 1 |
+| Priority | rank 20 of 54 (first-sync group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P40 (`Main.kt` subcommand list), P18 (replay reads the same rows); same file family (take them one after the other, order in README): P40, P32, P39 |

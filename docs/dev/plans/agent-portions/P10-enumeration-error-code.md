@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#878 (client side: gkrost/unidrive-windows#438) |
 | Labels | bug |
 | Size | S |
-| Priority | rank 10 of 53 (first-sync group), wave 1 |
+| Priority | rank 10 of 54 (first-sync group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P12, P13, P11 (all edit `EnumerationTracker` / `EnumerationStatus`); merge this one first; same file family (take them one after the other, order in README): P11, P12, P13, P41, P28, P21 |

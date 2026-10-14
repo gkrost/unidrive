@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#309 (first half; the case-only rename as a move is a follow-up issue to file) |
 | Labels | bug, sev:medium, area:sync, kind:correctness, windows |
 | Size | M |
-| Priority | rank 4 of 53 (correctness group), wave 3 |
+| Priority | rank 4 of 54 (correctness group), wave 3 |
 | Status | blocked on owner decision |
 | Depends on | the decision below |
 | Not in parallel with | P23, P03, P37 (`Reconciler.kt`), PR #877; same file family (take them one after the other, order in README): P23, P37, P39 |

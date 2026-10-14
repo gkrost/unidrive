@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#806 (#131 is obsolete, see the index; #172 is not packaged) |
 | Labels | enhancement, sev:low, area:onedrive, kind:reliability |
 | Size | S |
-| Priority | rank 28 of 53 (reliability group), wave 2 |
+| Priority | rank 28 of 54 (reliability group), wave 2 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P21 (same KDoc and file), P29 (`GraphApiService`); same file family (take them one after the other, order in README): P29, P26, P02, P30, P41, P10, P21 |

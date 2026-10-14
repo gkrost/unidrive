@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#846 (items 1, 3, 4; item 2, ranged download, is P26) |
 | Labels | enhancement |
 | Size | M |
-| Priority | rank 27 of 53 (efficiency group), wave 3 |
+| Priority | rank 27 of 54 (efficiency group), wave 3 |
 | Status | ready (shape: decision proposed) |
 | Depends on | nothing; decide before a WebDAV/SFTP provider is built |
 | Not in parallel with | P26 (`CloudProvider.kt`), P02, PR #877 (`FakeCloudProvider` fixture); same file family (take them one after the other, order in README): P26 |

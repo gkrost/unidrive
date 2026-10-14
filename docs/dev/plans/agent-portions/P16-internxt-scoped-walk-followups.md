@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#393, gkrost/unidrive#693 |
 | Labels | #393 enhancement, sev:medium, area:internxt, area:sync, kind:reliability; #693 bug, sev:high, area:internxt, kind:reliability |
 | Size | M |
-| Priority | rank 16 of 53 (first-sync group), wave 3 |
+| Priority | rank 16 of 54 (first-sync group), wave 3 |
 | Status | ready after PR #880 |
 | Depends on | PR #880 merged (P09 first: both edit `cursorFullDelta`) |
 | Not in parallel with | P09, P15, P21; same file family (take them one after the other, order in README): P09, P15, P22, P21, P24, P25, P05, P31, P32 |

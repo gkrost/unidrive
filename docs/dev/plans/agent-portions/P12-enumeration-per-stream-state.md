@@ -5,7 +5,7 @@
 | Issues | none filed yet: file one before starting ("daemon.status.enumeration: per-stream state"); related gkrost/unidrive#879, #878, gkrost/unidrive-windows#398 |
 | Labels | enhancement, area:internxt, kind:observability (design proposal) |
 | Size | M |
-| Priority | rank 12 of 53 (first-sync group), wave 3 |
+| Priority | rank 12 of 54 (first-sync group), wave 3 |
 | Status | ready after PR #880 and the error-code portion |
 | Depends on | PR #880 merged (P09 may run first or after, not at the same time); P10 merged (it adds `last_error_code`, reused per stream) |
 | Not in parallel with | P13, P11 (all edit `EnumerationTracker`, `EnumerationStatus`, `EnumerationStatusJson`); same file family (take them one after the other, order in README): P10, P11, P13 |

@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#869 (item 1; item 2, reading back `x-amz-meta-mtime`, is a design question left in the issue) |
 | Labels | enhancement, kind:test |
 | Size | M |
-| Priority | rank 46 of 53 (tests group), wave 4 |
+| Priority | rank 46 of 54 (tests group), wave 4 |
 | Status | blocked on owner decision (new test dependency, Docker on CI) |
 | Depends on | the owner decisions below |
 | Not in parallel with | P27 (S3 mtime precision) |

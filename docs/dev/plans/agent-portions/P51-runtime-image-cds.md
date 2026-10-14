@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#688 (the AppCDS and `--add-options` candidates of the closed-out audit #628 belong here) |
 | Labels | none yet (build/dist) |
 | Size | S for the code, M for the measurement |
-| Priority | rank 51 of 53 (release group), wave 3 |
+| Priority | rank 51 of 54 (release group), wave 3 |
 | Status | ready (measure first) |
 | Depends on | nothing |
 | Not in parallel with | P52, P53 (all edit `core/app/cli/build.gradle.kts`); same file family (take them one after the other, order in README): P52, P53 |

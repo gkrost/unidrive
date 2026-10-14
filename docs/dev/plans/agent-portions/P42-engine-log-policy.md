@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#664 (first half: levels, files, side file; the run record and the "previous daemon did not stop in order" report are the second half, to be filed after this merges; comparison adopt item 8 is the side file) |
 | Labels | enhancement, area:cli, kind:observability, lane:desktop-ui |
 | Size | M (first half of an L; the second half is filed after this merges) |
-| Priority | rank 42 of 53 (observability group), wave 4 |
+| Priority | rank 42 of 54 (observability group), wave 4 |
 | Status | blocked on owner decision (owner starts it when asked) |
 | Depends on | P41 merged |
 | Not in parallel with | P41, P19 and P14 (`DaemonRuntime.kt` lines), any `logback.xml` edit |

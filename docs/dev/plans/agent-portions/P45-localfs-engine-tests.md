@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#589 |
 | Labels | enhancement, sev:low, area:sync, kind:test |
 | Size | M (items 1 and 3 are S-M, items 2 and 4 are M; one commit per item) |
-| Priority | rank 45 of 53 (tests group), wave 2 |
+| Priority | rank 45 of 54 (tests group), wave 2 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P03 (item 1 includes an NFC twin rename) |

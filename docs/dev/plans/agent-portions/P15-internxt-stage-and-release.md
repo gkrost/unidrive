@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#638 (comparison report adopt item 2) |
 | Labels | enhancement, area:internxt, area:sync, kind:efficiency |
 | Size | M |
-| Priority | rank 15 of 53 (first-sync group), wave 3 |
+| Priority | rank 15 of 54 (first-sync group), wave 3 |
 | Status | ready after PR #880 and the heap probe |
 | Depends on | PR #880 merged; P14 merged (its probe is the acceptance test) |
 | Not in parallel with | P09, P12 (all edit `cursorFullDelta`); P22 (same provider); same file family (take them one after the other, order in README): P09, P16, P22, P21, P24, P25, P05, P31, P32 |

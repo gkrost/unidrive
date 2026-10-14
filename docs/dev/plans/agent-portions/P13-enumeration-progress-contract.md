@@ -5,7 +5,7 @@
 | Issues | none filed yet: file one before starting ("enumeration: expected total, basis and ETA"); related gkrost/unidrive-windows (flyout bar shows storage use, not scan progress) |
 | Labels | enhancement, kind:observability (design proposal) |
 | Size | M |
-| Priority | rank 13 of 53 (first-sync group), wave 3 |
+| Priority | rank 13 of 54 (first-sync group), wave 3 |
 | Status | ready after the error-code portion |
 | Depends on | P10 merged; P12 should land first if the total is to be given per stream |
 | Not in parallel with | P12, P11 (same tracker/status files); same file family (take them one after the other, order in README): P10, P11, P12 |

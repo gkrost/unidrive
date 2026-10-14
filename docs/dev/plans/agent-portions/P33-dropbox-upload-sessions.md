@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#867 |
 | Labels | enhancement |
 | Size | M (the live test needs the owner's app key and account) |
-| Priority | rank 33 of 53 (efficiency group), wave 1 |
+| Priority | rank 33 of 54 (efficiency group), wave 1 |
 | Status | ready (live test needs the owner) |
 | Depends on | nothing |
 | Not in parallel with | P34 (`DropboxProvider`) |

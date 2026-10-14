@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#269 |
 | Labels | enhancement, sev:medium, area:cli, lane:cli-trust |
 | Size | M |
-| Priority | rank 40 of 53 (UX group), wave 4 |
+| Priority | rank 40 of 54 (UX group), wave 4 |
 | Status | blocked on owner decision |
 | Depends on | the owner decision below |
 | Not in parallel with | P20, P32, P39 (`Main.kt` subcommand list); same file family (take them one after the other, order in README): P20, P32, P39 |

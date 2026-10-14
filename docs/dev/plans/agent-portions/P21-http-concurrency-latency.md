@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#517 (the open remainder R7; the rest of its recommendations is delivered or sits in P24 and P16); a new issue for the latency part must be filed first |
 | Labels | bug (R7), enhancement, area:internxt, kind:reliability, kind:efficiency |
 | Size | M |
-| Priority | rank 21 of 53 (first-sync group), wave 4 |
+| Priority | rank 21 of 54 (first-sync group), wave 4 |
 | Status | ready after PR #880 and the cursor follow-ups |
 | Depends on | P09 merged (both edit `InternxtApiService.authenticatedGet`); PR #820 telemetry is already on main |
 | Not in parallel with | P09, P28 (same `HttpRetryBudget` KDoc); same file family (take them one after the other, order in README): P09, P15, P16, P22, P24, P25, P05, P31, P32, P41, P10, P28 |

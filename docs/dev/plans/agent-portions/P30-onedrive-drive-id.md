@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#588 (the discovery command is the last step; the Business-cloud authority of #839 row 1 stays out) |
 | Labels | enhancement, sev:medium, area:onedrive |
 | Size | M (L with the discovery command: split it into a second PR) |
-| Priority | rank 30 of 53 (efficiency group), wave 4 |
+| Priority | rank 30 of 54 (efficiency group), wave 4 |
 | Status | blocked on owner decision (is Business in scope) |
 | Depends on | P29 and P26 merged (same `GraphApiService`) |
 | Not in parallel with | P29, P26, P02, P28; same file family (take them one after the other, order in README): P28, P29, P26, P02 |

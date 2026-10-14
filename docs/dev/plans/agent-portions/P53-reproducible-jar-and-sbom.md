@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#339 |
 | Labels | enhancement, sev:low, area:dist, kind:reliability, lane:infra |
 | Size | S for the flags, M with the build-time fix and the SBOM |
-| Priority | rank 53 of 53 (release group), wave 4 |
+| Priority | rank 53 of 54 (release group), wave 4 |
 | Status | ready for the flags, blocked on owner decision for the SBOM |
 | Depends on | the owner decisions below |
 | Not in parallel with | P51, P52 (`core/app/cli/build.gradle.kts`), release workflow changes; same file family (take them one after the other, order in README): P51, P52 |

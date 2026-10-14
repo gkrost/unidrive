@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#580 |
 | Labels | bug, sev:medium, area:internxt, area:mount, kind:reliability |
 | Size | M |
-| Priority | rank 6 of 53 (correctness group), wave 4 |
+| Priority | rank 6 of 54 (correctness group), wave 4 |
 | Status | blocked on owner decision |
 | Depends on | nothing merged first; the two decisions below |
 | Not in parallel with | P17, P08, P05; same file family (take them one after the other, order in README): P18, P17, P08, P35, P36, P03, P02 |

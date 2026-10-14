@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#438, gkrost/unidrive#747 |
 | Labels | enhancement, sev:medium (#438), sev:low (#747), area:mount, kind:reliability, kind:observability |
 | Size | M (two small changes in one file, two commits) |
-| Priority | rank 18 of 53 (first-sync group), wave 1 |
+| Priority | rank 18 of 54 (first-sync group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P17, P36, P08, P35 (all edit `HydrationImpl.kt`); do the two issues one after the other; same file family (take them one after the other, order in README): P17, P08, P35, P36, P03, P06, P02 |

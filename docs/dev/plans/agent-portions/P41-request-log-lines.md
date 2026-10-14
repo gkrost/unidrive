@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#644 (with adopt item 5 of the Internxt comparison report: the server `x-request-id` on every response line) |
 | Labels | enhancement, area:internxt, kind:observability |
 | Size | S |
-| Priority | rank 41 of 53 (observability group), wave 1 |
+| Priority | rank 41 of 54 (observability group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P42 (log format and levels), P21 (HTTP plugins); same file family (take them one after the other, order in README): P10, P28, P21 |

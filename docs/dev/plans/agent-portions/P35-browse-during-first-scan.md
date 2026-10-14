@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#515 |
 | Labels | enhancement, sev:medium, area:mount |
 | Size | M (first slice: live listing without writing rows) |
-| Priority | rank 35 of 53 (UX group), wave 4 |
+| Priority | rank 35 of 54 (UX group), wave 4 |
 | Status | ready |
 | Depends on | nothing; sequence after P08 (same files) |
 | Not in parallel with | P08, P18, P17, P03; same file family (take them one after the other, order in README): P18, P17, P08, P36, P03, P06, P02 |

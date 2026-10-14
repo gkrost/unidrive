@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#316 |
 | Labels | bug, sev:medium, area:sync, kind:efficiency, lane:sync-apply |
 | Size | M |
-| Priority | rank 23 of 53 (efficiency group), wave 3 |
+| Priority | rank 23 of 54 (efficiency group), wave 3 |
 | Status | ready after PR #877 |
 | Depends on | PR #877 merged or closed (it edits `gatherStreamingChanges`, same consumer) |
 | Not in parallel with | PR #877, P04 (`Reconciler.kt`), P37; same file family (take them one after the other, order in README): P37, P04, P39 |

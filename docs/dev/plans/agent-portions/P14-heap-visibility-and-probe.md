@@ -5,7 +5,7 @@
 | Issues | none filed yet: file one before starting ("daemon: periodic health line and a heap probe for a full enumeration"); related gkrost/unidrive#638 |
 | Labels | enhancement, kind:observability, kind:efficiency |
 | Size | S-M |
-| Priority | rank 14 of 53 (first-sync group), wave 1 |
+| Priority | rank 14 of 54 (first-sync group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P42 (logging config), P15 |

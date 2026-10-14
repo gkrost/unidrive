@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#594, gkrost/unidrive#610 |
 | Labels | bug, sev:medium, area:internxt, kind:correctness |
 | Size | M (defect 2 of #610 alone is S) |
-| Priority | rank 5 of 53 (correctness group), wave 4 |
+| Priority | rank 5 of 54 (correctness group), wave 4 |
 | Status | blocked on owner decision |
 | Depends on | P07 merged for the tombstone-write part (optional) |
 | Not in parallel with | P24, P09 (`InternxtProvider.kt`), P06; same file family (take them one after the other, order in README): P09, P15, P16, P22, P21, P24, P25, P31, P32 |

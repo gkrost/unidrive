@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#866 |
 | Labels | enhancement |
 | Size | M |
-| Priority | rank 34 of 53 (UX group), wave 1 |
+| Priority | rank 34 of 54 (UX group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | P19 (`AuthLifecycle.kt` / `LifecycleJson.kt`); same file family (take them one after the other, order in README): P19 |

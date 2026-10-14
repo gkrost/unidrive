@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#578 (first half: parts with per-part retry and a concurrency key; per-part resume in the tombstone, the daemon flag and the status field are the second half, to be filed after this merges) |
 | Labels | enhancement, sev:medium, area:internxt, kind:efficiency |
 | Size | M-L (first half of an L; the second half is filed after this merges) |
-| Priority | rank 24 of 53 (efficiency group), wave 4 |
+| Priority | rank 24 of 54 (efficiency group), wave 4 |
 | Status | ready after the concurrency gate |
 | Depends on | P21 merged (a real concurrency gate), PR #880 merged |
 | Not in parallel with | P05 (`uploadUnclassified`), P25, P09; same file family (take them one after the other, order in README): P09, P15, P16, P22, P21, P25, P05, P31, P32 |

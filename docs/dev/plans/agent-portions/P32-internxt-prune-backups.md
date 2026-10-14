@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#155 |
 | Labels | enhancement, sev:low, area:internxt, area:cli, kind:efficiency, lane:deferred |
 | Size | M |
-| Priority | rank 32 of 53 (efficiency group), wave 4 |
+| Priority | rank 32 of 54 (efficiency group), wave 4 |
 | Status | deferred by the owner, start when asked |
 | Depends on | PR #880 merged (same `InternxtProvider.kt`) |
 | Not in parallel with | P09, P05, P40 (`Main.kt`); same file family (take them one after the other, order in README): P09, P15, P16, P22, P21, P24, P25, P05, P31, P20, P40, P39 |

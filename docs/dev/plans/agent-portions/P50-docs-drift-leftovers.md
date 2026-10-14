@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#412 (and the BACKLOG line of #364, which is a close candidate, see the index) |
 | Labels | documentation, sev:low, area:sync, lane:quick-win |
 | Size | S |
-| Priority | rank 50 of 53 (docs group), wave 1 |
+| Priority | rank 50 of 54 (docs group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | any other edit of `BACKLOG.md` (one BACKLOG change per commit, AGENTS.md) |

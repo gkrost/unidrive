@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#660 (the mirror part, PR 2b; epic #651 is not packaged) |
 | Labels | enhancement, area:sync, lane:desktop-ui |
 | Size | M |
-| Priority | rank 37 of 53 (UX group), wave 2 |
+| Priority | rank 37 of 54 (UX group), wave 2 |
 | Status | ready after PR #877 |
 | Depends on | PR #877 merged or closed (sync engine files); the matcher and the mount call site are on main |
 | Not in parallel with | P23, P04, P39 (`Reconciler.kt`), PR #877; same file family (take them one after the other, order in README): P23, P04, P39 |

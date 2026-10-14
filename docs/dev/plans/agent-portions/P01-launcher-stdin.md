@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#859 |
 | Labels | bug (data loss of a setting), area:cli, windows |
 | Size | S |
-| Priority | rank 1 of 53 (correctness group), wave 1 |
+| Priority | rank 1 of 54 (correctness group), wave 1 |
 | Status | ready |
 | Depends on | nothing |
 | Not in parallel with | any change of `core/app/cli/build.gradle.kts` deploy tasks or `dist/launcher/*.tmpl` |

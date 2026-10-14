@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#312 (comparison report adopt item 3) |
 | Labels | bug, sev:medium, area:internxt, kind:correctness, kind:efficiency |
 | Size | M |
-| Priority | rank 22 of 53 (first-sync group), wave 3 |
+| Priority | rank 22 of 54 (first-sync group), wave 3 |
 | Status | ready after PR #880 |
 | Depends on | PR #880 merged (it makes `status` optional on the two sync calls and adds the guard for rows without a status); P15 merged or not started (same provider code) |
 | Not in parallel with | P09, P15, P21; same file family (take them one after the other, order in README): P09, P15, P16, P21, P24, P25, P05, P31, P32 |

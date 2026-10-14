@@ -5,7 +5,7 @@
 | Issues | gkrost/unidrive#507 (first part: every non-Internxt site; the 88 Internxt sites follow after the Internxt PRs have merged) |
 | Labels | enhancement, sev:low, kind:test, lane:infra |
 | Size | M (this part); L as a whole |
-| Priority | rank 47 of 53 (tests group), wave 2 |
+| Priority | rank 47 of 54 (tests group), wave 2 |
 | Status | ready |
 | Depends on | nothing for this part; PR #880 and the other Internxt portions merged for the second part |
 | Not in parallel with | any portion that edits `OneDriveProvider` / `GraphApiService` tests; for the Internxt part every Internxt portion |
