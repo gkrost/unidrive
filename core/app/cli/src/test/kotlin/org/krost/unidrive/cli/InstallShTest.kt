@@ -31,18 +31,34 @@ class InstallShTest {
         systemctlLog = dir.resolve("systemctl.log")
         val bin = Files.createDirectories(dir.resolve("bin"))
         val fake = bin.resolve("systemctl")
+        // `start` launches a long-running JVM whose command line holds -jar <lib>/unidrive-1.jar, the way a
+        // unit-started daemon does; its pid is recorded for teardown (a plain sleep would not match the
+        // NOTE's /proc scan, and a compound command keeps sh from exec-optimizing the cmdline away).
         Files.writeString(
             fake,
             "#!/bin/sh\necho \"\$*\" >> '$systemctlLog'\n" +
                 "case \"\$*\" in *list-units*) echo 'unidrive.service loaded active running x'; " +
-                "echo 'unidrive-mount.service loaded active running y';; esac\n",
+                "echo 'unidrive-mount.service loaded active running y';; " +
+                "*start*) setsid sh -c 'sleep 300; :' \"-jar $home/.local/lib/unidrive/unidrive-1.jar\" & " +
+                "echo \$! >> '${dir.resolve("fake-pids")}';; esac\n",
         )
         fake.toFile().setExecutable(true)
     }
 
     @AfterTest
     fun tearDown() {
-        if (::dir.isInitialized) dir.toFile().deleteRecursively()
+        if (::dir.isInitialized) {
+            val fakePids = dir.resolve("fake-pids")
+            if (Files.exists(fakePids)) {
+                val pids = Files.readString(fakePids).split('\n').filter { it.isNotBlank() }
+                if (pids.isNotEmpty()) {
+                    Runtime.getRuntime()
+                        .exec(arrayOf("sh", "-c", "kill -TERM -- ${pids.joinToString(" ") { "-$it" }} 2>/dev/null"))
+                        .waitFor()
+                }
+            }
+            dir.toFile().deleteRecursively()
+        }
     }
 
     private fun installScript(): Path {
@@ -90,5 +106,23 @@ class InstallShTest {
         val start = calls.indexOf("--user start unidrive.service unidrive-mount.service")
         assertTrue(stop >= 0, "stop call missing: $calls")
         assertTrue(start > stop, "start must follow stop: $calls")
+    }
+
+    // #745: the NOTE is for JVMs started BY HAND that still run the previous jar. A JVM the install itself
+    // starts afterwards (the unit daemons) must not be named: the scan is captured while the units are
+    // stopped, before the fresh units come up.
+    @Test
+    fun the_still_running_note_names_only_the_hand_started_previous_jar() {
+        val installedJar = home.resolve(".local/lib/unidrive/unidrive-1.jar")
+        val hand = ProcessBuilder("setsid", "sh", "-c", "sleep 300; :", "-jar", installedJar.toString()).start()
+        try {
+            val out = install()
+            val note = out.lineSequence().firstOrNull { it.startsWith("NOTE: still running the previous jar") }
+            assertTrue(note != null, "the NOTE is printed: $out")
+            val named = note!!.substringAfter("(pid ").substringBefore(")").split(' ').map { it.trim() }
+            assertEquals(listOf(hand.pid().toString()), named, "only the hand-started JVM is named: $note (out: $out)")
+        } finally {
+            Runtime.getRuntime().exec(arrayOf("sh", "-c", "kill -TERM -- -${hand.pid()} 2>/dev/null")).waitFor()
+        }
     }
 }

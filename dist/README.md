@@ -62,12 +62,14 @@ elsewhere, put the path in `~/.config/unidrive/mount-<profile>.env`:
 UNIDRIVE_MOUNTPOINT=/home/me/Drive
 ```
 
-Before each start and after each stop it runs `fusermount3 -uz` on the mount point, so a crashed mount does
-not block the next one. That detaches whatever is mounted there, so do not point two mounts (or a mount you
-started by hand) at the same directory. The JVM exits 143 on a stop and 78 for a permanent refusal (a wrong-mode
-or modeless profile, or no `unidrive-mount` binary installed); the units count both as a clean stop instead of
-restarting. `fusermount3` is expected at `/usr/bin/fusermount3` (FUSE 3); a system with only FUSE 2's
-`fusermount` needs the unit edited.
+Before each start it clears only a dead FUSE endpoint (one whose directory no longer answers, as a crashed
+mount leaves behind), so a crashed mount does not block the next start while a live mount you started by
+hand at the same directory survives. After each stop it unmounts the mount point without that check — the
+endpoint is the unit's own then. Do not point two mounts at the same directory. The JVM exits 143 on a stop
+and 78 for a permanent refusal (a wrong-mode or modeless profile, or no `unidrive-mount` binary installed);
+the units count both as a clean stop instead of restarting. `fusermount3` is expected at
+`/usr/bin/fusermount3` (FUSE 3); FUSE 2 systems that ship only `fusermount` are not supported and need the
+unit edited.
 
 For a systemd sync unit whose credential vault needs a passphrase, create the user credential store
 and save an encrypted credential there:

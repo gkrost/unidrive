@@ -12,8 +12,10 @@ Wants=unidrive@%i.service network-online.target
 Type=simple
 Environment=UNIDRIVE_MOUNTPOINT=%h/unidrive/%i
 EnvironmentFile=-%h/.config/unidrive/mount-%i.env
-# A crashed mount leaves a dead FUSE endpoint behind; clear it before mounting again.
-ExecStartPre=-/usr/bin/fusermount3 -uz ${UNIDRIVE_MOUNTPOINT}
+# A crashed mount leaves a dead FUSE endpoint behind (stat fails with ENOTCONN); clear only that case,
+# so a live mount started by hand at the same directory survives the unit's start. systemd expands
+# ${UNIDRIVE_MOUNTPOINT} before sh sees the script (brace form: one word, safe for paths with spaces).
+ExecStartPre=-/bin/sh -c 'test -e "${UNIDRIVE_MOUNTPOINT}" || /usr/bin/fusermount3 -uz "${UNIDRIVE_MOUNTPOINT}"'
 ExecStartPre=/usr/bin/mkdir -p ${UNIDRIVE_MOUNTPOINT}
 ExecStart=%h/.local/bin/unidrive -p %i mount ${UNIDRIVE_MOUNTPOINT}
 ExecStopPost=-/usr/bin/fusermount3 -uz ${UNIDRIVE_MOUNTPOINT}
