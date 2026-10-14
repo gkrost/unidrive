@@ -29,6 +29,12 @@ import java.util.UUID
  *   query the `alive_entries` view; tombstones are reachable only via
  *   [recovery]. This is the compiler-enforced split — there is no method
  *   on `StateDatabase` that returns a non-EXISTS row.
+ * - Neither tombstone says whether the bytes are recoverable: TRASHED is
+ *   written when a remote delta reports the deletion, DELETED when the
+ *   engine itself deletes or reaps the row, and the provider may have
+ *   routed either to its own trash (#151). Recovery asking "can this be
+ *   restored?" must consult the provider's trash; the status only says
+ *   which side noticed.
  *
  * Upgrade story: [schemaVersion] starts at the constant [SCHEMA_VERSION].
  * A pre-redesign DB (sync_state present without `schema_version`) drops
@@ -989,6 +995,11 @@ class StateDatabase(
      * Mark the row at [path] as deleted: status = DELETED. The row itself is
      * NOT removed (preserves deletion-history invariant). No-op if the row
      * does not exist. Works for both files and folders.
+     *
+     * DELETED is the engine-side tombstone (mount rm, reconciler delete,
+     * enumeration reap). It does not mean the bytes are unrecoverable: a
+     * delete the provider routed to its trash is still DELETED here (#151).
+     * TRASHED is reserved for the delta-reported cloud cascade.
      */
     @Synchronized
     fun markDeleted(path: String) {
