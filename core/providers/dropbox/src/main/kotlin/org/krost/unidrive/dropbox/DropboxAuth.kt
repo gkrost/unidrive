@@ -59,7 +59,11 @@ class DropboxAuth(
                 timeout = 5.minutes,
                 bindFailureHint = "Set ${DropboxConfig.OAUTH_PORT_ENV} to a free port (and register that redirect URI with the Dropbox app).",
             )
-        val fresh = exchangeCode(code, verifier)
+        saveToken(exchangeCode(code, verifier))
+    }
+
+    /** Persists a freshly exchanged grant (the browser flow and the no-redirect flow share it). */
+    internal fun saveToken(fresh: DropboxToken) {
         store.save(fresh)
         token = fresh
     }
@@ -78,6 +82,39 @@ class DropboxAuth(
                 parameters.append("code_challenge_method", "S256")
                 parameters.append("state", state)
             }.buildString()
+
+    /**
+     * #866: the no-redirect authorization url — everything the browser flow carries except the
+     * `redirect_uri`, so Dropbox shows the user a code to paste instead of calling back.
+     */
+    internal fun authorizationUrlNoRedirect(
+        state: String,
+        challenge: String,
+    ): String =
+        URLBuilder(config.authorizeUrl)
+            .apply {
+                parameters.append("client_id", config.appKey)
+                parameters.append("response_type", "code")
+                parameters.append("token_access_type", "offline")
+                parameters.append("code_challenge", challenge)
+                parameters.append("code_challenge_method", "S256")
+                parameters.append("state", state)
+            }.buildString()
+
+    /** The token exchange of the no-redirect flow: no `redirect_uri`, the code the user pasted. */
+    internal suspend fun exchangeCodeNoRedirect(
+        code: String,
+        verifier: String,
+    ): DropboxToken =
+        requestToken(
+            Parameters.build {
+                append("grant_type", "authorization_code")
+                append("code", code)
+                append("client_id", config.appKey)
+                append("code_verifier", verifier)
+            },
+            previousRefreshToken = null,
+        )
 
     internal suspend fun exchangeCode(
         code: String,

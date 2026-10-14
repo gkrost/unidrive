@@ -117,6 +117,9 @@ interface ProviderFactory {
     suspend fun completeInteractiveAuth(
         profileDir: java.nio.file.Path,
         continuationHandle: String,
+        // #866: a one-time secret the flow's completion needs (Dropbox's pasted authorization code). It is
+        // an argument of the call, never of the command line: front-ends hand it over out of band.
+        secret: String? = null,
     ): CompleteAuthResult =
         throw UnsupportedOperationException("$id has no interactive auth flow")
 
