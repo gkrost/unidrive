@@ -116,6 +116,38 @@ class InternxtRemoteIncompleteDownloadTest {
         }
     }
 
+    @Test
+    fun `a streamed download returns the plaintext hash and staged file stats`() =
+        kotlinx.coroutines.test.runTest {
+            val plaintext = "downloaded Internxt content".toByteArray()
+            val crypto = InternxtCrypto()
+            val indexBytes = InternxtCrypto.hexToBytes(index64)
+            val bucketKey = crypto.deriveBucketKey(
+                crypto.mnemonicToSeed("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"),
+                bucket,
+            )
+            val fileKey = crypto.deriveFileKey(bucketKey, indexBytes)
+            shardBody = crypto.createContentEncryptCipher(fileKey, indexBytes.copyOfRange(0, 16)).doFinal(plaintext)
+            declaredSize = plaintext.size.toString()
+            shardContentLength = shardBody.size.toString()
+            bridgeInfoJson = bridgeInfoJsonWith(listOf(shardUrl1))
+            val provider = newProvider()
+            val targetMtimeMillis = java.time.Instant.parse("2026-06-01T12:00:00Z").toEpochMilli()
+
+            val receipt = provider.downloadByIdWithHash(fileUuid, "/downloaded.txt", destination, targetMtimeMillis)
+
+            val expectedHash = java.security.MessageDigest.getInstance("SHA-256").digest(plaintext)
+                .joinToString("") { "%02x".format(it) }
+            assertEquals(plaintext.size.toLong(), receipt.bytesWritten)
+            assertEquals(expectedHash, receipt.plaintextSha256)
+            assertEquals(plaintext.size.toLong(), receipt.stagedSize)
+            assertEquals(targetMtimeMillis, receipt.stagedMtimeMillis)
+            assertTrue(receipt.mtimeAppliedBeforePlacement)
+            assertEquals(Files.size(destination), receipt.stagedSize)
+            assertEquals(Files.getLastModifiedTime(destination).toMillis(), receipt.stagedMtimeMillis)
+            assertTrue(Files.readAllBytes(destination).contentEquals(plaintext))
+        }
+
     // The live #536 shape: the shard response's Content-Length (298,844,160) is smaller than the
     // declared drive size (360,951,317) — the refusal must come before a single byte is read.
     @Test

@@ -160,6 +160,7 @@ class FakeCloudProvider : CloudProvider {
     // override lets us count both call paths distinctly.
     val downloadByIdCalls = mutableListOf<Pair<String, String>>() // (remoteId, remotePath)
     val downloadByPathCalls = mutableListOf<String>()
+    var afterDownloadWrite: ((Path) -> Unit)? = null
 
     // C8 follow-up: observe per-path download concurrency so a test can prove
     // same-path transfers are serialized. downloadDelayMs opens an overlap window
@@ -180,7 +181,14 @@ class FakeCloudProvider : CloudProvider {
         remoteId: String,
         remotePath: String,
         destination: Path,
-    ): Long {
+    ): Long = downloadByIdWithHash(remoteId, remotePath, destination).bytesWritten
+
+    override suspend fun downloadByIdWithHash(
+        remoteId: String,
+        remotePath: String,
+        destination: Path,
+        targetMtimeMillis: Long?,
+    ): DownloadReceipt {
         if (authFailOnDownload) throw AuthenticationException("Token expired")
         if (remotePath in permanentDownloadFailurePaths) {
             throw org.krost.unidrive.PermanentDownloadFailureException(
@@ -196,8 +204,18 @@ class FakeCloudProvider : CloudProvider {
         val content = files[remotePath] ?: ByteArray(0)
         Files.createDirectories(destination.parent)
         Files.write(destination, content)
+        targetMtimeMillis?.let { Files.setLastModifiedTime(destination, java.nio.file.attribute.FileTime.fromMillis(it)) }
+        val receipt = DownloadReceipt(
+            bytesWritten = content.size.toLong(),
+            plaintextSha256 = java.security.MessageDigest.getInstance("SHA-256").digest(content)
+                .joinToString("") { "%02x".format(it) },
+            stagedSize = Files.size(destination),
+            stagedMtimeMillis = Files.getLastModifiedTime(destination).toMillis(),
+            mtimeAppliedBeforePlacement = targetMtimeMillis != null,
+        )
+        afterDownloadWrite?.invoke(destination)
         activeDownloadsByPath[remotePath] = (activeDownloadsByPath[remotePath] ?: 1) - 1
-        return content.size.toLong()
+        return receipt
     }
 
     var lastUploadExistingRemoteId: String? = null

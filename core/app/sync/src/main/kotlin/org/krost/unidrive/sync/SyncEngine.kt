@@ -10,6 +10,7 @@ import org.krost.unidrive.CapabilityResult
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
+import org.krost.unidrive.DownloadReceipt
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.PermanentUploadFailureException
 import org.krost.unidrive.ProviderException
@@ -2409,6 +2410,8 @@ open class SyncEngine(
         val sizeMatch = !item.isFolder && Files.isRegularFile(localPath) && Files.size(localPath) == item.size
         val hasRealContent = sizeMatch && !placeholder.isSparse(localPath, item.size)
         val shouldDownload = !item.isFolder && item.size > 0 && !hasRealContent
+        var downloadReceipt: DownloadReceipt? = null
+        var downloadedHash: String? = null
 
         withEchoSuppression(action.path) {
             if (item.isFolder) {
@@ -2423,15 +2426,23 @@ open class SyncEngine(
                 // on transient 503s or sanitization edge cases (UD-317).
                 // #115: the REMOTE source is item.path (canonical); the local
                 // destination is localPath (resolved from the real-local action.path).
-                downloadByIdOrPath(item, item.path, localPath)
-                placeholder.restoreMtime(action.path, item.modified)
+                val receipt = downloadByIdOrPathWithHash(item, item.path, localPath, item.modified?.toEpochMilli())
+                downloadReceipt = receipt
+                downloadedHash = stagedLocalHash(localPath, receipt)
+                if (!receipt.mtimeAppliedBeforePlacement) placeholder.restoreMtime(action.path, item.modified)
             }
         }
 
         val isHydrated = hasRealContent || item.size == 0L || shouldDownload
         val entry = entryFromCloudItem(item, action.path, isHydrated)
         // #396: only bytes the engine just wrote get a local hash; an adopted file is not re-read.
-        db.upsertEntry(if (shouldDownload) withLocalHash(entry) else entry)
+        db.upsertEntry(
+            if (shouldDownload) {
+                withDownloadedHash(entry, checkNotNull(downloadReceipt), downloadedHash)
+            } else {
+                entry
+            },
+        )
     }
 
     private suspend fun applyUpdatePlaceholder(action: SyncAction.UpdatePlaceholder) {
@@ -2443,13 +2454,18 @@ open class SyncEngine(
                 versionManager.pruneByCount(action.path, maxVersions)
             }
         }
+        var downloadReceipt: DownloadReceipt? = null
+        var downloadedHash: String? = null
         withEchoSuppression(action.path) {
             if (action.wasHydrated && !item.isFolder) {
                 try {
                     // UD-225b: id-based dispatch (see applyCreatePlaceholder).
                     // #115: remote source = item.path (canonical); dest = real-local.
-                    downloadByIdOrPath(item, item.path, placeholder.resolveLocal(action.path))
-                    placeholder.restoreMtime(action.path, item.modified)
+                    val localPath = placeholder.resolveLocal(action.path)
+                    val receipt = downloadByIdOrPathWithHash(item, item.path, localPath, item.modified?.toEpochMilli())
+                    downloadReceipt = receipt
+                    downloadedHash = stagedLocalHash(localPath, receipt)
+                    if (!receipt.mtimeAppliedBeforePlacement) placeholder.restoreMtime(action.path, item.modified)
                 } catch (e: Exception) {
                     restoreToPlaceholder(action.path, item)
                     throw e
@@ -2461,7 +2477,13 @@ open class SyncEngine(
 
         val entry = entryFromCloudItem(item, action.path, action.wasHydrated)
         // #396: the hydrated branch above re-downloaded real bytes; metadata-only updates did not.
-        db.upsertEntry(if (action.wasHydrated && !item.isFolder) withLocalHash(entry) else entry)
+        db.upsertEntry(
+            if (action.wasHydrated && !item.isFolder) {
+                withDownloadedHash(entry, checkNotNull(downloadReceipt), downloadedHash)
+            } else {
+                entry
+            },
+        )
     }
 
     internal suspend fun downloadByIdOrPath(
@@ -2469,6 +2491,13 @@ open class SyncEngine(
         remotePath: String,
         destination: java.nio.file.Path,
     ): Long = Transfers.downloadByIdOrPath(provider, item, remotePath, destination)
+
+    private suspend fun downloadByIdOrPathWithHash(
+        item: CloudItem,
+        remotePath: String,
+        destination: Path,
+        targetMtimeMillis: Long?,
+    ): DownloadReceipt = Transfers.downloadByIdOrPathWithHash(provider, item, remotePath, destination, targetMtimeMillis)
 
     private suspend fun applyDownload(action: SyncAction.DownloadContent) {
         log.debug("Download: {} ({} bytes)", action.path, action.remoteItem.size)
@@ -2490,12 +2519,21 @@ open class SyncEngine(
         // UD-113: capture pre-action hash for the audit oldHash field.
         val prevHash = db.getEntry(action.path)?.remoteHash
         try {
+            var downloadReceipt: DownloadReceipt? = null
+            var downloadedHash: String? = null
             withEchoSuppression(action.path) {
                 // UD-225b: id-based dispatch — see applyCreatePlaceholder for rationale.
                 // #115: remote source = remoteItem.path (canonical); local
                 // destination = localPath (resolved from real-local action.path).
-                downloadByIdOrPath(action.remoteItem, action.remoteItem.path, localPath)
-                placeholder.restoreMtime(action.path, action.remoteItem.modified)
+                val receipt = downloadByIdOrPathWithHash(
+                    action.remoteItem,
+                    action.remoteItem.path,
+                    localPath,
+                    action.remoteItem.modified?.toEpochMilli(),
+                )
+                downloadReceipt = receipt
+                downloadedHash = stagedLocalHash(localPath, receipt)
+                if (!receipt.mtimeAppliedBeforePlacement) placeholder.restoreMtime(action.path, action.remoteItem.modified)
             }
 
             if (verifyIntegrity) {
@@ -2505,7 +2543,8 @@ open class SyncEngine(
                 }
             }
 
-            db.upsertEntry(withLocalHash(entryFromCloudItem(action.remoteItem, action.path, isHydrated = true)))
+            val entry = entryFromCloudItem(action.remoteItem, action.path, isHydrated = true)
+            db.upsertEntry(withDownloadedHash(entry, checkNotNull(downloadReceipt), downloadedHash))
             auditLog?.emit(
                 action = "Download",
                 path = action.path,
@@ -3426,6 +3465,42 @@ open class SyncEngine(
         val size = entry.localSize ?: return entry
         return withLocalHash(entry, placeholder.resolveLocal(entry.path), mtime, size)
     }
+
+    // A provider that hashes its plaintext while writing can return the staged file's stats. Check
+    // the installed destination against those stats before restoring the remote mtime; an edit
+    // after atomic placement then drops the hash instead of becoming the downloaded baseline.
+    private fun stagedLocalHash(
+        destination: Path,
+        receipt: DownloadReceipt,
+    ): String? {
+        val hash = receipt.plaintextSha256 ?: return null
+        val size = receipt.stagedSize ?: return null
+        val mtime = receipt.stagedMtimeMillis ?: return null
+        return try {
+            if (Files.size(destination) == size && Files.getLastModifiedTime(destination).toMillis() == mtime) hash else null
+        } catch (_: java.io.IOException) {
+            null
+        }
+    }
+
+    private fun withDownloadedHash(
+        entry: SyncEntry,
+        receipt: DownloadReceipt,
+        streamedHash: String?,
+    ): SyncEntry =
+        if (receipt.plaintextSha256 != null) {
+            if (provider.hashAlgorithm() == null && !entry.isFolder) {
+                entry.copy(
+                    localHash = streamedHash,
+                    localMtime = receipt.stagedMtimeMillis,
+                    localSize = receipt.stagedSize,
+                )
+            } else {
+                entry
+            }
+        } else {
+            withLocalHash(entry)
+        }
 
     // Same guard for a copy of the bytes that is not the sync-root file — the cache copy a
     // hydration downloaded or a write-back was uploaded from. The row records that copy's
