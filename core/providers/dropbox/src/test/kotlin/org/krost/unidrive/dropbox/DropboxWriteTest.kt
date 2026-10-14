@@ -8,6 +8,7 @@ import kotlinx.serialization.json.long
 import org.krost.unidrive.CapabilityResult
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.PermanentUploadFailureException
+import org.krost.unidrive.ProviderException
 import org.krost.unidrive.RemoteConflictException
 import org.krost.unidrive.dropbox.FakeDropbox.Answer
 import org.krost.unidrive.dropbox.FakeDropbox.Companion.file
@@ -114,6 +115,77 @@ class DropboxWriteTest {
             assertEquals(10, finish["cursor"]!!.jsonObject["offset"]!!.jsonPrimitive.long)
             assertEquals("/big.bin", finish["commit"]!!.jsonObject["path"]!!.jsonPrimitive.content)
             assertEquals(listOf(4L, 8L, 10L, 10L), progress)
+        }
+
+    // #867: the session survives the process. The first attempt dies after the first append; a
+    // restarted provider continues at the committed offset instead of starting over.
+    @Test
+    fun `an interrupted session resumes at the committed offset`() =
+        runTest {
+            val small = FakeDropbox.provider(fake, dir, { it.copy(simpleUploadMaxBytes = 4, uploadChunkBytes = 4) })
+            fake.json("files/upload_session/start", """{"session_id":"s1"}""")
+            val received = StringBuilder()
+            var appends = 0
+            fake.on("files/upload_session/append_v2") { call ->
+                appends++
+                if (appends == 2) {
+                    FakeDropbox.Answer(500, """{"error_summary":"internal_error/"}""")
+                } else {
+                    received.append(call.body.toString(Charsets.UTF_8))
+                    FakeDropbox.Answer(200, "null")
+                }
+            }
+            fake.json("files/upload_session/finish", file("/big.bin", "id:3", size = 10))
+
+            runCatching { small.upload(local("big.bin", "0123456789"), "/big.bin") }
+            assertTrue(received.length >= 4, "the first chunk landed before the interruption")
+
+            val again = FakeDropbox.provider(fake, dir, { it.copy(simpleUploadMaxBytes = 4, uploadChunkBytes = 4) })
+            fake.json("files/upload_session/finish", file("/big.bin", "id:3", size = 10))
+
+            again.upload(local("big.bin", "0123456789"), "/big.bin")
+
+            assertEquals(1, fake.callsTo("files/upload_session/start").size, "no second session was started")
+            // The first attempt made two append calls (one landed, one failed); the rest are the resume.
+            val resumed = fake.callsTo("files/upload_session/append_v2").drop(2)
+            assertEquals(4L, resumed.first().args!!["cursor"]!!.jsonObject["offset"]!!.jsonPrimitive.long, "the retry continues at the committed offset")
+            assertEquals(listOf("4567", "89"), resumed.map { it.body.toString(Charsets.UTF_8) })
+            assertContentEquals("0123456789".toByteArray(), received.toString().toByteArray(), "the final file equals the source")
+            assertEquals(10L, fake.callsTo("files/upload_session/finish").last().args!!["cursor"]!!.jsonObject["offset"]!!.jsonPrimitive.long)
+        }
+
+    // #867: Dropbox answers incorrect_offset with the offset it actually holds. The upload moves
+    // there once; a second mismatch ends the session with a typed error instead of guessing again.
+    @Test
+    fun `an incorrect_offset answer moves the upload and a second one aborts`() =
+        runTest {
+            // The stored resume offset is stale (the server holds 4, not 8).
+            DropboxSessionStore(dir).put("/big.bin", "s0", 8, 10, Instant.parse("2026-03-04T05:06:07.890Z").toEpochMilli())
+            val received = StringBuilder()
+            var correctedOnce = false
+            fake.on("files/upload_session/append_v2") { call ->
+                val offset = call.args!!["cursor"]!!.jsonObject["offset"]!!.jsonPrimitive.long
+                when {
+                    offset == 8L -> FakeDropbox.Answer(
+                        400,
+                        """{"error_summary":"incorrect_offset/","error":{"reason":{".tag":"incorrect_offset","correct_offset":4},".tag":"upload_session_offset_error"}}""",
+                    )
+                    offset == 4L && !correctedOnce -> {
+                        correctedOnce = true
+                        received.append(call.body.toString(Charsets.UTF_8))
+                        FakeDropbox.Answer(200, "null")
+                    }
+                    else -> FakeDropbox.Answer(
+                        400,
+                        """{"error_summary":"incorrect_offset/","error":{"reason":{".tag":"incorrect_offset","correct_offset":4},".tag":"upload_session_offset_error"}}""",
+                    )
+                }
+            }
+            val small = FakeDropbox.provider(fake, dir, { it.copy(simpleUploadMaxBytes = 4, uploadChunkBytes = 4) })
+            val failure = assertFailsWith<ProviderException> { small.upload(local("big.bin", "0123456789"), "/big.bin") }
+            assertTrue("offset mismatch" in (failure.message ?: ""), failure.message ?: "")
+            assertEquals("4567", received.toString(), "the corrected append went through before the second mismatch")
+            assertNull(DropboxSessionStore(dir).get("/big.bin", 10, Instant.parse("2026-03-04T05:06:07.890Z").toEpochMilli()), "the unusable session is dropped")
         }
 
     @Test
