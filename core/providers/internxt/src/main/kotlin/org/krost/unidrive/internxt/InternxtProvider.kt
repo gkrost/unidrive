@@ -2165,8 +2165,10 @@ class InternxtProvider(
         val lock = Mutex()
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
 
-        // Read under the lock, after every page and at the start: the count never goes down (the staged rows
-        // are counted from the beginning) and the reports arrive in the order of the counts.
+        // Read under the lock, after every page and at the start: the count rises with every page and the
+        // reports arrive in the order of the counts. Since the fallback (#879) it can also drop, by the rare
+        // row an unfiltered page delivers as no longer live against what the filtered pages stored — a few
+        // rows against hundreds of thousands, and the heartbeat's wall-clock half keeps reporting through it.
         fun report() {
             val total = folders.size + files.size
             heartbeat?.tick(total)
