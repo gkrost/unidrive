@@ -19,10 +19,11 @@ import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import picocli.CommandLine.Spec
 import java.time.Instant
+import java.util.concurrent.Callable
 import java.util.concurrent.atomic.AtomicLong
 
 @Command(name = "get", description = ["Download file content (hydrate)"], mixinStandardHelpOptions = true)
-class GetCommand : Runnable {
+class GetCommand : Callable<Int> {
     @ParentCommand
     lateinit var parent: Main
 
@@ -38,7 +39,7 @@ class GetCommand : Runnable {
     @Option(names = ["--delay-ms"], description = ["Delay between download starts in milliseconds (default: 0)"])
     var delayMs: Long = 0L
 
-    override fun run() {
+    override fun call(): Int {
         if (concurrency <= 0) {
             throw CommandLine.ParameterException(
                 spec.commandLine(),
@@ -54,10 +55,16 @@ class GetCommand : Runnable {
         val lock = parent.acquireProfileLock()
         val provider = parent.createProvider()
         val config = parent.loadSyncConfig()
-        val excludePatterns = config.effectiveExcludePatterns(parent.resolveCurrentProfile().name)
+        val profile = parent.resolveCurrentProfile()
         val dbPath = parent.providerConfigDir().resolve("state.db")
         val db = StateDatabase(dbPath)
         db.initialize()
+        // The daemon's own guard, so get leaves alone what the mount treats as keep-local.
+        val guard =
+            cliExclusionGuard(config, profile.name, profile.mode) { path ->
+                db.getEntry(path)?.let { !it.isFolder && it.remoteId != null } == true
+            }
+        var exitCode = 0
 
         val normalizedPath = if (path.startsWith("/")) path else "/$path"
         val entry = db.getEntry(normalizedPath)
@@ -65,25 +72,26 @@ class GetCommand : Runnable {
 
         try {
             runBlocking {
-                if (pathMatchesExcludePatterns(normalizedPath, excludePatterns)) {
-                    System.err.println("get: skipped excluded item: $normalizedPath")
-                    return@runBlocking
-                }
-                provider.authenticateAndLog()
-
                 val isFolder =
                     entry?.isFolder ?: java.nio.file.Files
                         .isDirectory(placeholder.resolveLocal(normalizedPath))
+                if (guard.isExcludedPath(normalizedPath, isFolder)) {
+                    System.err.println("get: skipped excluded item: $normalizedPath")
+                    // A path named on the command line that is not downloaded is not a success.
+                    exitCode = EXCLUDED_EXIT
+                    return@runBlocking
+                }
+                provider.authenticateAndLog()
 
                 if (isFolder) {
                     val prefix = if (normalizedPath.endsWith("/")) normalizedPath else "$normalizedPath/"
                     val candidates = db.getEntriesByPrefix(prefix).filterNot { it.isFolder }
                     val excludedCount = candidates.count { child ->
-                        pathMatchesExcludePatterns(child.path, excludePatterns)
+                        guard.isExcludedPath(child.path, false)
                     }
                     val children =
                         candidates.filterNot { child ->
-                            pathMatchesExcludePatterns(child.path, excludePatterns)
+                            guard.isExcludedPath(child.path, false)
                         }.filter { child ->
                             if (!child.isHydrated) return@filter true
                             placeholder.isSparse(placeholder.resolveLocal(child.path), child.remoteSize)
@@ -210,5 +218,11 @@ class GetCommand : Runnable {
             db.close()
             lock.unlock()
         }
+        return exitCode
+    }
+
+    companion object {
+        /** `get` named an excluded path and downloaded nothing. */
+        const val EXCLUDED_EXIT = 1
     }
 }

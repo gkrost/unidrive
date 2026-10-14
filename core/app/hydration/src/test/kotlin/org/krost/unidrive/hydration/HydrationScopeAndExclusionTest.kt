@@ -248,7 +248,7 @@ class HydrationScopeAndExclusionTest {
     }
 
     @Test
-    fun `open_read refuses an excluded remote file without downloading it`() = runTest {
+    fun `open_read refuses an excluded cloud-only file without downloading it`() = runTest {
         val env = HydrationTestEnv(excludePatterns = listOf("*.tmp"))
         env.stateDb.insertUnhydratedEntry("/new/scratch.tmp", remoteSize = 5)
         env.syncEngine.seedRemoteContent("/new/scratch.tmp", "bytes")
@@ -258,12 +258,75 @@ class HydrationScopeAndExclusionTest {
         assertTrue(result is OpenResult.Failed)
         assertEquals(HydrationError.EXCLUDED_TOKEN, result.error.message)
         assertEquals(0, env.syncEngine.downloadCount(), "an explicit read must not hydrate an excluded cloud item")
+    }
 
-        env.syncEngine.seedCacheContent("/new/scratch.tmp", "cached")
-        val warmResult = env.hydration.openForRead("conn1", "h2", "/new/scratch.tmp")
+    @Test
+    fun `open_read serves a file created locally under an excluded name`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertFolderEntry("/new")
+        val created = env.hydration.create("conn1", "h1", "/new/scratch.tmp")
+        assertIs<CreateResult.Ok>(created)
+        Files.writeString(created.cachePath, "local scratch bytes")
+        assertIs<OpenResult.Ok>(env.hydration.openForWrite("conn1", "h1", "/new/scratch.tmp", created.cachePath))
+        advanceUntilIdle()
 
-        assertTrue(warmResult is OpenResult.Failed, "an excluded item stays unreadable even when its cache is warm")
-        assertEquals(HydrationError.EXCLUDED_TOKEN, warmResult.error.message)
+        val read = env.hydration.openForRead("conn1", "h2", "/new/scratch.tmp")
+
+        assertIs<OpenResult.Ok>(read, "a keep-local file is served from its local content")
+        assertEquals("local scratch bytes", Files.readString(read.cachePath))
         assertEquals(0, env.syncEngine.downloadCount())
+    }
+
+    @Test
+    fun `open_read serves a synced file that became excluded while its local copy is complete`() = runTest {
+        val env = HydrationTestEnv(excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertHydratedEntry("/new/scratch.tmp", localSize = 6)
+        env.syncEngine.seedCacheContent("/new/scratch.tmp", "cached")
+
+        val read = env.hydration.openForRead("conn1", "h1", "/new/scratch.tmp")
+
+        assertIs<OpenResult.Ok>(read)
+        assertEquals(0, env.syncEngine.downloadCount(), "the local copy is served, nothing is downloaded")
+    }
+
+    @Test
+    fun `open_read applies the ignore rules the same way`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, ignore = org.krost.unidrive.sync.ignore.IgnoreSettings())
+        env.stateDb.insertFolderEntry("/proj")
+        env.stateDb.insertFolderEntry("/proj/build")
+        env.syncEngine.seedCacheContent("/proj/.unidrive.ignore", "build/\n")
+        env.stateDb.insertUnhydratedEntry("/proj/build/old.bin", 1)
+        env.syncEngine.seedRemoteContent("/proj/build/old.bin", "c")
+
+        val cloudOnly = env.hydration.openForRead("conn1", "h1", "/proj/build/old.bin")
+        assertTrue(cloudOnly is OpenResult.Failed)
+        assertEquals(HydrationError.EXCLUDED_TOKEN, cloudOnly.error.message)
+        assertEquals(0, env.syncEngine.downloadCount())
+
+        val created = env.hydration.create("conn1", "h2", "/proj/build/out.bin")
+        assertIs<CreateResult.Ok>(created)
+        Files.writeString(created.cachePath, "local build output")
+        assertIs<OpenResult.Ok>(env.hydration.openForWrite("conn1", "h2", "/proj/build/out.bin", created.cachePath))
+        advanceUntilIdle()
+        assertIs<OpenResult.Ok>(env.hydration.openForRead("conn1", "h3", "/proj/build/out.bin"))
+    }
+
+    @Test
+    fun `a refused open_read reports skipped, never a failed download`() = runTest {
+        val env = HydrationTestEnv(recoveryUploadScope = this, excludePatterns = listOf("*.tmp"))
+        env.stateDb.insertUnhydratedEntry("/new/scratch.tmp", remoteSize = 5)
+        val events = mutableListOf<HydrationEvent>()
+        val collector = launch { env.hydration.events.collect { events.add(it) } }
+        yield()
+
+        env.hydration.openForRead("conn1", "h1", "/new/scratch.tmp")
+        advanceUntilIdle()
+
+        assertIs<HydrationEvent.Skipped>(events.first())
+        assertEquals(0, events.filterIsInstance<HydrationEvent.Failed>().size)
+        val completed = events.filterIsInstance<HydrationEvent.Completed>().single()
+        assertFalse(completed.ok)
+        assertEquals(HydrationError.EXCLUDED_TOKEN, completed.error?.message)
+        collector.cancel()
     }
 }

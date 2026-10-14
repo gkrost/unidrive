@@ -209,9 +209,10 @@ Excluded names (`exclude_patterns`): `create`/`open_write` answer
 `{"ok":true,...,"excluded":true}` and the stream carries `skipped` and a
 `completed ok:false error:excluded` — never `hydrating`/`hydrated`. The file
 is served from local content only. `hydration.list` entries remain visible and
-carry `"excluded":true` for such rows. `open_read` refuses an excluded cloud
-item with `{"ok":false,"error":"excluded"}` without downloading it, including
-when a warm cache copy exists. `ls` marks excluded rows and `get` skips excluded
+carry `"excluded":true` for such rows. `open_read` serves an excluded file
+from local content (created locally, or complete in the cache) and refuses one
+that would need a download with `{"ok":false,"error":"excluded"}`, preceded by
+`skipped` and a `completed ok:false error:excluded`, never `failed`. `ls` marks excluded rows and `get` skips excluded
 paths rather than downloading them.
 
 ## 5. Cancel

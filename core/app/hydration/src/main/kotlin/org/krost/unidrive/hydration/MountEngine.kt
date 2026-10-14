@@ -228,6 +228,21 @@ class MountEngine private constructor(
         history: TransferHandle? = null,
     ): Path = hydrateMutexes.computeIfAbsent(path) { Mutex() }.withLock { ensureHydratedLocked(path, history) }
 
+    /**
+     * True when a read of [entry] needs no download: the row has no remote (the cache is the only copy), or it is
+     * hydrated and the cache file is present with the size the remote reports. [ensureHydrated] returns the cache in
+     * exactly this case.
+     */
+    fun servesFromLocalCopy(
+        entry: SyncEntry,
+        cachePath: Path = resolveCachePath(entry.path),
+    ): Boolean {
+        val warmCacheUsable =
+            entry.remoteId == null ||
+                runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize
+        return entry.isHydrated && Files.exists(cachePath) && warmCacheUsable
+    }
+
     private suspend fun ensureHydratedLocked(
         path: String,
         history: TransferHandle?,
@@ -250,12 +265,7 @@ class MountEngine private constructor(
         // remoteId == null is NOT the UD-901 pending-upload predicate — it means "no
         // remote to compare against", and isHydrated here carries the warm-trust
         // meaning, so the split check is intentional.
-        val warmCacheUsable =
-            entry.remoteId == null ||
-                runCatching { Files.size(cachePath) }.getOrDefault(-1L) == entry.remoteSize
-        if (entry.isHydrated && Files.exists(cachePath) && warmCacheUsable) {
-            return cachePath
-        }
+        if (servesFromLocalCopy(entry, cachePath)) return cachePath
         // Construct a minimal CloudItem so downloadByIdOrPath can route by id
         // (fast path) or fall back to path-based (when remoteId is null).
         val remoteItem = CloudItem(

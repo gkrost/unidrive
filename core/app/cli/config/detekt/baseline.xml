@@ -15,7 +15,7 @@
     <ID>InstanceOfCheckForException:QuotaCommand.kt$QuotaCommand$e is IpcAuthException</ID>
     <ID>InstanceOfCheckForException:RefreshRpcHandler.kt$RefreshRpcHandler$e is IllegalStateException</ID>
     <ID>LongMethod:DaemonRuntime.kt$DaemonRuntime$suspend fun start()</ID>
-    <ID>LongMethod:GetCommand.kt$GetCommand$override fun run()</ID>
+    <ID>LongMethod:GetCommand.kt$GetCommand$override fun call(): Int</ID>
     <ID>LongMethod:LegacyInventory.kt$LegacyInventory$private fun classify( inputs: Inputs, lockFacts: LockFacts, state: State?, ): Report</ID>
     <ID>LongMethod:MigrateConvertCommand.kt$LegacyConversion$internal fun execute( setup: Setup, rawMode: String, rawDisposition: String?, restart: Boolean, verbose: Boolean, ): Int</ID>
     <ID>LongMethod:RelocateCommand.kt$RelocateCommand$private fun runRelocate()</ID>
