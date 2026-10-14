@@ -34,6 +34,7 @@ class ProfileJsonCommandTest {
     private val err = ByteArrayOutputStream()
     private val originalOut = System.out
     private val originalErr = System.err
+    private val originalIn = System.`in`
 
     @BeforeTest
     fun setUp() {
@@ -46,6 +47,7 @@ class ProfileJsonCommandTest {
     fun tearDown() {
         System.setOut(originalOut)
         System.setErr(originalErr)
+        System.setIn(originalIn)
         dir.toFile().deleteRecursively()
     }
 
@@ -62,6 +64,13 @@ class ProfileJsonCommandTest {
         System.out.flush()
         System.err.flush()
         return code
+    }
+
+    private fun stdin(text: String) = System.setIn(text.toByteArray(Charsets.UTF_8).inputStream())
+
+    private fun listed(name: String): JsonObject {
+        assertEquals(0, run("profile", "list", "--json"))
+        return json().getValue("profiles").jsonArray.first { it.jsonObject["name"]!!.jsonPrimitive.content == name }.jsonObject
     }
 
     private fun stdout(): String = out.toString(Charsets.UTF_8)
@@ -456,5 +465,114 @@ class ProfileJsonCommandTest {
         val names = Files.list(dir).use { s -> s.map { it.fileName.toString() }.toList() }
         assertEquals(listOf("config.toml"), names, "no profile folder, socket, token file or temp file appears")
         assertNull(System.console(), "this suite runs the way CI does: without a console")
+    }
+
+    // -- profile set / list: the account's ignore keys --------------------------------
+
+    private val withPoll = "daemon_poll_seconds = 30\n"
+
+    @Test
+    fun `a profile without the ignore keys lists their defaults`() {
+        writeConfig(twoProfiles)
+
+        val work = listed("work")
+        assertFalse(work.getValue("honor_gitignore").jsonPrimitive.boolean)
+        assertEquals(JsonArray(emptyList()), work.getValue("ignore_rules"))
+    }
+
+    @Test
+    fun `set honor_gitignore turns it on and off, reports the old value and leaves the rest byte for byte`() {
+        writeConfig(twoProfiles)
+
+        assertEquals(0, run("profile", "set", "work", "honor_gitignore", "true", "--json"), stderr())
+        val r = json()
+        assertTrue(r.getValue("ok").jsonPrimitive.boolean)
+        assertTrue(r.getValue("value").jsonPrimitive.boolean)
+        assertFalse(r.getValue("previous").jsonPrimitive.boolean)
+        assertTrue(r.getValue("restart_required").jsonPrimitive.boolean)
+        assertEquals(twoProfiles.replace(withPoll, withPoll + "honor_gitignore = true\n"), config())
+        assertTrue(listed("work").getValue("honor_gitignore").jsonPrimitive.boolean)
+
+        assertEquals(0, run("profile", "set", "work", "honor_gitignore", "false", "--json"), stderr())
+        assertTrue(json().getValue("previous").jsonPrimitive.boolean)
+        assertEquals(twoProfiles.replace(withPoll, withPoll + "honor_gitignore = false\n"), config())
+
+        assertEquals(0, run("profile", "set", "work", "honor_gitignore", "--unset", "--json"), stderr())
+        assertEquals(twoProfiles, config())
+    }
+
+    @Test
+    fun `set honor_gitignore refuses anything but true or false`() {
+        writeConfig(twoProfiles)
+        for (bad in listOf("yes", "1", "", "maybe")) {
+            assertEquals(1, run("profile", "set", "work", "honor_gitignore", bad, "--json"), "value '$bad'")
+            assertEquals("invalid_value", json().getValue("error").jsonPrimitive.content, "value '$bad'")
+        }
+        assertEquals(twoProfiles, config())
+    }
+
+    @Test
+    fun `set ignore_rules reads the lines from stdin, changes them, and clears them on empty input`() {
+        writeConfig(twoProfiles)
+        val rules = listOf("*.log", "!keep.log", "# note", "sub dir/\\#x \"q\"")
+
+        stdin("*.log\r\n!keep.log\r\n\r\n# note\r\nsub dir/\\#x \"q\"\r\n")
+        assertEquals(0, run("profile", "set", "work", "ignore_rules", "--json"), stderr())
+        val r = json()
+        assertTrue(r.getValue("ok").jsonPrimitive.boolean)
+        assertEquals(rules, r.getValue("value").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(0, r.getValue("previous").jsonArray.size)
+        assertTrue(r.getValue("restart_required").jsonPrimitive.boolean)
+        assertEquals(rules, listed("work").getValue("ignore_rules").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(twoProfiles, config().replace(Regex("ignore_rules = .*\n"), ""), "only the ignore_rules line was added")
+
+        stdin("/build\n")
+        assertEquals(0, run("profile", "set", "work", "ignore_rules", "--json"), stderr())
+        assertEquals(4, json().getValue("previous").jsonArray.size)
+        assertEquals(listOf("/build"), listed("work").getValue("ignore_rules").jsonArray.map { it.jsonPrimitive.content })
+
+        stdin("\r\n \n")
+        assertEquals(0, run("profile", "set", "work", "ignore_rules", "--json"), stderr())
+        assertEquals(listOf("/build"), json().getValue("previous").jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(twoProfiles, config(), "empty input removes the key")
+        assertEquals(JsonArray(emptyList()), listed("work").getValue("ignore_rules"))
+    }
+
+    @Test
+    fun `set ignore_rules --unset clears without reading stdin, and a value argument is refused`() {
+        writeConfig(twoProfiles)
+        stdin("/x\n")
+        assertEquals(0, run("profile", "set", "work", "ignore_rules", "--json"))
+        stdin("/must-not-be-read\n")
+        assertEquals(0, run("profile", "set", "work", "ignore_rules", "--unset", "--json"), stderr())
+        assertEquals(twoProfiles, config())
+
+        assertEquals(1, run("profile", "set", "work", "ignore_rules", "*.log", "--json"))
+        assertEquals("invalid_value", json().getValue("error").jsonPrimitive.content)
+        assertEquals(twoProfiles, config())
+    }
+
+    @Test
+    fun `set ignore_rules refuses control characters and an oversized input, and changes nothing`() {
+        writeConfig(twoProfiles)
+
+        stdin("ok\n\u0001bad\n")
+        assertEquals(1, run("profile", "set", "work", "ignore_rules", "--json"))
+        assertEquals("invalid_value", json().getValue("error").jsonPrimitive.content)
+
+        stdin("a\n".repeat(40_000))
+        assertEquals(1, run("profile", "set", "work", "ignore_rules", "--json"))
+        assertEquals("invalid_value", json().getValue("error").jsonPrimitive.content)
+
+        assertEquals(twoProfiles, config())
+    }
+
+    @Test
+    fun `set ignore_rules on an unknown profile is refused`() {
+        writeConfig(twoProfiles)
+        stdin("/x\n")
+        assertEquals(1, run("profile", "set", "nope", "ignore_rules", "--json"))
+        assertEquals("profile_not_found", json().getValue("error").jsonPrimitive.content)
+        assertEquals(twoProfiles, config())
     }
 }
