@@ -72,6 +72,10 @@ class DaemonRuntime(
     // (default 60 s, #463) or --poll-interval; 0 stays the default here so tests that
     // construct a runtime do not poll.
     private val pollIntervalMs: Long = 0,
+    // #891: the health line's interval (one INFO line with the heap, GC, threads, enumeration and upload
+    // queue, see DaemonHealthLine). `daemon run` passes 60 s; 0 = off, so tests that construct a runtime
+    // log nothing.
+    private val healthIntervalMs: Long = 0,
     // #450: hydration cache budget in bytes (profile key hydration_cache_max_bytes); 0 = unlimited.
     private val hydrationCacheMaxBytes: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
     // #603 (U4): the profile's hosting mode, resolved and gated by `daemon run` before this runtime is
@@ -493,6 +497,17 @@ class DaemonRuntime(
                 // cycle at full cadence. Mount-only (#603): a mirror profile's discovery is `sync`'s
                 // reconcile, not the mount-view poll (the poller is constructed above, null on a mirror).
                 poller?.start()
+
+                // #891: one health line per interval (heap, GC, threads, enumeration, upload queue) so the
+                // memory a long scan needs is visible while it happens. Cancelled with the serve scope.
+                DaemonHealthLine(
+                    intervalMs = healthIntervalMs,
+                    scope = serveScope,
+                    enumeration = {
+                        mount.enumerationTracker.snapshot().let { it.state.name.lowercase() to it.items }
+                    },
+                    uploadQueueDepth = { hydration?.uploadHealthSnapshot()?.pending },
+                ).start()
 
                 // credential_health (#586): checked off the request path, so the first status can already carry an answer.
                 val credentialHealth = CredentialHealthMonitor(credentialHealthCheck, credentialHealthTtlMs, serveScope)

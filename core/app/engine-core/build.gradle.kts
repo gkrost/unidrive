@@ -25,3 +25,14 @@ dependencies {
 tasks.test {
     useJUnit()
 }
+
+// #891: the retained-heap probe of a full enumeration (fresh vs resumed), opt-in so `check` is unchanged.
+// Sizes via -Psizes=100000,200000,400000 (default 100k/200k/400k inside the probe).
+tasks.register<JavaExec>("heapProbe") {
+    group = "verification"
+    description = "Retained heap of a full enumeration, fresh vs resumed; fails past the resumed/fresh ratio."
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass.set("org.krost.unidrive.engine.HeapProbeKt")
+    jvmArgs("-Xmx2g")
+    args = (project.findProperty("sizes") as String?)?.split(',') ?: emptyList()
+}

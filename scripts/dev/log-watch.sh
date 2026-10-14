@@ -150,6 +150,7 @@ summary() {
   echo "  MDC missing (\\[?\\?\\?\\?\\?\\?\\?\\]):     $(count_pattern '\[\?\?\?\?\?\?\?\]' "$files")"
   echo "  Connection reset / aborted:   $(count_pattern 'Connection (reset|aborted)|Verbindung wurde' "$files")"
   echo "  net_retry_reset (UD-278):     $(count_pattern 'I/O error \(attempt' "$files")"
+  echo "  health lines (#891):          $(count_pattern 'health heap_used_mib=' "$files")"
   echo
   echo "=== sync scan boundaries ==="
   scan_summary "$files"
