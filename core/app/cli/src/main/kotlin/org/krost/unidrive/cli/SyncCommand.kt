@@ -38,9 +38,22 @@ import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import picocli.CommandLine.Spec
+import java.nio.file.Path
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import kotlin.time.Duration.Companion.seconds
+
+/**
+ * Owner-only credentials and profile folder before the provider reads them (StoragePermissions). A dry run
+ * writes nothing and must not lock the operator out either: an elevated dry run once tightened the folder so
+ * a later non-elevated invocation failed with an IOException (#626 item 1).
+ */
+internal fun restrictProfileForSync(
+    dryRun: Boolean,
+    profileDir: Path,
+) {
+    if (!dryRun) StoragePermissions.restrictProfile(profileDir)
+}
 
 @Command(name = "sync", description = ["Sync files with cloud provider"], mixinStandardHelpOptions = true)
 open class SyncCommand : Runnable {
@@ -257,8 +270,9 @@ open class SyncCommand : Runnable {
         }
 
         val profile = parent.resolveCurrentProfile()
-        // Owner-only credentials and profile folder before the provider reads them (StoragePermissions).
-        StoragePermissions.restrictProfile(parent.providerConfigDir())
+        // Owner-only credentials and profile folder before the provider reads them (StoragePermissions);
+        // a dry run skips it (see restrictProfileForSync).
+        restrictProfileForSync(dryRun, parent.providerConfigDir())
         val rawProvider = parent.createProvider()
         val config = parent.loadSyncConfig()
         // A sync_path in config.toml is the profile's standing scope; --sync-path
