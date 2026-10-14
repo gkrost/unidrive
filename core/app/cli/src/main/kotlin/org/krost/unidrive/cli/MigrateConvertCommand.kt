@@ -546,10 +546,13 @@ internal object LegacyConversion {
 
         // Phase PUBLISH: the mode becomes visible only after the byte work is done.
         if ("PUBLISH" !in journal.phases) {
-            val updated = org.krost.unidrive.sync.setProfileMode(Files.readString(setup.configFile), setup.profileName, targetMode)
-            Files.writeString(setup.configFile, updated)
-            journal = journal.withPhase("PUBLISH")
-            Journal.save(setup.profileDir, journal)
+            ConfigFileTransaction.withLock(setup.configFile) {
+                val latestConfig = Files.readString(setup.configFile)
+                val updated = org.krost.unidrive.sync.setProfileMode(latestConfig, setup.profileName, targetMode)
+                ConfigFileTransaction.writeAtomically(setup.configFile, updated)
+                journal = journal.withPhase("PUBLISH")
+                Journal.save(setup.profileDir, journal)
+            }
         }
 
         // Mirror adopt: reset the enumeration baseline so the first sync gathers fresh and the

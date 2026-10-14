@@ -80,14 +80,15 @@ class VaultEncryptCommand : Runnable {
         }
 
         val passphrase = readPassphrase("Vault passphrase: ")
-        val data = vault.read(passphrase)
-        val mutableData = data.toMutableMap()
 
         val configPath = baseDir.resolve("config.toml")
-        if (!Files.exists(configPath)) {
-            println("No config.toml found — nothing to encrypt.")
-            return
-        }
+        ConfigFileTransaction.withLock(configPath) {
+            if (!Files.exists(configPath)) {
+                println("No config.toml found — nothing to encrypt.")
+                return@withLock
+            }
+        val data = vault.read(passphrase)
+        val mutableData = data.toMutableMap()
 
         val configLines = Files.readAllLines(configPath)
         val raw = SyncConfig.parseRaw(configLines.joinToString("\n"), configPath.toString())
@@ -137,17 +138,18 @@ class VaultEncryptCommand : Runnable {
             }
         }
 
-        if (encryptedCount == 0) {
-            println("No sensitive credentials found in config.toml.")
-            return
+            if (encryptedCount == 0) {
+                println("No sensitive credentials found in config.toml.")
+                return@withLock
+            }
+
+            vault.write(passphrase, mutableData)
+
+            val filteredLines = configLines.filterIndexed { idx, _ -> idx !in linesToRemove }
+            ConfigFileTransaction.writeAtomically(configPath, filteredLines.joinToString("\n"))
+
+            println("Encrypted credentials for $encryptedCount profile(s).")
         }
-
-        vault.write(passphrase, mutableData)
-
-        val filteredLines = configLines.filterIndexed { idx, _ -> idx !in linesToRemove }
-        Files.writeString(configPath, filteredLines.joinToString("\n"))
-
-        println("Encrypted credentials for $encryptedCount profile(s).")
     }
 
     private fun extractIfPresent(
@@ -177,15 +179,15 @@ class VaultDecryptCommand : Runnable {
         val passphrase = readPassphrase("Vault passphrase: ")
         val data = vault.read(passphrase)
 
-        if (data.isEmpty()) {
-            println("Vault is empty — nothing to restore.")
-            vault.delete()
-            return
-        }
-
         val configPath = baseDir.resolve("config.toml")
-        val configContent = if (Files.exists(configPath)) Files.readString(configPath) else "[general]\n"
-        val lines = configContent.lines().toMutableList()
+        ConfigFileTransaction.withLock(configPath) {
+            if (data.isEmpty()) {
+                println("Vault is empty — nothing to restore.")
+                vault.delete()
+                return@withLock
+            }
+            val configContent = if (Files.exists(configPath)) Files.readString(configPath) else "[general]\n"
+            val lines = configContent.lines().toMutableList()
 
         for ((profileName, creds) in data) {
             val sectionHeader = "[providers.$profileName]"
@@ -206,9 +208,10 @@ class VaultDecryptCommand : Runnable {
             lines.addAll(insertIdx, credLines)
         }
 
-        Files.writeString(configPath, lines.joinToString("\n"))
-        vault.delete()
-        println("Credentials restored to config.toml. Vault deleted.")
+            ConfigFileTransaction.writeAtomically(configPath, lines.joinToString("\n"))
+            vault.delete()
+            println("Credentials restored to config.toml. Vault deleted.")
+        }
     }
 }
 

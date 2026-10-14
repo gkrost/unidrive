@@ -22,10 +22,8 @@ import picocli.CommandLine.Option
 import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import java.io.IOException
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 import java.util.concurrent.Callable
 
 /**
@@ -218,19 +216,7 @@ internal fun errorJson(e: ProfileCommandError): JsonObject =
 internal fun writeConfigAtomically(
     target: Path,
     text: String,
-) {
-    val tmp = target.resolveSibling(target.fileName.toString() + ".tmp")
-    try {
-        Files.writeString(tmp, text)
-        try {
-            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)
-        }
-    } finally {
-        Files.deleteIfExists(tmp)
-    }
-}
+) = ConfigFileTransaction.writeAtomically(target, text)
 
 // -- profile set ---------------------------------------------------------------
 
@@ -282,6 +268,7 @@ class ProfileSetCommand : Callable<Int> {
 
     private fun applyChange(): JsonObject {
         val configPath = profileCmd.parent.configBaseDir().resolve("config.toml")
+        return ConfigFileTransaction.withLock(configPath) {
         val spec = ProfileSettings.specFor(key)
         if (!isValidProfileName(name)) {
             throw ProfileCommandError("invalid_profile_name", "'$name' is not a valid profile name")
@@ -332,7 +319,7 @@ class ProfileSetCommand : Callable<Int> {
         }
 
         val restart = spec.needsDaemonRestart
-        return buildJsonObject {
+        buildJsonObject {
             put("ok", true)
             put("profile", name)
             put("key", key)
@@ -347,6 +334,7 @@ class ProfileSetCommand : Callable<Int> {
                     "Saved. This key is display-only; no daemon restart is needed."
                 },
             )
+        }
         }
     }
 }
