@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Issues | none filed yet: file one before starting ("daemon: periodic health line and a heap probe for a full enumeration"); related gkrost/unidrive#638 |
+| Issues | gkrost/unidrive#891; related gkrost/unidrive#638 |
 | Labels | enhancement, kind:observability, kind:efficiency |
 | Size | S-M |
 | Priority | rank 14 of 54 (first-sync group), wave 1 |
-| Status | ready |
+| Status | in progress by PR #895; do not start another implementation |
 | Depends on | nothing |
 | Not in parallel with | P42 (logging config), P15 |
 | Status check | verified on main a0c6c4d3, 2026-10-14: no health line, no memory test exists (`ManagementFactory` is used only in `CliEncoding.kt`) |
