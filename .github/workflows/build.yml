@@ -69,6 +69,9 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -87,6 +90,45 @@ jobs:
       - name: Gradle check
         working-directory: core
         run: ./gradlew check --no-daemon
+
+      # Advisory: the quarantined (flaky) tests, which `check` does not run (docs/dev/testing-flaky-policy.md). The step
+      # cannot fail the job: continue-on-error, a time box, and flakyTest itself ignores their failures. What happened
+      # goes to the job summary, one ::warning:: per failed test, and the artifact below.
+      - name: Flaky tests (advisory)
+        id: flaky
+        working-directory: core
+        continue-on-error: true
+        timeout-minutes: 15
+        run: ./gradlew flakyTest --continue --no-daemon
+
+      - name: Upload flaky test reports
+        if: ${{ !cancelled() && steps.flaky.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flaky-test-reports-linux
+          path: |
+            core/app/*/build/reports/tests/flakyTest
+            core/app/*/build/test-results/flakyTest
+            core/providers/*/build/reports/tests/flakyTest
+            core/providers/*/build/test-results/flakyTest
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # The build checks the quarantine markers; whether the issue behind one is still open it cannot see. Advisory.
+      - name: Quarantine issues are open (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # core/build/flaky/quarantine.tsv comes from checkFlakyQuarantine: issue, module, class, test, location
+          [ -f core/build/flaky/quarantine.tsv ] || exit 0
+          cut -f1 core/build/flaky/quarantine.tsv | sort -un | while read -r n; do
+            state=$(gh issue view "$n" --repo "$GITHUB_REPOSITORY" --json state --jq .state 2>/dev/null || echo unknown)
+            if [ "$state" != OPEN ]; then
+              echo "::warning title=Quarantine issue not open::Issue #$n is $state but tests are still quarantined under it. Un-quarantine them (docs/dev/testing-flaky-policy.md) or reopen the issue."
+            fi
+          done
 
   # The packaged distribution ships a jlink runtime image jlinked from the
   # bundled runtime JDK — the current JDK release train, not the compile
@@ -118,6 +160,29 @@ jobs:
         working-directory: core
         run: ./gradlew check --no-daemon -PunidriveTestJvm=27
 
+      # Advisory: the quarantined (flaky) tests, which `check` does not run (docs/dev/testing-flaky-policy.md). The step
+      # cannot fail the job: continue-on-error, a time box, and flakyTest itself ignores their failures. What happened
+      # goes to the job summary, one ::warning:: per failed test, and the artifact below.
+      - name: Flaky tests (advisory)
+        id: flaky
+        working-directory: core
+        continue-on-error: true
+        timeout-minutes: 15
+        run: ./gradlew flakyTest --continue --no-daemon -PunidriveTestJvm=27
+
+      - name: Upload flaky test reports
+        if: ${{ !cancelled() && steps.flaky.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flaky-test-reports-runtime-jdk
+          path: |
+            core/app/*/build/reports/tests/flakyTest
+            core/app/*/build/test-results/flakyTest
+            core/providers/*/build/reports/tests/flakyTest
+            core/providers/*/build/test-results/flakyTest
+          if-no-files-found: ignore
+          retention-days: 14
+
   check-windows:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -141,6 +206,30 @@ jobs:
         working-directory: core
         shell: bash
         run: ./gradlew check --no-daemon
+
+      # Advisory: the quarantined (flaky) tests, which `check` does not run (docs/dev/testing-flaky-policy.md). The step
+      # cannot fail the job: continue-on-error, a time box, and flakyTest itself ignores their failures. What happened
+      # goes to the job summary, one ::warning:: per failed test, and the artifact below.
+      - name: Flaky tests (advisory)
+        id: flaky
+        working-directory: core
+        shell: bash
+        continue-on-error: true
+        timeout-minutes: 15
+        run: ./gradlew flakyTest --continue --no-daemon
+
+      - name: Upload flaky test reports
+        if: ${{ !cancelled() && steps.flaky.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flaky-test-reports-windows
+          path: |
+            core/app/*/build/reports/tests/flakyTest
+            core/app/*/build/test-results/flakyTest
+            core/providers/*/build/reports/tests/flakyTest
+            core/providers/*/build/test-results/flakyTest
+          if-no-files-found: ignore
+          retention-days: 14
 
   # No macOS job: macOS is not a supported or tested platform yet. The former `check-macos-keychain` job hung until the 6 h
   # job limit on every run (cause not diagnosed) and a macOS leg makes the build too slow. The code
