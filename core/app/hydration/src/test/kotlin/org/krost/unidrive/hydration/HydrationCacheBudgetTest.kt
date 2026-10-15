@@ -10,9 +10,12 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.experimental.categories.Category
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.model.SyncEntry
+import org.krost.unidrive.testing.Flaky
+import org.krost.unidrive.testing.FlakyTests
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
@@ -122,6 +125,9 @@ class HydrationCacheBudgetTest {
         }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 902, reason = "runTest hits its 1 min wall clock on a loaded Windows runner (real files)",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38625423397/job/116063293745")
     fun `a path with a queued or in-flight upload is never evicted, even when its copy is identical to the sync root`() =
         runTest {
             val env = freshEnv()
@@ -467,6 +473,9 @@ class HydrationCacheBudgetTest {
     }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 902, reason = "runTest hits its 1 min wall clock on a loaded Windows runner (real files)",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38284021448/job/114927958874")
     fun `an over-budget pass classifies the cache in batches, not one row query per file`() {
         val env = freshEnv()
         val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40

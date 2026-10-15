@@ -4,6 +4,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Job
+import org.junit.experimental.categories.Category
+import org.krost.unidrive.testing.Flaky
+import org.krost.unidrive.testing.FlakyTests
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeout
@@ -347,6 +350,9 @@ class DaemonRuntimeTest {
      * dropped. daemon.shutdown goes last because its ack stops the daemon.
      */
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 906, reason = "the daemon is not ready within its 30 s budget on a loaded Windows runner",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/37616178178/job/112774934133")
     fun verbs_sent_as_soon_as_the_socket_appears_all_get_a_reply() =
         runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             val runtime = DaemonRuntime(
@@ -686,6 +692,9 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 906, reason = "refresh.done not seen within the 30 s budget on a loaded Windows runner",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/37958159941/job/113913868350")
     fun refresh_run_emits_terminal_event_after_completing_enumeration() = runBlocking {
         // Spec T5: subscribe -> refresh.run -> await refresh.done terminal event.
         // Then re-issue refresh.run; must succeed (not stuck in 'busy').
@@ -1227,6 +1236,9 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 906, reason = "daemon.status shows no enumeration within 30 s on a loaded Windows runner",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38569710968/job/115871656693")
     fun `daemon_status follows an enumeration from running to done`() = runBlocking {
         val gate = CompletableDeferred<Unit>()
         val runtime = startDaemon(ScriptedDeltaProvider(gate = gate))
@@ -1264,6 +1276,9 @@ class DaemonRuntimeTest {
     }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 906, reason = "daemon.status shows no failed enumeration within 30 s on a loaded Windows runner",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38556058682/job/115833079932")
     fun `daemon_status reports a failed enumeration with a reason that names no path`() = runBlocking {
         val runtime = startDaemon(ScriptedDeltaProvider(failure = ProviderException("cannot list /Secret/Plans: boom")))
         val daemonJob = launch { runtime.start() }

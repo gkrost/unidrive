@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.experimental.categories.Category
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
@@ -21,6 +22,8 @@ import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.SyncConfig
+import org.krost.unidrive.testing.Flaky
+import org.krost.unidrive.testing.FlakyTests
 import java.nio.ByteBuffer
 import java.nio.channels.SocketChannel
 import java.nio.file.Files
@@ -92,6 +95,9 @@ type = "$type"
     // ── a live mirror daemon refuses the mount verbs and reports its mode ────
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 903, reason = "the daemon does not answer its first verb within 5 s on a loaded Windows runner",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38371612970/job/115210349777")
     fun `a mirror daemon answers wrong_mode to the mount verbs and reports mirror in daemon status`() =
         runBlocking {
             val tempDir = Files.createTempDirectory("hosting-contract-mirror")
