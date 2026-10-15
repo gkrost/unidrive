@@ -109,6 +109,39 @@ class RecentUploadReapGuardTest {
             assertFalse(Files.exists(syncRoot.resolve("tracked.txt")), "the local copy of a deleted remote file is removed")
         }
 
+    @Test
+    fun `a row written after the gather started is deferred even without an in-memory upload mark`() =
+        runTest {
+            val eng = engine()
+
+            // Baseline: synced file. Any in-memory upload grace mark from this pass is
+            // irrelevant — the next gather happens after the 120 s window in production
+            // terms, and a daemon restart would have wiped it anyway.
+            provider.files["/geheim.txt"] = ByteArray(10)
+            provider.deltaItems = listOf(cloudItem("/geheim.txt", size = 10))
+            eng.syncOnce()
+            assertNotNull(db.getEntry("/geheim.txt"))
+
+            // Full re-enumeration that does not list the file (provider lag), but a
+            // write-back lands as the walk starts: the mount's upload completed after
+            // the listing pages were fetched, so their silence proves nothing. The
+            // row's own write time is the persisted signal.
+            db.setSyncState("delta_cursor", "")
+            provider.deltaItems = emptyList()
+            provider.deltaCursor = "cursor-2"
+            provider.duringDelta = {
+                db.upsertEntry(db.getEntry("/geheim.txt")!!.copy(lastSynced = java.time.Instant.now()))
+            }
+
+            eng.syncOnce()
+
+            assertNotNull(
+                db.getEntry("/geheim.txt"),
+                "a row written after the gather started must not be reaped by that gather",
+            )
+            assertTrue(Files.exists(syncRoot.resolve("geheim.txt")), "the local file must survive")
+        }
+
     private fun cloudItem(
         path: String,
         size: Long = 100,

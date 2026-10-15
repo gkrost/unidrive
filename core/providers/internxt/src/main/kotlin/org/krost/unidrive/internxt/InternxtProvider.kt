@@ -2084,6 +2084,24 @@ class InternxtProvider(
         )
     }
 
+    // An offset listing's marker or rows, a damaged marker, a cursor of another status, a marker whose rows are
+    // gone: none of it is the cursor listing's to resume. The engine clears the staging when the enumeration
+    // completes.
+    private fun logFreshCursorStart(
+        marker: String?,
+        stagedRows: Int,
+    ) {
+        if (marker != null || stagedRows > 0) {
+            log.info(
+                "The stored scan (marker {}, {} staged rows) is not one the cursor listing can resume; listing from the start",
+                marker?.take(60),
+                stagedRows,
+            )
+        } else {
+            log.info("Listing the whole drive by cursor: folders and files, one request at a time each")
+        }
+    }
+
     // The full enumeration of the whole drive by the cursor listings. The folders and the files stream run
     // at once, each strictly one request at a time (a cursor names the page before it). Every page is staged
     // with a marker that holds both cursors, so a failed or killed attempt continues from the cursors and not
@@ -2105,6 +2123,13 @@ class InternxtProvider(
     // the newest updatedAt seen: the two streams end at different times, so the next incremental delta has to
     // ask for everything since the beginning. A stream that a guard cut short makes the page incomplete.
     //
+    // A stream that failed twice in a row on the same cursor with the same timeout-like failure (HTTP 408 or
+    // 5xx) does not resume that cursor a third time: it continues from an updatedAt a little before the cursor
+    // without the status filter (see pageStreamWithFallback). Its pages hold rows of every status; the ones that
+    // are not live are dropped here, and a row that turns up again as not live also leaves the rows an earlier
+    // page stored. A staged copy of such a row only comes back after a restart, and the next incremental delta,
+    // which asks for everything since the beginning of the enumeration, reports it as the tombstone it is.
+    //
     // Scoped profiles do not come here: their cost is bounded by the scope (the walk), the cursor listing
     // always walks the whole account and cannot be narrowed to a subtree.
     private suspend fun cursorFullDelta(
@@ -2122,19 +2147,7 @@ class InternxtProvider(
         val folders = LinkedHashMap<String, InternxtFolder>()
         val files = LinkedHashMap<String, InternxtFile>()
         if (resume == null) {
-            // An offset listing's marker or rows, a damaged marker, a cursor of another status, a marker whose
-            // rows are gone: none of it is this strategy's to resume. The engine clears the staging when the
-            // enumeration completes.
-            if (scanContext?.resumeMarker != null || staged.isNotEmpty()) {
-                log.info(
-                    "The stored scan (marker {}, {} staged rows) is not one the cursor listing can resume; " +
-                        "listing from the start",
-                    scanContext?.resumeMarker?.take(60),
-                    staged.size,
-                )
-            } else {
-                log.info("Listing the whole drive by cursor: folders and files, one request at a time each")
-            }
+            logFreshCursorStart(scanContext?.resumeMarker, staged.size)
         } else {
             for (row in resume.rows) {
                 if (row.isFolder) folders[row.id] = row.toResumedFolder() else files[row.id] = row.toResumedFile()
@@ -2142,8 +2155,8 @@ class InternxtProvider(
             log.info(
                 "Resuming the cursor listing begun {}: folders {}, files {}, {} staged rows",
                 startedAt,
-                if (foldersAt.done) "done" else if (foldersAt.cursor == null) "not started" else "from its cursor",
-                if (filesAt.done) "done" else if (filesAt.cursor == null) "not started" else "from its cursor",
+                describeResume(foldersAt),
+                describeResume(filesAt),
                 folders.size + files.size,
             )
         }
@@ -2152,8 +2165,10 @@ class InternxtProvider(
         val lock = Mutex()
         val heartbeat = onPageProgress?.let { cb -> ScanHeartbeat(cb) }
 
-        // Read under the lock, after every page and at the start: the count never goes down (the staged rows
-        // are counted from the beginning) and the reports arrive in the order of the counts.
+        // Read under the lock, after every page and at the start: the count rises with every page and the
+        // reports arrive in the order of the counts. Since the fallback (#879) it can also drop, by the rare
+        // row an unfiltered page delivers as no longer live against what the filtered pages stored — a few
+        // rows against hundreds of thousands, and the heartbeat's wall-clock half keeps reporting through it.
         fun report() {
             val total = folders.size + files.size
             heartbeat?.tick(total)
@@ -2166,34 +2181,50 @@ class InternxtProvider(
                 coroutineScope {
                     val foldersEnd =
                         async {
-                            pageCursorStream(
+                            pageStreamWithFallback(
                                 stream = "folders",
                                 start = foldersAt,
-                                fetch = { c -> api.getFoldersSync(updatedAt = SYNC_LISTING_START.takeIf { c == null }, cursor = c) },
+                                fetch = { r -> api.getFoldersSync(updatedAt = r.updatedAt, cursor = r.cursor, status = r.status) },
                                 onPage = { page, at ->
                                     lock.withLock {
-                                        for (f in page) folders[f.uuid] = f
+                                        val (live, gone) = page.partitionLive(at.unfiltered) { it.isLive() }
+                                        for (f in gone) folders.remove(f.uuid)
+                                        for (f in live) folders[f.uuid] = f
                                         foldersAt = at
-                                        val rows = page.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_STAGED_TAG) }
+                                        val rows = live.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_STAGED_TAG) }
                                         persist?.invoke(rows, cursorMarker(startedAt, foldersAt, filesAt))
                                         report()
+                                    }
+                                },
+                                onPosition = { at ->
+                                    lock.withLock {
+                                        foldersAt = at
+                                        persist?.invoke(emptyList(), cursorMarker(startedAt, foldersAt, filesAt))
                                     }
                                 },
                             )
                         }
                     val filesEnd =
                         async {
-                            pageCursorStream(
+                            pageStreamWithFallback(
                                 stream = "files",
                                 start = filesAt,
-                                fetch = { c -> api.getFilesSync(updatedAt = SYNC_LISTING_START.takeIf { c == null }, cursor = c) },
+                                fetch = { r -> api.getFilesSync(updatedAt = r.updatedAt, cursor = r.cursor, status = r.status) },
                                 onPage = { page, at ->
                                     lock.withLock {
-                                        for (f in page) files[f.uuid] = f
+                                        val (live, gone) = page.partitionLive(at.unfiltered) { it.isLive() }
+                                        for (f in gone) files.remove(f.uuid)
+                                        for (f in live) files[f.uuid] = f
                                         filesAt = at
-                                        val rows = page.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_STAGED_TAG) }
+                                        val rows = live.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_STAGED_TAG) }
                                         persist?.invoke(rows, cursorMarker(startedAt, foldersAt, filesAt))
                                         report()
+                                    }
+                                },
+                                onPosition = { at ->
+                                    lock.withLock {
+                                        filesAt = at
+                                        persist?.invoke(emptyList(), cursorMarker(startedAt, foldersAt, filesAt))
                                     }
                                 },
                             )
@@ -2940,6 +2971,22 @@ class InternxtProvider(
             "${file.uuid}|${file.modificationTime.orEmpty()}|${file.size}"
 
         internal fun InternxtFile.isLive(): Boolean = status == "EXISTS" && !isTombstoned()
+
+        // The rows of a page to keep and the ones to drop. A page asked for without the status filter holds rows of
+        // every status; a page asked for with it is kept as the server filtered it.
+        internal fun <T> List<T>.partitionLive(
+            unfiltered: Boolean,
+            live: (T) -> Boolean,
+        ): Pair<List<T>, List<T>> = if (unfiltered) partition(live) else Pair(this, emptyList())
+
+        private fun describeResume(position: StreamPosition): String =
+            when {
+                position.done -> "done"
+                position.unfiltered && position.cursor == null -> "from ${position.since} without a status filter"
+                position.unfiltered -> "from its cursor, without a status filter"
+                position.cursor == null -> "not started"
+                else -> "from its cursor"
+            }
 
         internal fun InternxtFolder.isLive(): Boolean = status == "EXISTS" && !isTombstoned()
 

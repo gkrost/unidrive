@@ -422,11 +422,13 @@ class InternxtApiService(
     // [updatedAt], every later page only the [cursor] the page before it returned, with the same
     // status and limit. A page's nextCursor is null on the last page. They are account-wide
     // listings: the read-idle watchdog rides at the listing limit like the offset ones above, so a
-    // slow page is never cut by the engine's own default timer.
+    // slow page is never cut by the engine's own default timer. A null [status] sends no status
+    // filter (the server then answers rows of every status, each naming its own, and issues cursors
+    // without a status; it refuses a cursor sent with another status than it was issued for).
     suspend fun getFoldersSync(
         updatedAt: String?,
         cursor: String?,
-        status: String = SYNC_LISTING_STATUS,
+        status: String? = SYNC_LISTING_STATUS,
         limit: Int = InternxtConfig.SYNC_PAGE_SIZE,
     ): SyncPage<InternxtFolder> =
         parseFoldersSyncPage(
@@ -435,12 +437,13 @@ class InternxtApiService(
                 syncQueryParams(updatedAt, cursor, status, limit),
                 socketTimeoutMs = listingSocketTimeoutMs,
             ),
+            rowsCarryStatus = status == null,
         )
 
     suspend fun getFilesSync(
         updatedAt: String?,
         cursor: String?,
-        status: String = SYNC_LISTING_STATUS,
+        status: String? = SYNC_LISTING_STATUS,
         limit: Int = InternxtConfig.SYNC_PAGE_SIZE,
     ): SyncPage<InternxtFile> =
         parseFilesSyncPage(
@@ -449,6 +452,7 @@ class InternxtApiService(
                 syncQueryParams(updatedAt, cursor, status, limit),
                 socketTimeoutMs = listingSocketTimeoutMs,
             ),
+            rowsCarryStatus = status == null,
         )
 
     suspend fun getFileMeta(uuid: String): InternxtFile =
