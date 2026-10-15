@@ -53,6 +53,8 @@ class EnumerationTracker(
     private var foldersDone: Int? = null
     private var foldersKnown: Int? = null
     private var foldersSkipped: Int? = null
+    private var pathsDone: Int? = null
+    private var pathsTotal: Int? = null
     private var lastSuccessAtMs: Long? = null
     private var lastError: String? = null
     // #878: the machine-readable cause of the last failure; cleared by a success and by a new attempt.
@@ -106,6 +108,14 @@ class EnumerationTracker(
             providerReported = true
             val strategyChanged = progress.listing != null && listing != null && progress.listing != listing
             progress.listing?.let { listing = it }
+            // The listing is over once the provider resolves paths: the phase switch comes from the report, the
+            // counts only ever grow (the total can rise when a folder fetched hangs below another missing one).
+            progress.pathsTotal?.let { total ->
+                phase = EnumerationStatus.Phase.RESOLVING_PATHS
+                val newTotal = max(max(total, 0), pathsTotal ?: 0)
+                pathsTotal = newTotal
+                pathsDone = min(max(progress.pathsDone ?: 0, pathsDone ?: 0), newTotal)
+            }
             foldersDone = progress.foldersDone?.coerceAtLeast(0)
             foldersKnown = progress.foldersKnown?.let { max(it, foldersDone ?: 0) }
             foldersSkipped = progress.foldersSkipped?.coerceAtLeast(0)?.let { min(it, foldersDone ?: it) }
@@ -133,6 +143,8 @@ class EnumerationTracker(
             val now = clock()
             phase = EnumerationStatus.Phase.SAVING
             items = max(finalItems, 0)
+            pathsDone = null
+            pathsTotal = null
             samples.clear()
             (now - (startedAtMs ?: now)).also { listingElapsedMs = it }
         }
@@ -190,7 +202,8 @@ class EnumerationTracker(
         synchronized(lock) {
             val now = clock()
             val running = state == EnumerationStatus.State.RUNNING
-            val measuring = gathering()
+            // The rate and the estimate describe the listing; resolving paths is not part of it.
+            val measuring = running && phase == EnumerationStatus.Phase.LISTING
             val (rate, folderRate) = if (measuring) rates(now) else null to null
             val eta = if (measuring) eta(now, rate, folderRate) else null
             val progressShown = state != EnumerationStatus.State.IDLE
@@ -213,6 +226,8 @@ class EnumerationTracker(
                 foldersDone = if (progressShown) foldersDone else null,
                 foldersKnown = if (progressShown) foldersKnown else null,
                 foldersSkipped = if (progressShown) foldersSkipped else null,
+                pathsDone = if (progressShown) pathsDone else null,
+                pathsTotal = if (progressShown) pathsTotal else null,
                 ratePerS = rate,
                 etaS = eta?.first,
                 etaKind = eta?.second,
@@ -223,8 +238,11 @@ class EnumerationTracker(
             )
         }
 
-    // Running and still gathering: the only time progress reports mean anything.
-    private fun gathering(): Boolean = state == EnumerationStatus.State.RUNNING && phase == EnumerationStatus.Phase.LISTING
+    // Running and still gathering (listing, or resolving the paths of what was listed): the only time progress reports
+    // mean anything.
+    private fun gathering(): Boolean =
+        state == EnumerationStatus.State.RUNNING &&
+            (phase == EnumerationStatus.Phase.LISTING || phase == EnumerationStatus.Phase.RESOLVING_PATHS)
 
     private fun clearProgress() {
         listing = null
@@ -233,6 +251,8 @@ class EnumerationTracker(
         foldersDone = null
         foldersKnown = null
         foldersSkipped = null
+        pathsDone = null
+        pathsTotal = null
         listingElapsedMs = null
         samples.clear()
     }

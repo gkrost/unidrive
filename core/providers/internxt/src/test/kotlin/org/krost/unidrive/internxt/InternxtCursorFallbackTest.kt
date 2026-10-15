@@ -340,7 +340,9 @@ class InternxtCursorFallbackTest {
             assertEquals(4, afterWall.size, "[a3 a4] [b1 b2] [b3 b4] [b5 b6]")
             assertTrue(server.seen.filter { it.stream == "files" }.all { it.status == "EXISTS" }, "the files stream had no trouble and kept its filter")
 
-            assertTrue(staging.rows.keys.none { it in setOf("b1", "b3", "b6") }, "rows that are not live were never staged: ${staging.rows.keys}")
+            assertTrue(staging.rows.filterValues { it.hash == CURSOR_STAGED_TAG }.keys.none { it in setOf("b1", "b3", "b6") }, "rows that are not live were never staged as live: ${staging.rows.keys}")
+            assertFalse(staging.rows.containsKey("b3"), "a deleted folder is not kept at all")
+            assertTrue(setOf("b1", "b6").all { staging.rows[it]?.hash == CURSOR_ANCESTOR_TAG }, "the trashed ones are kept apart, as ancestor-only records")
             val marker = staging.marker()
             assertTrue(marker.folders.done && marker.folders.unfiltered, "the stream ended in the mode it ended in: ${marker.folders}")
             assertTrue(marker.files.done && !marker.files.unfiltered)

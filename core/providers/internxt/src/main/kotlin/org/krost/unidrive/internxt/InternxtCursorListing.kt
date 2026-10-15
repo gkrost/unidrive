@@ -248,10 +248,21 @@ private fun StreamPosition.hasStartingInstant(): Boolean = since?.let { runCatch
 // listing left behind belong to another listing and may describe items that are gone by now.
 internal const val CURSOR_STAGED_TAG: String = "cursor-listing"
 
-/** What a resumed cursor listing starts from: where both streams stand, and the rows its earlier pages staged. */
+// A trashed folder that an unfiltered page returned is kept as an ancestor-only record: it is no item of the listing
+// (its row is not live), but a live item can hang below it, and its row answers the folder's path without a request.
+// It is staged beside the live rows, in the same transaction as the page, and tagged apart so that it is never taken for
+// a live row. The marker is the same as without them: a scan staged before these rows existed resumes as it did,
+// the ancestors it did not keep being asked for when the paths are resolved.
+internal const val CURSOR_ANCESTOR_TAG: String = "cursor-listing|ancestor"
+
+/**
+ * What a resumed cursor listing starts from: where both streams stand, the rows its earlier pages staged, and the
+ * ancestor-only records ([CURSOR_ANCESTOR_TAG]) they kept.
+ */
 internal class CursorResume(
     val marker: CursorMarker,
     val rows: List<CloudItem>,
+    val ancestors: List<CloudItem> = emptyList(),
 )
 
 /**
@@ -269,7 +280,7 @@ internal fun cursorResumeOf(
     val mine = staged.filter { it.hash == CURSOR_STAGED_TAG }
     val claimsProgress = decoded.folders != StreamPosition() || decoded.files != StreamPosition()
     if (claimsProgress && mine.isEmpty()) return null
-    return CursorResume(decoded, mine)
+    return CursorResume(decoded, mine, staged.filter { it.hash == CURSOR_ANCESTOR_TAG })
 }
 
 /** How a stream ended: [COMPLETE] when the server said there is no next page, [CUT_SHORT] when a guard stopped it. */

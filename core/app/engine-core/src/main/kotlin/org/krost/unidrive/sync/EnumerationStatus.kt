@@ -25,6 +25,10 @@ data class EnumerationStatus(
     val foldersDone: Int? = null,
     val foldersKnown: Int? = null,
     val foldersSkipped: Int? = null,
+    /** While [Phase.RESOLVING_PATHS] (and after a failure in it): folders resolved of [pathsTotal]. */
+    val pathsDone: Int? = null,
+    /** The folders the listing left out and an item hangs below, known so far (a lower bound: it can grow). */
+    val pathsTotal: Int? = null,
     /** Items per second, smoothed over the last minute. */
     val ratePerS: Double? = null,
     val etaS: Long? = null,
@@ -55,6 +59,12 @@ data class EnumerationStatus(
     enum class Phase(val wire: String) {
         /** Gathering from the remote. */
         LISTING("listing"),
+
+        /**
+         * The listing is over; the provider resolves the paths of what it gathered, which asks for the folders the
+         * listing did not return one by one. [EnumerationStatus.pathsDone] of [EnumerationStatus.pathsTotal].
+         */
+        RESOLVING_PATHS("resolving_paths"),
 
         /** Writing the result to state.db. */
         SAVING("saving"),

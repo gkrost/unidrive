@@ -3,6 +3,7 @@ package org.krost.unidrive.internxt
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -1845,7 +1846,8 @@ class InternxtProvider(
         val resume = parseResumeOffsets(scanContext?.resumeMarker)
         // Rows the cursor listing or the tree walk staged are theirs: their markers do not parse as offsets, so
         // this listing starts over, and stale rows of another listing would rejoin it as if they were current.
-        val resumedRows = scanContext?.resumedItems.orEmpty().filter { it.hash != CURSOR_STAGED_TAG && !isTreeStaged(it) }
+        val resumedRows =
+            scanContext?.resumedItems.orEmpty().filter { it.hash != CURSOR_STAGED_TAG && it.hash != CURSOR_ANCESTOR_TAG && !isTreeStaged(it) }
         val resumedFolders = resumedRows.filter { it.isFolder }
         val resumedFiles = resumedRows.filter { !it.isFolder }
         val allFiles = mutableListOf<InternxtFile>()
@@ -2004,17 +2006,25 @@ class InternxtProvider(
         val seenMax =
             (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
                 .maxOrNull()
-        return assembleFullDelta(allFiles, allFolders, advanceCursor(seenMax, cursor))
+        return assembleFullDelta(allFiles, allFolders, advanceCursor(seenMax, cursor), onProgress = onProgress, listing = ScanProgress.LISTING_ACCOUNT)
     }
 
     // The DeltaPage of a full gather: the folder graph from the folders, a path for every item, the items
     // whose ancestors cannot be resolved dropped and counted. The offset listing and the cursor listing both
     // end here, so the same drive gives the same items whichever of them listed it. [cursor] is what the
     // page hands the engine for the next incremental delta.
+    //
+    // [ancestorRows] are the trashed folders the listing saw without returning them as items: a path that runs through
+    // one is resolved from its row, and only the folders neither the listing nor [ancestorRows] hold are asked for.
+    // Those requests are made before any path is built, a few at a time, and reported through [onProgress] (named
+    // [listing]) as the step that follows the listing.
     private suspend fun assembleFullDelta(
         allFiles: Collection<InternxtFile>,
         allFolders: Collection<InternxtFolder>,
         cursor: String,
+        ancestorRows: Map<String, InternxtFolder> = emptyMap(),
+        onProgress: ((ScanProgress) -> Unit)? = null,
+        listing: String? = null,
     ): DeltaPage {
         val creds = authService.getValidCredentials()
         // Mutable so the self-healing ancestor re-fetch can splice missing
@@ -2054,10 +2064,35 @@ class InternxtProvider(
         // `complete` reflects the residual gap and the engine skips
         // detectMissingAfterFullSync + leaves the cursor un-advanced.
         val nameDecryptor = mnemonicOrNull()
+        // The folders every path runs through, all found before the first path is built: the listing and the
+        // ancestor-only rows answer most, the rest is fetched a few at a time instead of one request after the other
+        // as the first item below each of them was met.
+        val gathered = allFiles.size + allFolders.size
+        val resolution =
+            resolveAncestors(
+                parents = allFiles.asSequence().map { it.folderUuid } + allFolders.asSequence().map { it.parentUuid },
+                folderMap = folderMap,
+                ancestors = ancestorRows,
+                rootUuid = creds.rootFolderId,
+                unfetchable = unfetchableAncestors,
+                fetchFolder = fetchAncestor,
+            ) { done, total ->
+                onProgress?.invoke(ScanProgress(items = gathered, listing = listing, pathsDone = done, pathsTotal = total))
+            }
+        if (resolution.needed > 0) {
+            log.info(
+                "Resolved the paths of {} items: {} folders were not in the listing, {} came from rows it saw, {} were fetched, {} could not be",
+                gathered,
+                resolution.needed,
+                resolution.fromRows,
+                resolution.fetched,
+                resolution.unfetchable,
+            )
+        }
         val rawFiles =
-            allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, nameDecryptor) }
+            allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor) }
         val rawFolders =
-            allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, nameDecryptor) }
+            allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor) }
         val filesDropped = rawFiles.count { it == null }
         val foldersDropped = rawFolders.count { it == null }
         val items = rawFiles.filterNotNull() + rawFolders.filterNotNull()
@@ -2136,6 +2171,8 @@ class InternxtProvider(
     // are not live are dropped here, and a row that turns up again as not live also leaves the rows an earlier
     // page stored. A staged copy of such a row only comes back after a restart, and the next incremental delta,
     // which asks for everything since the beginning of the enumeration, reports it as the tombstone it is.
+    // The folder rows among them that are trashed are not thrown away: they are kept, and staged, as ancestor-only
+    // records (never items) that answer the paths running through them, see assembleFullDelta.
     //
     // Scoped profiles do not come here: their cost is bounded by the scope (the walk), the cursor listing
     // always walks the whole account and cannot be narrowed to a subtree.
@@ -2153,18 +2190,23 @@ class InternxtProvider(
         var filesAt = resume?.marker?.files ?: StreamPosition()
         val folders = LinkedHashMap<String, InternxtFolder>()
         val files = LinkedHashMap<String, InternxtFile>()
+        // The trashed folders an unfiltered page returned: no items, but live items can hang below them, so their rows
+        // answer the paths that run through them. Staged with the live rows, so a restart keeps them.
+        val ancestors = LinkedHashMap<String, InternxtFolder>()
         if (resume == null) {
             logFreshCursorStart(scanContext?.resumeMarker, staged.size)
         } else {
             for (row in resume.rows) {
                 if (row.isFolder) folders[row.id] = row.toResumedFolder() else files[row.id] = row.toResumedFile()
             }
+            for (row in resume.ancestors) ancestors[row.id] = row.toResumedAncestor()
             log.info(
-                "Resuming the cursor listing begun {}: folders {}, files {}, {} staged rows",
+                "Resuming the cursor listing begun {}: folders {}, files {}, {} staged rows, {} ancestor-only rows",
                 startedAt,
                 describeResume(foldersAt),
                 describeResume(filesAt),
                 folders.size + files.size,
+                ancestors.size,
             )
         }
 
@@ -2194,11 +2236,8 @@ class InternxtProvider(
                                 fetch = { r -> api.getFoldersSync(updatedAt = r.updatedAt, cursor = r.cursor, status = r.status) },
                                 onPage = { page, at ->
                                     lock.withLock {
-                                        val (live, gone) = page.partitionLive(at.unfiltered) { it.isLive() }
-                                        for (f in gone) folders.remove(f.uuid)
-                                        for (f in live) folders[f.uuid] = f
+                                        val rows = keepFolderPage(page, at.unfiltered, folders, ancestors, rootUuid)
                                         foldersAt = at
-                                        val rows = live.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_STAGED_TAG) }
                                         persist?.invoke(rows, cursorMarker(startedAt, foldersAt, filesAt))
                                         report()
                                     }
@@ -2265,7 +2304,7 @@ class InternxtProvider(
             folders.size,
             files.size,
         )
-        val page = assembleFullDelta(files.values.toList(), folders.values.toList(), startedAt)
+        val page = assembleFullDelta(files.values.toList(), folders.values.toList(), startedAt, ancestors, onProgress, ScanProgress.LISTING_CURSOR)
         if (!cutShort) return page
         log.warn(
             "A cursor stream was cut short by a guard; returning DeltaPage(complete=false). " +
@@ -2583,13 +2622,14 @@ class InternxtProvider(
         rootUuid: String,
         unfetchable: MutableSet<String>,
         fetchFolder: suspend (String) -> InternxtFolder?,
+        ancestors: Map<String, InternxtFolder> = emptyMap(),
         mnemonic: String? = null,
     ): CloudItem? {
         val parentPath =
             when (val fUuid = folderUuid) {
                 null -> ""
                 else ->
-                    Companion.buildFolderPathFetching(fUuid, folderMap, rootUuid, unfetchable, fetchFolder)
+                    Companion.buildFolderPathFetching(fUuid, folderMap, rootUuid, unfetchable, fetchFolder, ancestors)
                         ?: return null
             }
         return fileToDeltaCloudItem(this, parentPath, mnemonic)
@@ -2600,13 +2640,14 @@ class InternxtProvider(
         rootUuid: String,
         unfetchable: MutableSet<String>,
         fetchFolder: suspend (String) -> InternxtFolder?,
+        ancestors: Map<String, InternxtFolder> = emptyMap(),
         mnemonic: String? = null,
     ): CloudItem? {
         val parentPath =
             when (val pUuid = parentUuid) {
                 null -> ""
                 else ->
-                    Companion.buildFolderPathFetching(pUuid, folderMap, rootUuid, unfetchable, fetchFolder)
+                    Companion.buildFolderPathFetching(pUuid, folderMap, rootUuid, unfetchable, fetchFolder, ancestors)
                         ?: return null
             }
         return folderToDeltaCloudItem(this, parentPath, mnemonic)
@@ -2615,6 +2656,10 @@ class InternxtProvider(
     companion object {
         /** #493: statuses by which the server refuses an upload request as such; another attempt is refused again. */
         internal val PERMANENT_UPLOAD_STATUS = setOf(400, 413, 415, 422)
+
+        // How many per-folder requests are in flight at once when the paths are resolved: the same four as the folders
+        // of the tree walk being listed (the default of collectScopedInventoryImpl's concurrency).
+        internal const val PER_FOLDER_REQUESTS_IN_FLIGHT: Int = 4
 
         // Server-unavailable status codes that trigger the slower fallback
         // walk over the folder tree (line 518) or skip-this-folder (line 699).
@@ -2997,6 +3042,38 @@ class InternxtProvider(
 
         internal fun InternxtFolder.isLive(): Boolean = status == "EXISTS" && !isTombstoned()
 
+        /** The server's own word for a folder in the trash: its items are still there, below it. */
+        internal fun InternxtFolder.isTrashed(): Boolean = status == "TRASHED"
+
+        // A page of the folders stream into the listing: the live folders go into [folders], the rest leave it, and
+        // the trashed ones among the rest become ancestor-only records in [ancestors] (a folder that is live again
+        // leaves them). Returns the rows to stage with the page: the live ones, and the ancestors under their own tag.
+        //
+        // Only a trashed folder is kept as an ancestor: live items hang below trashed folders (5,536 files and 266
+        // folders on the account this was measured on), and none of the 948 folders they needed was a deleted one,
+        // of 421,897 deleted against 47,241 trashed. A deleted folder stays what it was: a path through one is asked for.
+        internal fun keepFolderPage(
+            page: List<InternxtFolder>,
+            unfiltered: Boolean,
+            folders: MutableMap<String, InternxtFolder>,
+            ancestors: MutableMap<String, InternxtFolder>,
+            rootUuid: String,
+        ): List<CloudItem> {
+            val (live, gone) = page.partitionLive(unfiltered) { it.isLive() }
+            for (f in gone) {
+                folders.remove(f.uuid)
+                ancestors.remove(f.uuid)
+            }
+            for (f in live) {
+                folders[f.uuid] = f
+                ancestors.remove(f.uuid)
+            }
+            val trashed = gone.filter { it.isTrashed() }
+            for (f in trashed) ancestors[f.uuid] = f
+            return live.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_STAGED_TAG) } +
+                trashed.map { it.toStagedCloudItem(rootUuid).copy(hash = CURSOR_ANCESTOR_TAG) }
+        }
+
         internal fun filterLiveContent(content: FolderContentResponse): FolderContentResponse =
             FolderContentResponse(
                 children = content.children.filter { it.isLive() },
@@ -3190,6 +3267,9 @@ class InternxtProvider(
         // scale this caps the re-fetch at the number of distinct missing
         // ancestors, not the number of orphaned leaves.
         //
+        // Before any request, a folder is looked up in [ancestors]: the trashed folders the listing saw and did
+        // not return as items. A row found there is spliced into [folderMap] like a fetched one, so it is read once.
+        //
         // Returns null exactly as [buildFolderPath] does when an ancestor
         // cannot be resolved — the caller drops the item, counts it, and lets
         // `complete=false` stand for the pass.
@@ -3199,11 +3279,12 @@ class InternxtProvider(
             rootUuid: String,
             unfetchable: MutableSet<String>,
             fetchFolder: suspend (String) -> InternxtFolder?,
+            ancestors: Map<String, InternxtFolder> = emptyMap(),
         ): String? {
             if (uuid == rootUuid) return ""
             if (uuid in unfetchable) return null
             val folder =
-                folderMap[uuid] ?: run {
+                knownFolder(uuid, folderMap, ancestors) ?: run {
                     val fetched = fetchFolder(uuid)
                     if (fetched == null) {
                         unfetchable.add(uuid)
@@ -3216,11 +3297,101 @@ class InternxtProvider(
                 when (val parentUuid = folder.parentUuid) {
                     null -> ""
                     else ->
-                        buildFolderPathFetching(parentUuid, folderMap, rootUuid, unfetchable, fetchFolder)
+                        buildFolderPathFetching(parentUuid, folderMap, rootUuid, unfetchable, fetchFolder, ancestors)
                             ?: return null
                 }
             val name = sanitizeName(folder.plainName ?: folder.name ?: "")
             return "$parentPath/$name"
+        }
+
+        // The folder a path runs through, from what the listing already holds: the folders it returned, then the
+        // ancestor-only rows (spliced into [folderMap] on the way). Null when only a request can tell.
+        private fun knownFolder(
+            uuid: String,
+            folderMap: MutableMap<String, InternxtFolder>,
+            ancestors: Map<String, InternxtFolder>,
+        ): InternxtFolder? = folderMap[uuid] ?: ancestors[uuid]?.also { folderMap[uuid] = it }
+
+        /** How [resolveAncestors] found the folders that the listing did not return: [fromRows] of the ancestor-only rows, [fetched] by request, [unfetchable] not at all. */
+        internal class AncestorResolution(
+            val fromRows: Int,
+            val fetched: Int,
+            val unfetchable: Int,
+        ) {
+            val needed: Int get() = fromRows + fetched + unfetchable
+        }
+
+        // Finds, before any path is built, every folder that a path of the gathered items runs through and that the
+        // listing did not return, and puts it into [folderMap]. [parents] are the parent folders of the items. A chain
+        // is climbed from each of them up to the root or to a folder already visited, so each folder is looked at once.
+        // A folder that the ancestor-only rows [ancestors] hold is read from there. The others are asked for through
+        // [fetchFolder], with at most [PER_FOLDER_REQUESTS_IN_FLIGHT] requests in flight: they used to be asked for one after the other,
+        // each when the first item below it was met, which on a large drive was 949 requests in a row.
+        //
+        // A folder that is fetched may hang below another that is missing: the next round asks for those, and the
+        // total reported to [onProgress] (done, total) grows by them. An unfetchable folder is recorded in
+        // [unfetchable], and the items below it are dropped by the path building as before.
+        internal suspend fun resolveAncestors(
+            parents: Sequence<String?>,
+            folderMap: MutableMap<String, InternxtFolder>,
+            ancestors: Map<String, InternxtFolder>,
+            rootUuid: String,
+            unfetchable: MutableSet<String>,
+            fetchFolder: suspend (String) -> InternxtFolder?,
+            onProgress: ((done: Int, total: Int) -> Unit)? = null,
+        ): AncestorResolution {
+            val visited = HashSet<String>()
+            val missing = LinkedHashSet<String>()
+            var fromRows = 0
+
+            fun climb(start: String?) {
+                var uuid = start
+                while (uuid != null && uuid != rootUuid && visited.add(uuid)) {
+                    val fromAncestors = uuid !in folderMap && uuid in ancestors
+                    val folder = knownFolder(uuid, folderMap, ancestors)
+                    if (folder == null) {
+                        if (uuid !in unfetchable) missing.add(uuid)
+                        return
+                    }
+                    if (fromAncestors) fromRows++
+                    uuid = folder.parentUuid
+                }
+            }
+            parents.forEach(::climb)
+
+            val permits = kotlinx.coroutines.sync.Semaphore(PER_FOLDER_REQUESTS_IN_FLIGHT)
+            val done = AtomicInteger(0)
+            val total = AtomicInteger(0)
+            var fetched = 0
+            var gone = 0
+            while (missing.isNotEmpty()) {
+                val round = missing.toList()
+                missing.clear()
+                total.addAndGet(round.size)
+                onProgress?.invoke(done.get(), total.get())
+                val answers =
+                    coroutineScope {
+                        round
+                            .map { uuid ->
+                                async {
+                                    val folder = permits.withPermit { fetchFolder(uuid) }
+                                    onProgress?.invoke(done.incrementAndGet(), total.get())
+                                    uuid to folder
+                                }
+                            }.awaitAll()
+                    }
+                for ((uuid, folder) in answers) {
+                    if (folder == null) {
+                        unfetchable.add(uuid)
+                        gone++
+                    } else {
+                        folderMap[uuid] = folder
+                        fetched++
+                        climb(folder.parentUuid)
+                    }
+                }
+            }
+            return AncestorResolution(fromRows = fromRows, fetched = fetched, unfetchable = gone)
         }
 
         // UD-317: pure converter for delta folder entries (parentPath already resolved by caller).
@@ -3374,6 +3545,9 @@ class InternxtProvider(
                 modificationTime = modified?.toString(),
                 updatedAt = null,
             )
+
+        // An ancestor-only record comes back from the staging as the trashed folder it was.
+        internal fun CloudItem.toResumedAncestor(): InternxtFolder = toResumedFolder().copy(status = "TRASHED")
     }
 }
 
