@@ -500,14 +500,16 @@ class DaemonRuntime(
 
                 // #891: one health line per interval (heap, GC, threads, enumeration, upload queue) so the
                 // memory a long scan needs is visible while it happens. Cancelled with the serve scope.
-                DaemonHealthLine(
-                    intervalMs = healthIntervalMs,
-                    scope = serveScope,
-                    enumeration = {
-                        mount.enumerationTracker.snapshot().let { it.state.name.lowercase() to it.items }
-                    },
-                    uploadQueueDepth = { hydration?.uploadHealthSnapshot()?.pending },
-                ).start()
+                if (healthIntervalMs > 0) {
+                    DaemonHealthLine(
+                        intervalMs = healthIntervalMs,
+                        scope = serveScope,
+                        enumeration = {
+                            mount.enumerationTracker.snapshot().let { it.state.name.lowercase() to it.items }
+                        },
+                        uploadQueueDepth = { hydration?.uploadHealthSnapshot()?.pending },
+                    ).start()
+                }
 
                 // credential_health (#586): checked off the request path, so the first status can already carry an answer.
                 val credentialHealth = CredentialHealthMonitor(credentialHealthCheck, credentialHealthTtlMs, serveScope)
