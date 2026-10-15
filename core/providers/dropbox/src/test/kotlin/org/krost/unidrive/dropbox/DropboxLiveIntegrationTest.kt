@@ -43,7 +43,9 @@ class DropboxLiveIntegrationTest {
 
     @AfterTest
     fun tearDown() {
-        dir.toFile().deleteRecursively()
+        // The assume in setUp aborts before dir exists when the live environment is missing;
+        // tearing down nothing must not fail the skip.
+        if (this::dir.isInitialized) dir.toFile().deleteRecursively()
     }
 
     @Test
