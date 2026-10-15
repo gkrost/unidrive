@@ -132,6 +132,11 @@ class AuthCompleteCommand : Callable<Int> {
     @Option(names = ["--wait"], description = ["Keep polling until the sign-in succeeds, fails or expires"])
     var wait: Boolean = false
 
+    // #866: the code a no-redirect flow (Dropbox) shows the user. A one-time secret, so it is piped,
+    // never an argument (precedent: auth login --password-stdin).
+    @Option(names = ["--code-stdin"], description = ["Read the authorization code the provider showed from standard input"])
+    var codeStdin: Boolean = false
+
     @Option(names = ["--json"], description = ["Print the result (or the refusal) as one JSON object on stdout"])
     var json: Boolean = false
 
@@ -142,14 +147,22 @@ class AuthCompleteCommand : Callable<Int> {
                 LifecycleHooks.factoryFor(target.type)?.takeIf { it.supportsInteractiveAuth() }
                     ?: throw LifecycleError("no_device_code_flow", "profile '${target.name}' (type ${target.type}) has no device-code sign-in")
             withProfileLock(target) {
+                // A piped code completes in one call: no polling, and the code never reaches argv or a log.
+                val secret = if (codeStdin) {
+                    val read = generateSequence { readLine() }.firstOrNull() ?: ""
+                    read.trim().takeIf { it.isNotEmpty() }
+                        ?: throw LifecycleError("missing_code", "--code-stdin was given but standard input held no code")
+                } else {
+                    null
+                }
                 fun pollOnce(): CompleteAuthResult =
                     try {
-                        runBlocking { factory.completeInteractiveAuth(target.profileDir, handle) }
+                        runBlocking { factory.completeInteractiveAuth(target.profileDir, handle, secret) }
                     } catch (e: Exception) {
                         throw LifecycleError("complete_failed", "the sign-in could not be completed: ${e.javaClass.simpleName}")
                     }
                 var outcome = pollOnce()
-                while (wait && outcome is CompleteAuthResult.Pending) {
+                while (wait && secret == null && outcome is CompleteAuthResult.Pending) {
                     LifecycleHooks.sleepSeconds(maxOf(1L, outcome.retryAfterSeconds))
                     outcome = pollOnce()
                 }

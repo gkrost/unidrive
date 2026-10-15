@@ -1,6 +1,8 @@
 package org.krost.unidrive.dropbox
 
+import org.krost.unidrive.BeginAuthResult
 import org.krost.unidrive.CloudProvider
+import org.krost.unidrive.CompleteAuthResult
 import org.krost.unidrive.ConfigurationException
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.PromptSpec
@@ -9,7 +11,7 @@ import org.krost.unidrive.ProviderMetadata
 import java.nio.file.Files
 import java.nio.file.Path
 
-class DropboxProviderFactory : ProviderFactory {
+open class DropboxProviderFactory : ProviderFactory {
     override val id = "dropbox"
 
     override val metadata =
@@ -46,6 +48,103 @@ class DropboxProviderFactory : ProviderFactory {
         properties: Map<String, String?>,
         profileDir: Path,
     ): Boolean = Files.exists(profileDir.resolve(DropboxAuth.TOKEN_FILE))
+
+    // #866: the no-redirect code flow. `auth begin` hands out the authorize url and keeps the PKCE
+    // verifier as a pending flow in the profile folder; `auth complete --code-stdin` exchanges the
+    // code the user pasted. Dropbox has no device-code flow, so there is nothing to poll: one call.
+
+    /** The app key a begin needs when no profile config is in reach: the environment, as `create` falls back to. */
+    internal open fun appKeyForBegin(): String =
+        System.getenv(DropboxConfig.CLIENT_ID_ENV)?.trim()?.takeIf { it.isNotEmpty() }
+            ?: throw org.krost.unidrive.ConfigurationException(
+                id,
+                "client_id is missing: set ${DropboxConfig.CLIENT_ID_ENV} (the app key of the Dropbox app with PKCE) " +
+                    "or put it in the profile as client_id before 'auth begin'",
+            )
+
+    internal open fun newAuthForBegin(profileDir: Path): DropboxAuth =
+        DropboxAuth(DropboxConfig(appKey = appKeyForBegin(), tokenPath = profileDir), io.ktor.client.HttpClient())
+
+    override fun supportsInteractiveAuth(): Boolean = true
+
+    override suspend fun beginInteractiveAuth(profileDir: Path): BeginAuthResult {
+        val auth = newAuthForBegin(profileDir)
+        val verifier = org.krost.unidrive.auth.Pkce.generateVerifier()
+        val state = java.util.UUID.randomUUID().toString()
+        val handle = "dropbox-" + java.util.UUID.randomUUID()
+        val expiresAt = java.time.Instant.now().plus(java.time.Duration.ofMinutes(10))
+        val flow = PendingDropboxFlow(handle, verifier, expiresAt.toString())
+        // The save must succeed: no pending flow means no later process can complete the sign-in,
+        // so an IOException here stops the handle from being handed out (it propagates).
+        pendingFlowStore(profileDir).save(flow)
+        return BeginAuthResult.of(
+            continuationHandle = handle,
+            fields =
+                linkedMapOf(
+                    "authorize_url" to kotlinx.serialization.json.JsonPrimitive(
+                        auth.authorizationUrl(state, org.krost.unidrive.auth.Pkce.generateChallenge(verifier), redirect = false),
+                    ),
+                    "expires_in" to kotlinx.serialization.json.JsonPrimitive(600),
+                    "message" to kotlinx.serialization.json.JsonPrimitive(
+                        "Open the url, allow the app, and paste the shown code with: auth complete --handle $handle --code-stdin",
+                    ),
+                ),
+            expiresAt = expiresAt,
+        )
+    }
+
+    override suspend fun completeInteractiveAuth(
+        profileDir: Path,
+        continuationHandle: String,
+        secret: String?,
+    ): CompleteAuthResult {
+        val store = pendingFlowStore(profileDir)
+        val flow = store.load()
+            ?: return CompleteAuthResult.Failure(
+                "Unknown or expired continuation handle. Call auth begin again.",
+                CompleteAuthResult.Reason.UNKNOWN_HANDLE,
+            )
+        if (flow.handle != continuationHandle) {
+            return CompleteAuthResult.Failure(
+                "Unknown or expired continuation handle. Call auth begin again.",
+                CompleteAuthResult.Reason.UNKNOWN_HANDLE,
+            )
+        }
+        if (java.time.Instant.parse(flow.expiresAt).isBefore(java.time.Instant.now())) {
+            store.delete()
+            return CompleteAuthResult.Failure("The sign-in window has passed. Call auth begin again.", CompleteAuthResult.Reason.EXPIRED)
+        }
+        val code = secret?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return CompleteAuthResult.Failure(
+                "The code Dropbox showed is required: pipe it with --code-stdin.",
+            )
+        val auth = newAuthForBegin(profileDir)
+        return try {
+            val token = auth.exchangeCodeNoRedirect(code, flow.verifier)
+            auth.saveToken(token)
+            store.delete()
+            CompleteAuthResult.Success
+        } catch (e: org.krost.unidrive.AuthenticationException) {
+            // A wrong or spent code stores nothing; the pending flow stays until it expires so the
+            // same handle can try again with a freshly shown code.
+            CompleteAuthResult.Failure("Dropbox refused the code: ${e.message}")
+        }
+    }
+
+    /** The pending no-redirect flow: the PKCE verifier and the expiry, kept for the completing process. */
+    @kotlinx.serialization.Serializable
+    data class PendingDropboxFlow(
+        val handle: String,
+        val verifier: String,
+        val expiresAt: String,
+    )
+
+    private fun pendingFlowStore(profileDir: Path) =
+        org.krost.unidrive.auth.CredentialStore(profileDir, PENDING_FLOW_FILE, PendingDropboxFlow.serializer())
+
+    internal companion object {
+        const val PENDING_FLOW_FILE = "pending_dropbox_flow.json"
+    }
 
     override fun checkCredentialHealth(
         properties: Map<String, String?>,

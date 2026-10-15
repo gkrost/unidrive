@@ -55,6 +55,7 @@ class AuthLifecycleTest {
         override val id = "onedrive"
         override val metadata = ProviderMetadata("onedrive", "Fake", "test", "oauth", "none", "x", true, false, null, "Test")
         val completedWith = mutableListOf<String>()
+        val completedSecrets = mutableListOf<String?>()
         var beganIn: Path? = null
 
         override fun create(
@@ -89,8 +90,10 @@ class AuthLifecycleTest {
         override suspend fun completeInteractiveAuth(
             profileDir: Path,
             continuationHandle: String,
+            secret: String?,
         ): CompleteAuthResult {
             completedWith += continuationHandle
+            completedSecrets += secret
             return polls.removeFirst()
         }
     }
@@ -490,5 +493,32 @@ class AuthLifecycleTest {
         val spec = CommandLine(Main()).subcommands.getValue("auth")
         assertEquals(setOf("begin", "complete", "login"), spec.subcommands.keys)
         assertTrue(spec.commandSpec.findOption("--device-code") != null, "-d/--device-code is unchanged")
+    }
+
+    // -- #866: the stdin code of a no-redirect flow -------------------------------
+
+    @Test
+    fun `complete pipes the stdin code to the factory and never prints it`() {
+        val factory = DeviceFactory(polls = ArrayDeque(listOf(CompleteAuthResult.Success)))
+        LifecycleHooks.factoryFor = { factory }
+        val code = "paste-the-code-Ab12-XYZ"
+
+        val exit = run("auth", "complete", "--handle", "h1", "--code-stdin", "--json", stdin = code + System.lineSeparator())
+
+        assertEquals(0, exit, out.toString() + err.toString())
+        assertEquals(listOf<String?>(code), factory.completedSecrets, "the factory received the code out of band")
+        val text = out.toString() + err.toString()
+        assertTrue(code !in text, "the code never appears in any output: $text")
+    }
+
+    @Test
+    fun `code-stdin without input refuses with missing_code`() {
+        val factory = DeviceFactory(polls = ArrayDeque(listOf(CompleteAuthResult.Success)))
+        LifecycleHooks.factoryFor = { factory }
+        Files.createDirectories(dir.resolve("dp"))
+
+        assertEquals(1, run("auth", "complete", "--handle", "h1", "--code-stdin"))
+        assertTrue("standard input held no code" in err.toString(), "the text path words the refusal: " + err.toString())
+        assertTrue(factory.completedSecrets.singleOrNull() == null, "the factory was never called with a secret")
     }
 }

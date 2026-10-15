@@ -126,6 +126,26 @@ the table holds no verb the daemon does not register.
 The protocol-1 fallback is temporary: gkrost/unidrive#612 removes it from every client together with
 raising the minimum engine version.
 
+## 5a. Sign-in for front-ends: begin / complete (#866)
+
+A front-end signs a profile in across two processes with `auth begin` and `auth complete` (the CLI verbs;
+the MCP `auth_begin` / `auth_complete` tools drive the same factory methods). OneDrive answers a device
+code and the complete side polls. Dropbox has no device-code flow, so it uses the **no-redirect code
+flow**:
+
+- `auth begin` prints (JSON) the `handle`, the Dropbox `authorize_url` — same shape as the browser flow
+  but **without** `redirect_uri`, with a PKCE S256 challenge — and an `expires_in` (600 s). The PKCE
+  verifier is kept in the profile folder as `pending_dropbox_flow.json` (owner-only through the profile
+  folder's tightening; it holds the verifier and the expiry, no secret beyond it).
+- `auth complete --handle <h> --code-stdin` reads the code the user pasted **from standard input** (a
+  one-time secret is never an argument), exchanges it without `redirect_uri`, stores `token.json` and
+  deletes the pending flow. A wrong or spent code stores nothing and leaves the flow in place until it
+  expires, so the same handle can take a freshly shown code. A second successful complete is refused
+  (unknown handle); an expired flow answers `expired`.
+- The engine never logs the code, the verifier or the tokens; front-ends print the `authorize_url` only.
+
+The app key comes from the profile (`client_id`) or `UNIDRIVE_CLIENT_ID`, as everywhere else.
+
 ## 6. Error tokens
 
 | Token | When |
