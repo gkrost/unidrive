@@ -60,7 +60,7 @@ class DropboxAuthTest {
         kotlinx.coroutines.runBlocking<Unit> {
             val auth = DropboxAuth(DropboxConfig(appKey = "key", tokenPath = dir), FakeDropbox().let { io.ktor.client.HttpClient(it.engine) })
 
-            val url = Url(auth.authorizationUrlNoRedirect(state = "st", challenge = "ch"))
+            val url = Url(auth.authorizationUrl(state = "st", challenge = "ch", redirect = false))
 
             assertEquals("key", url.parameters["client_id"])
             assertEquals("code", url.parameters["response_type"])

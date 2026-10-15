@@ -74,18 +74,15 @@ open class DropboxProviderFactory : ProviderFactory {
         val handle = "dropbox-" + java.util.UUID.randomUUID()
         val expiresAt = java.time.Instant.now().plus(java.time.Duration.ofMinutes(10))
         val flow = PendingDropboxFlow(handle, verifier, expiresAt.toString())
-        try {
-            pendingFlowStore(profileDir).save(flow)
-        } catch (e: java.io.IOException) {
-            // No pending flow means no later process can complete it: do not hand out the handle.
-            throw e
-        }
+        // The save must succeed: no pending flow means no later process can complete the sign-in,
+        // so an IOException here stops the handle from being handed out (it propagates).
+        pendingFlowStore(profileDir).save(flow)
         return BeginAuthResult.of(
             continuationHandle = handle,
             fields =
                 linkedMapOf(
                     "authorize_url" to kotlinx.serialization.json.JsonPrimitive(
-                        auth.authorizationUrlNoRedirect(state, org.krost.unidrive.auth.Pkce.generateChallenge(verifier)),
+                        auth.authorizationUrl(state, org.krost.unidrive.auth.Pkce.generateChallenge(verifier), redirect = false),
                     ),
                     "expires_in" to kotlinx.serialization.json.JsonPrimitive(600),
                     "message" to kotlinx.serialization.json.JsonPrimitive(

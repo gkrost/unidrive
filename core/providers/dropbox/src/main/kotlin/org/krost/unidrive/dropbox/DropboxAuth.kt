@@ -68,33 +68,20 @@ class DropboxAuth(
         token = fresh
     }
 
+    /**
+     * The authorization url. With [redirect] (the browser flow) Dropbox calls back to [DropboxConfig.redirectUri];
+     * without it (#866) Dropbox shows the user a code to paste instead of calling back.
+     */
     internal fun authorizationUrl(
         state: String,
         challenge: String,
+        redirect: Boolean = true,
     ): String =
         URLBuilder(config.authorizeUrl)
             .apply {
                 parameters.append("client_id", config.appKey)
                 parameters.append("response_type", "code")
-                parameters.append("redirect_uri", config.redirectUri)
-                parameters.append("token_access_type", "offline")
-                parameters.append("code_challenge", challenge)
-                parameters.append("code_challenge_method", "S256")
-                parameters.append("state", state)
-            }.buildString()
-
-    /**
-     * #866: the no-redirect authorization url — everything the browser flow carries except the
-     * `redirect_uri`, so Dropbox shows the user a code to paste instead of calling back.
-     */
-    internal fun authorizationUrlNoRedirect(
-        state: String,
-        challenge: String,
-    ): String =
-        URLBuilder(config.authorizeUrl)
-            .apply {
-                parameters.append("client_id", config.appKey)
-                parameters.append("response_type", "code")
+                if (redirect) parameters.append("redirect_uri", config.redirectUri)
                 parameters.append("token_access_type", "offline")
                 parameters.append("code_challenge", challenge)
                 parameters.append("code_challenge_method", "S256")
