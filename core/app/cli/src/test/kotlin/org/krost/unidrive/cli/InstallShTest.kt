@@ -32,14 +32,14 @@ class InstallShTest {
         val bin = Files.createDirectories(dir.resolve("bin"))
         val fake = bin.resolve("systemctl")
         // `start` launches a long-running JVM whose command line holds -jar <lib>/unidrive-1.jar, the way a
-        // unit-started daemon does; its pid is recorded for teardown (a plain sleep would not match the
+        // unit-started daemon does; its pid is recorded for teardown (detached from the pipes, or install()'s read of the output waits for it to exit; a plain sleep would not match the
         // NOTE's /proc scan, and a compound command keeps sh from exec-optimizing the cmdline away).
         Files.writeString(
             fake,
             "#!/bin/sh\necho \"\$*\" >> '$systemctlLog'\n" +
                 "case \"\$*\" in *list-units*) echo 'unidrive.service loaded active running x'; " +
                 "echo 'unidrive-mount.service loaded active running y';; " +
-                "*start*) setsid sh -c 'sleep 300; :' \"-jar $home/.local/lib/unidrive/unidrive-1.jar\" & " +
+                "*start*) setsid sh -c 'sleep 300; :' \"-jar $home/.local/lib/unidrive/unidrive-1.jar\" >/dev/null 2>&1 </dev/null & " +
                 "echo \$! >> '${dir.resolve("fake-pids")}';; esac\n",
         )
         fake.toFile().setExecutable(true)
