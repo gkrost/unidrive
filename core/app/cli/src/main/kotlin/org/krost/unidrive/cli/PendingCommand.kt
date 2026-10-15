@@ -163,19 +163,27 @@ class PendingCommand {
         private val cacheRoot: Path =
             SyncEngine.hydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name)
 
-        private fun open(): StateDatabase =
+        /** The read-only state.db, or null when it cannot be opened or initialised (locked, corrupt, unexpected schema) —
+         * the same trio the read-only reads of `profile remove` accept as "nothing can be said about it". */
+        private fun openReadOnly(): StateDatabase? =
             try {
                 StateDatabase(profileDir.resolve("state.db"), readOnly = true).also { it.initialize() }
-            } catch (e: Exception) {
-                throw LifecycleError("state_unreadable", "the state of profile '${profile.name}' could not be read: ${e.message}")
+            } catch (_: java.sql.SQLException) {
+                null
+            } catch (_: IllegalStateException) {
+                null
+            } catch (_: IllegalArgumentException) {
+                null
             }
 
         fun readRows(): List<StateDatabase.PendingRowDetail> {
-            val db = open()
+            val db =
+                openReadOnly()
+                    ?: throw LifecycleError("state_unreadable", "the state of profile '${profile.name}' could not be read")
             try {
                 return db.pendingRowDetails()
-            } catch (e: Exception) {
-                throw LifecycleError("state_unreadable", "the state of profile '${profile.name}' could not be read: ${e.message}")
+            } catch (e: java.sql.SQLException) {
+                throw LifecycleError("state_unreadable", "the state of profile '${profile.name}' could not be read: ${e.message}", e)
             } finally {
                 db.close()
             }
