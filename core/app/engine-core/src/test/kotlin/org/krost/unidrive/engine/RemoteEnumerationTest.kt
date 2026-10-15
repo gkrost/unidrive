@@ -447,7 +447,6 @@ class RemoteEnumerationTest {
             assertEquals("x", db.getEntry("/again/x.txt")?.remoteId)
         }
 
-    // One page per listing; every cursor names the listing that produced it.
     // #878: an API failure with an HTTP status answers last_error_code http_<status>, and the reason
     // loses the response body.
     @Test
@@ -463,6 +462,7 @@ class RemoteEnumerationTest {
             assertEquals("API error: 408 Request Timeout", s.lastError, "the body is dropped from the reason")
         }
 
+    // One page per listing; every cursor names the listing that produced it.
     private class ListingProvider : CloudProvider {
         var items: List<CloudItem> = emptyList()
         var failure: ProviderException? = null
