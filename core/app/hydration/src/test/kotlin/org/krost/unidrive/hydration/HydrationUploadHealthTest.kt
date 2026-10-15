@@ -34,7 +34,8 @@ class HydrationUploadHealthTest {
     fun `nothing pending reads as zero with no age`() = runTest {
         val env = HydrationTestEnv(recoveryUploadScope = this)
 
-        assertEquals(HydrationImpl.UploadHealth(0, 0, 0, null), env.hydration.uploadHealth())
+        val health = env.hydration.uploadHealth()
+        assertEquals(HydrationImpl.UploadHealth(0, 0, 0, null).copy(asOfMs = health.asOfMs), health)
     }
 
     @Test
@@ -59,7 +60,8 @@ class HydrationUploadHealthTest {
 
         env.providerForTest.releaseStalledUpload("/q/stuck.txt")
         advanceUntilIdle()
-        assertEquals(HydrationImpl.UploadHealth(0, 0, 0, null), env.hydration.uploadHealth(), "landed: nothing pending, so no age")
+        val landed = env.hydration.uploadHealth()
+        assertEquals(HydrationImpl.UploadHealth(0, 0, 0, null).copy(asOfMs = landed.asOfMs), landed, "landed: nothing pending, so no age")
     }
 
     @Test
@@ -118,7 +120,8 @@ class HydrationUploadHealthTest {
         val env = HydrationTestEnv(recoveryUploadScope = this, syncPaths = listOf("/in"))
         env.stateDb.insertCreatedRow("/out/f.txt", lastSynced = since)
 
-        assertEquals(HydrationImpl.UploadHealth(0, 0, 0, null), env.hydration.uploadHealth())
+        val health = env.hydration.uploadHealth()
+        assertEquals(HydrationImpl.UploadHealth(0, 0, 0, null).copy(asOfMs = health.asOfMs), health)
     }
 
     @Test
@@ -130,7 +133,7 @@ class HydrationUploadHealthTest {
 
         val health = env.hydration.uploadHealth(nowMs = since.toEpochMilli() + 1_000)
 
-        assertEquals(HydrationImpl.UploadHealth(pending = 2, inFlight = 0, failed = 1, oldestPendingAgeMs = 1_000L), health)
+        assertEquals(HydrationImpl.UploadHealth(pending = 2, inFlight = 0, failed = 1, oldestPendingAgeMs = 1_000L).copy(asOfMs = health.asOfMs), health)
     }
 
     // ── the reading behind daemon.status ────────────────────────────────────────────────────────
@@ -142,7 +145,7 @@ class HydrationUploadHealthTest {
 
         val health = assertNotNull(env.hydration.uploadHealthSnapshot(nowMs = since.toEpochMilli() + 4_000))
 
-        assertEquals(HydrationImpl.UploadHealth(pending = 1, inFlight = 0, failed = 0, oldestPendingAgeMs = 4_000L), health)
+        assertEquals(HydrationImpl.UploadHealth(pending = 1, inFlight = 0, failed = 0, oldestPendingAgeMs = 4_000L).copy(asOfMs = health.asOfMs), health)
     }
 
     @Test
@@ -189,6 +192,11 @@ class HydrationUploadHealthTest {
             assertTrue((System.nanoTime() - started) / 1_000_000 < 1_000, "a re-read waits only briefly for a busy database")
             assertEquals(1, served.pending)
             assertEquals(90_000L, served.oldestPendingAgeMs, "its age is carried forward, not frozen")
+            // #747: the served reading keeps the stamp of when it was TAKEN, not the request time - a
+            // front-end tells fresh from frozen by the stamp not advancing while the database is busy.
+            val stamp = assertNotNull(served.asOfMs, "the served reading carries its stamp")
+            val served2 = assertNotNull(env.hydration.uploadHealthSnapshot(nowMs = since.toEpochMilli() + 120_000))
+            assertEquals(stamp, served2.asOfMs, "a frozen reading keeps its stamp across requests")
         } finally {
             release2.countDown()
             holder2.join()
@@ -290,5 +298,17 @@ class HydrationUploadHealthTest {
         assertEquals(DehydrateResult.Ok, env.hydration.dehydrate("/c/a.bin"))
         assertEquals(0L, env.hydration.cacheHealth().bytes, "an eviction updates the total without a walk")
         assertEquals(1, env.hydration.cacheWalkCount.get())
+    }
+
+    // #747: as_of_ms is the stamp of the reading; a fresh take advances it. (The frozen case - a busy
+    // state.db keeps the last good counts and their stamp - is driven in the held-database test above.)
+    @Test
+    fun `as_of_ms is stamped and advances across reads`() = runBlocking {
+        val env = HydrationTestEnv()
+        val first = env.hydration.uploadHealth()
+        assertTrue(first.asOfMs != null && first.asOfMs > 0, "the reading carries its stamp: $first")
+        Thread.sleep(5)
+        val later = env.hydration.uploadHealth()
+        assertTrue(later.asOfMs != null && later.asOfMs >= (first.asOfMs ?: Long.MAX_VALUE), "a later read never moves the stamp back")
     }
 }

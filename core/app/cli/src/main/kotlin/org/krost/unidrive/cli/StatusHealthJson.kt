@@ -14,7 +14,7 @@ import org.krost.unidrive.sync.ignore.HeldBackDir
  */
 
 /**
- * `uploads`: see [HydrationImpl.UploadHealth] for what each count includes and leaves out. `blocked` is present only
+ * `uploads`: see [HydrationImpl.UploadHealth] for what each count includes and leaves out. `as_of_ms` (#747) is the epoch-milliseconds stamp of the reading: the last good one is served while state.db is busy, so a front-end tells fresh from frozen by the stamp not advancing. `blocked` is present only
  * while there is something blocked by name: absent means none, so a reply with nothing blocked is unchanged.
  */
 internal fun HydrationImpl.UploadHealth.toJson(): JsonObject =
@@ -23,6 +23,9 @@ internal fun HydrationImpl.UploadHealth.toJson(): JsonObject =
         put("in_flight", inFlight)
         put("failed", failed)
         put("oldest_pending_age_ms", oldestPendingAgeMs)
+        // #747: when the counts were taken. The last good reading is served when state.db is busy, so a
+        // front-end tells fresh from frozen by the stamp not advancing. Absent when never read.
+        put("as_of_ms", asOfMs)
         if (blocked.count > 0) put("blocked", blocked.toJson())
     }
 
