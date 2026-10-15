@@ -10,11 +10,11 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.ProviderException
-import org.krost.unidrive.UnidriveJson
 import org.krost.unidrive.internxt.model.FilesSyncResponse
 import org.krost.unidrive.internxt.model.FoldersSyncResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
+import org.krost.unidrive.internxt.model.InternxtJson
 import org.krost.unidrive.internxt.model.SyncPage
 import java.time.Instant
 import java.time.ZoneOffset
@@ -65,11 +65,6 @@ internal fun syncQueryParams(
     return params
 }
 
-// Tolerant: unknown keys are ignored and a null where the model has a default takes the default. An item
-// that cannot be decoded at all (no uuid) fails the page, because a listing that silently loses an item
-// would let the engine take its absence for a deletion.
-private val syncJson = Json(from = UnidriveJson) { coerceInputValues = true }
-
 /**
  * A row of a page asked for without a status filter has no `status`. The models default a missing status to
  * `EXISTS`, which is right for a page that was filtered to the live items and wrong here: nothing says whether
@@ -85,7 +80,7 @@ private fun requireRowStatus(
     stream: String,
     body: String,
 ) {
-    val rows = syncJson.parseToJsonElement(body).jsonObject[stream]?.jsonArray.orEmpty()
+    val rows = InternxtJson.parseToJsonElement(body).jsonObject[stream]?.jsonArray.orEmpty()
     for (row in rows) {
         val fields: JsonObject = row.jsonObject
         val status = fields["status"] as? JsonPrimitive
@@ -95,13 +90,15 @@ private fun requireRowStatus(
     }
 }
 
+// A page is read with [InternxtJson]. An item that cannot be decoded at all (no uuid) fails the page, because a
+// listing that silently loses an item would let the engine take its absence for a deletion.
 /** [rowsCarryStatus]: the page was asked for without a status filter, so each of its rows must say what it is. */
 internal fun parseFilesSyncPage(
     body: String,
     rowsCarryStatus: Boolean = false,
 ): SyncPage<InternxtFile> {
     if (rowsCarryStatus) requireRowStatus("files", body)
-    val page = syncJson.decodeFromString<FilesSyncResponse>(body)
+    val page = InternxtJson.decodeFromString<FilesSyncResponse>(body)
     return SyncPage(page.files.orEmpty(), page.nextCursor?.takeIf { it.isNotBlank() })
 }
 
@@ -110,7 +107,7 @@ internal fun parseFoldersSyncPage(
     rowsCarryStatus: Boolean = false,
 ): SyncPage<InternxtFolder> {
     if (rowsCarryStatus) requireRowStatus("folders", body)
-    val page = syncJson.decodeFromString<FoldersSyncResponse>(body)
+    val page = InternxtJson.decodeFromString<FoldersSyncResponse>(body)
     return SyncPage(page.folders.orEmpty(), page.nextCursor?.takeIf { it.isNotBlank() })
 }
 
@@ -171,7 +168,7 @@ private val QUERY_INSTANT: DateTimeFormatter = DateTimeFormatter.ofPattern("uuuu
 internal fun instantOfCursor(cursor: String): Instant? =
     runCatching {
         val bytes = runCatching { Base64.getDecoder().decode(cursor) }.getOrElse { Base64.getUrlDecoder().decode(cursor) }
-        val fields = syncJson.parseToJsonElement(String(bytes, Charsets.UTF_8)).jsonObject
+        val fields = InternxtJson.parseToJsonElement(String(bytes, Charsets.UTF_8)).jsonObject
         fields["updatedAt"]?.jsonPrimitive?.contentOrNull?.let { Instant.parse(it) }
     }.getOrNull()
 

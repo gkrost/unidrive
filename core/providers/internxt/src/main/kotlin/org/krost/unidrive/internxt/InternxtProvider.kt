@@ -2032,11 +2032,18 @@ class InternxtProvider(
         // 404 / trashed / gone (or any non-fatal API error) degrades to null:
         // the ancestor can't be resolved, the item is dropped + counted, and
         // complete=false stands for the pass. Never throws out of delta().
+        // A meta the model cannot read does the same: asking again gets the same
+        // body, so one odd folder (out of the hundreds fetched on a large first
+        // scan) is logged once, with the server's request id, and leaves the rest
+        // of the pass alone. A transport failure was retried by the call itself.
         val fetchAncestor: suspend (String) -> InternxtFolder? = { uuid ->
             try {
                 api.getFolderMeta(uuid)
             } catch (e: InternxtApiException) {
                 log.warn("Ancestor folder {} unfetchable ({}); dropping its descendants this pass", uuid, e.statusCode)
+                null
+            } catch (e: InternxtUnreadableResponse) {
+                log.warn("{} (server request id {}); dropping its descendants this pass", e.message, e.requestId ?: "not sent")
                 null
             }
         }
@@ -2068,7 +2075,7 @@ class InternxtProvider(
             log.warn(
                 "Internxt delta gather dropped {} item(s) ({} file(s), {} folder(s)) " +
                     "whose ancestor folder could not be resolved even after re-fetch " +
-                    "(404 / trashed / gone); returning DeltaPage(complete=false). " +
+                    "(404 / trashed / gone / unreadable); returning DeltaPage(complete=false). " +
                     "Dropped items recover when their ancestors reappear or via --reset.",
                 ancestorDrops,
                 filesDropped,
