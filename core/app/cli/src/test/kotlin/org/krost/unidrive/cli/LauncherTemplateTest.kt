@@ -26,8 +26,10 @@ class LauncherTemplateTest {
         error("dist/launcher/unidrive.ps1.tmpl not found above ${System.getProperty("user.dir")}")
     }
 
-    /** The template's last statement, which decides how the JVM start receives standard input. */
-    private fun javaLine() = "if ([Console]::IsInputRedirected) { \$input | & java @javaArgs @passArgs } else { & java @javaArgs @passArgs }"
+    private companion object {
+        /** The template's last statement, which decides how the JVM start receives standard input. */
+        const val JAVA_LINE = "if ([Console]::IsInputRedirected) { \$input | & java @javaArgs @passArgs } else { & java @javaArgs @passArgs }"
+    }
 
     /** Renders the template, lets the real powershell.exe build the JVM argument list for [passArgs] and returns it. */
     private fun launcherArgs(vararg passArgs: String): List<String> {
@@ -40,7 +42,7 @@ class LauncherTemplateTest {
                 .replace("@JAR@", "unidrive.jar")
                 .replace("@COROUTINES_DEBUG_AGENT@", "")
                 // print the argument list instead of starting java (the stdin branch is not under test here)
-                .replace(javaLine(), "\$javaArgs | ForEach-Object { 'ARG:' + \$_ }")
+                .replace(JAVA_LINE, "\$javaArgs | ForEach-Object { 'ARG:' + \$_ }")
             val script = dir.resolve("launcher.ps1")
             Files.writeString(script, rendered)
             val process = ProcessBuilder(
@@ -58,7 +60,9 @@ class LauncherTemplateTest {
 
     /**
      * Renders the template with the JVM start stubbed to echo what reached it, keeping the stdin branch, and runs
-     * it: [stdinLines] are fed through a redirected file, `null` inherits a pipe that is closed at once.
+     * it: [stdinLines] are fed through a redirected file, `null` inherits a pipe that is closed at once. The tests
+     * read the output only after the bounded [Process.waitFor], so the hang this guards against fails the 60 s
+     * bound instead of blocking forever on a pipe nobody closes.
      */
     private fun runLauncherStub(stdinLines: List<String>?): Pair<Path, Process> {
         val dir = Files.createTempDirectory("launcher-tmpl")
@@ -69,7 +73,7 @@ class LauncherTemplateTest {
             .replace("@COROUTINES_DEBUG_AGENT@", "")
             // echo the standard input and the argument list instead of starting java, in both branches
             .replace(
-                javaLine(),
+                JAVA_LINE,
                 "if ([Console]::IsInputRedirected) { \$input | ForEach-Object { 'STDIN:' + \$_ }; $argEcho } else { $argEcho }",
             )
         val script = dir.resolve("launcher.ps1")
@@ -123,8 +127,10 @@ class LauncherTemplateTest {
         assumeTrue("Windows PowerShell 5.1 only exists on Windows", System.getProperty("os.name").startsWith("Windows"))
         val (dir, process) = runLauncherStub(listOf("*.tmp", "build/"))
         try {
+            val finished = process.waitFor(60, TimeUnit.SECONDS)
+            if (!finished) process.destroy()
+            assertTrue(finished, "powershell.exe did not finish")
             val output = process.inputStream.bufferedReader().readText()
-            assertTrue(process.waitFor(60, TimeUnit.SECONDS), "powershell.exe did not finish")
             assertTrue("STDIN:*.tmp" in output, "first stdin line reached the stub: $output")
             assertTrue("STDIN:build/" in output, "second stdin line reached the stub: $output")
         } finally {
@@ -138,8 +144,10 @@ class LauncherTemplateTest {
         assumeTrue("Windows PowerShell 5.1 only exists on Windows", System.getProperty("os.name").startsWith("Windows"))
         val (dir, process) = runLauncherStub(null)
         try {
+            val finished = process.waitFor(60, TimeUnit.SECONDS)
+            if (!finished) process.destroy()
+            assertTrue(finished, "powershell.exe did not finish")
             val output = process.inputStream.bufferedReader().readText()
-            assertTrue(process.waitFor(60, TimeUnit.SECONDS), "powershell.exe did not finish")
             assertEquals(0, process.exitValue(), "the stub ran to completion: $output")
             assertTrue(output.lines().any { it.startsWith("ARG:") }, "the argument list was still built: $output")
         } finally {
