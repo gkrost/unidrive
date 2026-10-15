@@ -108,4 +108,42 @@ class StoragePermissionsTest {
         assertTrue(Files.notExists(root.resolve("no-logs")))
         assertTrue(Files.notExists(root.resolve("no-profile")))
     }
+
+    // #626 item 1: a dry run writes nothing and must not tighten the profile folder either — an
+    // elevated dry run once left it unreadable for a later non-elevated invocation.
+    @Test
+    fun `a dry run leaves the profile permissions alone and the real run tightens them`() {
+        val profileDir = Files.createDirectory(root.resolve("profile"))
+        val token = Files.writeString(profileDir.resolve("token.json"), "{}")
+        val before = if (WindowsAclProbe.isWindows) {
+            WindowsAclProbe.grantInheritableRead(root, WindowsAclProbe.USERS_SID)
+            sids(token)
+        } else {
+            assumeTrue(
+                "POSIX file attributes only",
+                FileSystems.getDefault().supportedFileAttributeViews().contains("posix"),
+            )
+            Files.setPosixFilePermissions(profileDir, PosixFilePermissions.fromString("rwxr-xr-x"))
+            Files.setPosixFilePermissions(token, PosixFilePermissions.fromString("rw-r--r--"))
+            setOf(PosixFilePermissions.toString(Files.getPosixFilePermissions(token)))
+        }
+
+        restrictProfileForSync(dryRun = true, profileDir = profileDir)
+
+        val afterDryRun =
+            if (WindowsAclProbe.isWindows) {
+                sids(token)
+            } else {
+                setOf(PosixFilePermissions.toString(Files.getPosixFilePermissions(token)))
+            }
+        assertEquals(before, afterDryRun, "the dry run must not touch the permissions")
+
+        restrictProfileForSync(dryRun = false, profileDir = profileDir)
+
+        if (WindowsAclProbe.isWindows) {
+            assertTrue(WindowsAclProbe.USERS_SID !in sids(token), "the real run tightens: ${sids(token)}")
+        } else {
+            assertEquals("rw-------", PosixFilePermissions.toString(Files.getPosixFilePermissions(token)))
+        }
+    }
 }

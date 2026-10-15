@@ -1,11 +1,13 @@
 package org.krost.unidrive.hydration
 
 import org.junit.Assume
+import org.krost.unidrive.engine.CachePaths
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -96,6 +98,48 @@ class CacheFolderTest {
         }
 
         assertTrue(isInsideCacheFolder(dir, link))
+    }
+
+    // #626 item 3: the hydration answer and the engine answer are one algorithm; the table pins the
+    // agreement so a divergence introduced on either side fails here.
+    @Test
+    fun `the two containment helpers agree on the table of paths`() {
+        val inside = write(dir.resolve("a").resolve("b.txt"))
+        val missing = dir.resolve("a").resolve("new.txt")
+        val sibling = write(dir.resolveSibling("profile-other").resolve("b.txt"))
+        val outside = write(base.resolve("elsewhere.txt"))
+        val table =
+            listOf(
+                "inside, existing" to inside,
+                "inside, not yet existing" to missing,
+                "the folder itself" to dir,
+                "a sibling prefix" to sibling,
+                "a dot-dot escape" to dir.resolve("..").resolve("elsewhere.txt"),
+                "outside the tree" to outside,
+            )
+        for ((label, path) in table) {
+            assertEquals(
+                CachePaths.isInside(dir, path),
+                isInsideCacheFolder(dir, path),
+                "$label: the hydration and the engine containment answer must agree",
+            )
+        }
+
+        val elsewhere = write(base.resolve("linked-out.txt"))
+        val outDir = Files.createDirectories(base.resolve("outdir"))
+        write(outDir.resolve("b.txt"))
+        val link = dir.resolve("link.txt")
+        try {
+            Files.createSymbolicLink(link, elsewhere)
+        } catch (e: Exception) {
+            Assume.assumeTrue("symbolic links are not available here: ${e.message}", false)
+            return
+        }
+        assertEquals(
+            CachePaths.isInside(dir, link),
+            isInsideCacheFolder(dir, link),
+            "a symlink escape: the answers must agree",
+        )
     }
 
     @Test
