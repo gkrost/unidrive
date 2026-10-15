@@ -7,9 +7,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.junit.experimental.categories.Category
 import org.krost.unidrive.http.UploadProgress
 import org.krost.unidrive.http.UploadWatchdogException
 import org.krost.unidrive.http.UploadWatchdogLimits
+import org.krost.unidrive.testing.Flaky
+import org.krost.unidrive.testing.FlakyTests
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
@@ -142,9 +145,15 @@ class InternxtShardPutWatchdogTest {
         }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 904, reason = "a 3 s runner pause reads as a stalled upload (real TLS loopback, 3 s idle window)",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38463511077/job/115524492531")
     fun `a slow but steady upload that outlives every limit succeeds - file body`() = slowButSteady(Body.FILE)
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 904, reason = "a 3 s runner pause reads as a stalled upload (real TLS loopback, 3 s idle window)",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38594747341/job/115958857568")
     fun `a slow but steady upload that outlives every limit succeeds - in-memory body`() = slowButSteady(Body.BYTES)
 
     // The server reads the first 64 KiB and then nothing: the client's writes block once the buffers are full.
@@ -253,6 +262,9 @@ class InternxtShardPutWatchdogTest {
         }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 904, reason = "a 3 s runner pause reads as a stalled upload (real TLS loopback, 3 s idle window)",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38697003262/job/116296446761")
     fun `cancelling the caller cancels the upload and closes its connection`() =
         runBlocking {
             val size = 64 * 1024 * 1024

@@ -136,7 +136,7 @@ class ProviderMetadataTest {
     // constructor + getter generation, not a domain invariant. If `data class`
     // ever becomes a regular `class` (or a field rename happens), the affected
     // callers fail at compile time; no runtime test would catch a regression
-    // that the compiler would not catch first. See CHANGELOG `[Unreleased] / Removed`.
+    // that the compiler would not catch first.
 
     // -- UD-263: per-provider concurrency hints --------------------------------
 
@@ -193,5 +193,5 @@ class ProviderMetadataTest {
     // Kotlin's data-class generated machinery (equals/copy/getter/default-args),
     // not domain invariants. Compiler-generated behaviour is the contract; a
     // runtime test that re-derives it adds maintenance cost without catching
-    // anything the compiler doesn't already catch. See CHANGELOG.
+    // anything the compiler doesn't already catch.
 }

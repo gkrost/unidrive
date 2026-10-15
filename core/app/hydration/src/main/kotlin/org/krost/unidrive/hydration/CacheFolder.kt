@@ -1,9 +1,6 @@
 package org.krost.unidrive.hydration
 
-import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.LinkOption
-import java.nio.file.NoSuchFileException
+import org.krost.unidrive.engine.CachePaths
 import java.nio.file.Path
 
 /**
@@ -12,46 +9,15 @@ import java.nio.file.Path
  * exists, on real paths: a link inside the folder that leads out of it does not count, another spelling of a file
  * inside does (letter case on Windows, a short name, a redundant segment). When [cacheDir] does not exist yet,
  * nothing below it can either, and the spelling decides.
+ *
+ * The engine's [CachePaths.isInside] is the same algorithm (#621, #622); this wrapper keeps the hydration-side
+ * name so the two containment answers cannot drift apart (#626 item 3).
  */
 internal fun isInsideCacheFolder(
     cacheDir: Path,
     candidate: Path,
-): Boolean {
-    val root = cacheDir.toAbsolutePath().normalize()
-    val path =
-        try {
-            candidate.toAbsolutePath()
-        } catch (_: java.io.IOError) {
-            return false
-        }
-    val realRoot =
-        try {
-            root.toRealPath()
-        } catch (_: NoSuchFileException) {
-            val normalised = path.normalize()
-            return normalised != root && normalised.startsWith(root)
-        } catch (_: IOException) {
-            return false
-        }
-    // The deepest part of [path] that exists (the file itself when it does), through its real path, and the names
-    // below it as given.
-    var existing: Path = path
-    val rest = ArrayList<Path>()
-    while (!Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
-        val name = existing.fileName ?: return false
-        rest.add(name)
-        existing = existing.parent ?: return false
-    }
-    var real =
-        try {
-            existing.toRealPath()
-        } catch (_: IOException) {
-            return false
-        }
-    for (name in rest.asReversed()) real = real.resolve(name)
-    real = real.normalize()
-    return real != realRoot && real.startsWith(realRoot)
-}
+): Boolean = CachePaths.isInside(cacheDir, candidate)
+
 
 /** [text] for a log line: control characters shown as `?`, at most 200 characters. */
 internal fun forLogLine(text: String): String {

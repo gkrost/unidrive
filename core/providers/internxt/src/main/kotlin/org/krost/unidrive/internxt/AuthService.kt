@@ -9,7 +9,6 @@ import org.krost.unidrive.AuthRequiredException
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
 import org.krost.unidrive.TransientNetworkException
-import org.krost.unidrive.UnidriveJson
 import org.krost.unidrive.auth.CredentialStore
 import org.krost.unidrive.auth.JwtExtractor
 import org.krost.unidrive.auth.RefreshableTokenLatch
@@ -44,7 +43,7 @@ open class AuthService(
             }
         },
 ) : AutoCloseable {
-    private val json = UnidriveJson
+    private val json = InternxtJson
     private var credentials: InternxtCredentials? = null
 
     // UD-338: shared mutex + NonCancellable wrap lifted to :app:core/auth.

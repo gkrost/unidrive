@@ -447,6 +447,21 @@ class RemoteEnumerationTest {
             assertEquals("x", db.getEntry("/again/x.txt")?.remoteId)
         }
 
+    // #878: an API failure with an HTTP status answers last_error_code http_<status>, and the reason
+    // loses the response body.
+    @Test
+    fun `an api failure reports its status as the last error code`() =
+        runTest {
+            val e = enumeration()
+            provider.failure = object : ProviderException("API error: 408 Request Timeout - {\"statusCode\":408}", httpStatus = 408) {}
+            val result = e.enumerate(reset = false)
+
+            assertFalse(result.ok)
+            val s = e.status()
+            assertEquals("http_408", s.lastErrorCode, "the status becomes the code")
+            assertEquals("API error: 408 Request Timeout", s.lastError, "the body is dropped from the reason")
+        }
+
     // One page per listing; every cursor names the listing that produced it.
     private class ListingProvider : CloudProvider {
         var items: List<CloudItem> = emptyList()

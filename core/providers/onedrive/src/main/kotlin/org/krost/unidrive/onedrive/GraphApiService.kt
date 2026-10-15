@@ -44,7 +44,8 @@ class GraphApiService(
     // The seam the daemon attaches its request-attempt recorder to; no sink, no metrics (see attachRequestMetrics).
     private val requestMetrics = RequestMetricsTap()
 
-    private val httpClient = graphHttpClient(requestMetrics, config.userAgent, engine)
+    // #644: the token path's leaf is the profile name, so the request log lines carry the account.
+    private val httpClient = graphHttpClient(requestMetrics, config.userAgent, engine, profile = config.tokenPath.fileName.toString())
 
     fun attachRequestMetrics(sink: RequestMetricsSink?) {
         requestMetrics.sink = sink
@@ -1354,7 +1355,7 @@ class GraphApiException(
     message: String,
     val statusCode: Int = 0,
     requestId: String? = null,
-) : ProviderException(message, requestId = requestId)
+) : ProviderException(message, requestId = requestId, httpStatus = statusCode.takeIf { it > 0 })
 
 // Where an upload lands: [remotePath] names the file, [itemId] (when set) is the existing item it replaces in place.
 private class UploadTarget(

@@ -54,7 +54,7 @@ class S3Exception(
     val status: Int,
     val code: String,
     requestId: String? = null,
-) : ProviderException(message, requestId = requestId)
+) : ProviderException(message, requestId = requestId, httpStatus = status)
 
 /** One object as a listing or a HEAD reports it. [etag] is without quotes; [mtime] is `x-amz-meta-mtime` when a HEAD read it. */
 data class S3Object(
@@ -567,10 +567,13 @@ internal fun s3HttpClient(
             requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
         }
         // Every path segment is a bucket or a key, so every one becomes {id}: nothing identifying reaches the metrics.
+        // #644: the token path's leaf is the profile name; S3 answers x-amz-request-id.
         install(RequestId) {
             metrics = tap
             provider = "s3"
             endpoints = EndpointClassifier(setOf(java.net.URI(config.endpoint).host ?: ""), emptySet())
+            profile = config.tokenPath.fileName.toString()
+            serverRequestIdHeaders = listOf("x-amz-request-id")
         }
     }
     return if (engine != null) HttpClient(engine, configure) else HttpClient(configure)

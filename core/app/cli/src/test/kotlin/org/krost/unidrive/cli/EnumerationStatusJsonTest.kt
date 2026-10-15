@@ -111,6 +111,18 @@ class EnumerationStatusJsonTest {
         assertEquals("estimate", estimating.getValue("eta_kind").jsonPrimitive.content)
     }
 
+    // #878: last_error_code is its own key beside last_error, and absent (never null) when unknown.
+    @Test
+    fun `a failed status names last_error_code and leaves it out when unknown`() {
+        val coded =
+            wire(EnumerationStatus(state = EnumerationStatus.State.FAILED, first = true, attempt = 1, lastError = "API error: 408", lastErrorCode = "http_408"))
+        val uncoded = wire(EnumerationStatus(state = EnumerationStatus.State.FAILED, first = true, attempt = 1, lastError = "boom"))
+
+        assertEquals("http_408", coded.getValue("last_error_code").jsonPrimitive.content)
+        assertEquals("API error: 408", coded.getValue("last_error").jsonPrimitive.content)
+        assertFalse("last_error_code" in uncoded.keys, "unknown means absent: $uncoded")
+    }
+
     @Test
     fun `no field is ever written as null`() {
         val json = wire(EnumerationStatus(state = EnumerationStatus.State.RUNNING, first = true, attempt = 1, items = 5))

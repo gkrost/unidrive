@@ -195,11 +195,13 @@ class DaemonStatusHealthTest {
             val s = status()
 
             val uploads = s.getValue("uploads").jsonObject
-            assertEquals(setOf("pending", "in_flight", "failed", "oldest_pending_age_ms"), uploads.keys)
+            assertEquals(setOf("pending", "in_flight", "failed", "oldest_pending_age_ms", "as_of_ms"), uploads.keys)
             assertEquals(0, uploads.getValue("pending").jsonPrimitive.long)
             assertEquals(0, uploads.getValue("in_flight").jsonPrimitive.long)
             assertEquals(0, uploads.getValue("failed").jsonPrimitive.long)
             assertEquals(JsonNull, uploads.getValue("oldest_pending_age_ms"), "nothing pending has no age; never 0")
+            // #747: the stamp of the reading, null until the first one — the key is always present.
+            assertTrue(uploads.getValue("as_of_ms") is JsonNull || uploads.getValue("as_of_ms").jsonPrimitive.long > 0)
             val cache = s.getValue("cache").jsonObject
             assertEquals(setOf("bytes", "budget_bytes"), cache.keys)
             assertEquals(123_456L, cache.getValue("budget_bytes").jsonPrimitive.long)

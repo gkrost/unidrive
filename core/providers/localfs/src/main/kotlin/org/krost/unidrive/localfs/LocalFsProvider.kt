@@ -18,6 +18,7 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
+import org.krost.unidrive.io.withLocalIoRetry
 
 /**
  * A no-auth, local-filesystem [CloudProvider]. Treats one local directory
@@ -144,7 +145,7 @@ class LocalFsProvider(root: Path) : CloudProvider {
         withContext(Dispatchers.IO) {
             val src = toLocal(remotePath)
             destination.parent?.let { Files.createDirectories(it) }
-            copyDurably(src, destination)
+            withLocalIoRetry { copyDurably(src, destination) }
             Files.size(destination)
         }
 
@@ -161,7 +162,7 @@ class LocalFsProvider(root: Path) : CloudProvider {
         withContext(Dispatchers.IO) {
             val dest = toLocal(remotePath)
             dest.parent?.let { Files.createDirectories(it) }
-            copyDurably(localPath, dest)
+            withLocalIoRetry { copyDurably(localPath, dest) }
             val size = Files.size(dest)
             onProgress?.invoke(size, size)
             toItem(dest)
@@ -209,7 +210,7 @@ class LocalFsProvider(root: Path) : CloudProvider {
             val from = toLocal(fromPath)
             val to = toLocal(toPath)
             to.parent?.let { Files.createDirectories(it) }
-            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING)
+            withLocalIoRetry { Files.move(from, to, StandardCopyOption.REPLACE_EXISTING) }
             toItem(to)
         }
 

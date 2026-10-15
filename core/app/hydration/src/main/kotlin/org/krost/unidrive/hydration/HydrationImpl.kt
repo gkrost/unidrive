@@ -319,6 +319,9 @@ class HydrationImpl(
         /** #658: how long a status request waits for the very first reading (it has nothing to serve until then). */
         const val UPLOAD_SNAPSHOT_WAIT_MS: Long = 1_000
 
+        /** #747: the "upload health unavailable" WARN repeats at most this often (per cause). */
+        const val SNAPSHOT_WARN_INTERVAL_MS: Long = 60_000
+
         /** #658: how long a status request waits for a re-reading when it has a previous reading to serve. */
         const val UPLOAD_SNAPSHOT_REFRESH_WAIT_MS: Long = 100
 
@@ -1135,7 +1138,15 @@ class HydrationImpl(
         // #728: the client wrote through this handle, not through the engine: its bytes only become
         // visible here, and the trigger below must see them (a close of a read handle accounts the same
         // size again, a no-op).
-        openSets[connectionId]?.remove(handleId)?.let { accountCacheFileOnDisk(it) }
+        // #438: a pooled client can close on a connection other than the one that served open_read, so the
+        // caller's own connection is looked up first and a miss falls through to the others. A handle id is
+        // the client's own name (wh-N): a match on another connection counts only when it is unique across
+        // them, so a close from one client never releases the handle of another using the same id. A close
+        // that finds nothing anywhere still succeeds — the close is idempotent.
+        val path =
+            openSets[connectionId]?.remove(handleId)
+                ?: openSets.values.filter { it.containsKey(handleId) }.singleOrNull()?.remove(handleId)
+        path?.let { accountCacheFileOnDisk(it) }
         requestEviction()
     }
 
@@ -1420,6 +1431,9 @@ class HydrationImpl(
         val failed: Int,
         val oldestPendingAgeMs: Long?,
         val blocked: BlockedUploads = BlockedUploads(),
+        // #747: when the snapshot was taken (epoch ms). A failing state.db keeps the last counts served
+        // for ever, so a front-end needs the stamp to tell fresh from frozen. Null when never read.
+        val asOfMs: Long? = null,
     )
 
     /**
@@ -1454,7 +1468,7 @@ class HydrationImpl(
         val blocked: BlockedUploads,
     ) {
         fun health(nowMs: Long) =
-            UploadHealth(pending, inFlight, failed, oldestSinceMs?.let { (nowMs - it).coerceAtLeast(0) }, blocked)
+            UploadHealth(pending, inFlight, failed, oldestSinceMs?.let { (nowMs - it).coerceAtLeast(0) }, blocked, takenAtMs)
     }
 
     // The entries blocked by name and those below a blocked folder, read from the rows (nothing is kept in memory:
@@ -1511,6 +1525,12 @@ class HydrationImpl(
     fun uploadHealth(nowMs: Long = System.currentTimeMillis()): UploadHealth = takeUploadSnapshot().health(nowMs)
 
     private val uploadSnapshot = java.util.concurrent.atomic.AtomicReference<UploadSnapshot?>(null)
+
+    // #747: the last "upload health unavailable" WARN and its cause, so the warning repeats at most once
+    // per minute per cause instead of once per status request.
+    @Volatile private var lastSnapshotWarnCause: String? = null
+
+    @Volatile private var lastSnapshotWarnAtMs: Long = 0
     private val uploadSnapshotRefresh = java.util.concurrent.atomic.AtomicReference<Job?>(null)
 
     // Single flight: the running refresh, or a new one on the IO dispatcher.
@@ -1524,7 +1544,15 @@ class HydrationImpl(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    log.warn("upload health unavailable: {}", e.message)
+                    // #747: a permanently busy state.db used to repeat this WARN on every status request;
+                    // once per minute per cause is enough to keep it in the log without flooding it.
+                    val message = e.message
+                    val now = System.currentTimeMillis()
+                    if (message != lastSnapshotWarnCause || now - lastSnapshotWarnAtMs >= SNAPSHOT_WARN_INTERVAL_MS) {
+                        log.warn("upload health unavailable: {}", message)
+                        lastSnapshotWarnCause = message
+                        lastSnapshotWarnAtMs = now
+                    }
                 }
             }
             if (uploadSnapshotRefresh.compareAndSet(running, job)) {

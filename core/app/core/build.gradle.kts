@@ -1,6 +1,9 @@
 plugins {
     kotlin("jvm")
     alias(libs.plugins.kotlin.serialization)
+    // The flaky-test marker (org.krost.unidrive.testing.Flaky) lives in the test fixtures: every module's tests get
+    // it from the root build script, and it stays out of the shipped jar.
+    `java-test-fixtures`
 }
 
 kotlin {
@@ -27,6 +30,9 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
 
     testImplementation(project(":providers:onedrive"))
+
+    // #644: the plugin's log lines are asserted through a logback ListAppender.
+    testImplementation(libs.logback.classic)
 }
 
 tasks.test {

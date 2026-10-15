@@ -10,6 +10,7 @@ import io.ktor.utils.io.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
@@ -75,8 +76,9 @@ class InternxtApiService(
     private val listingSocketTimeoutMs: Long = LISTING_SOCKET_TIMEOUT_MS,
     // The seam the daemon attaches its request-attempt recorder to; no sink, no metrics (see attachRequestMetrics).
     private val requestMetrics: RequestMetricsTap = RequestMetricsTap(),
-    // Tests hand in a client on a MockEngine; production builds the default one.
-    private val httpClient: HttpClient = defaultHttpClient(requestMetrics),
+    // Tests hand in a client on a MockEngine; production builds the default one. The token path's leaf is the
+    // profile name, so the request log lines carry the account independent of the thread's MDC (#644).
+    private val httpClient: HttpClient = defaultHttpClient(requestMetrics, profile = config.tokenPath.fileName.toString()),
     // The limits of the shard PUT's write-progress watchdog (#571). A parameter so that loopback tests can run on a
     // scale of milliseconds.
     private val shardPutWatchdog: UploadWatchdogLimits = UploadWatchdogLimits.DEFAULT,
@@ -105,6 +107,7 @@ class InternxtApiService(
         internal fun defaultHttpClient(
             tap: RequestMetricsTap,
             engine: io.ktor.client.engine.HttpClientEngine? = null,
+            profile: String? = null,
         ): HttpClient {
             val configure: io.ktor.client.HttpClientConfig<*>.() -> Unit = {
                 install(HttpTimeout) {
@@ -113,10 +116,13 @@ class InternxtApiService(
                     requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
                 }
                 // UD-255: per-request correlation id + DEBUG req/response logging; the attempt metrics ride on it.
+                // #644: the profile and the server's x-request-id join the response line.
                 install(org.krost.unidrive.http.RequestId) {
                     metrics = tap
                     provider = "internxt"
                     endpoints = InternxtEndpoints.classifier
+                    this.profile = profile
+                    serverRequestIdHeaders = listOf("x-request-id")
                 }
             }
             return if (engine != null) HttpClient(engine, configure) else HttpClient(configure)
@@ -201,7 +207,7 @@ class InternxtApiService(
         private const val SHARD_PUT = "Shard upload"
     }
 
-    private val json = org.krost.unidrive.UnidriveJson
+    private val json = InternxtJson
     private val baseUrl = InternxtConfig.API_BASE_URL
 
     // UD-205: read-heavy provider operations are a known dedup target.
@@ -422,11 +428,13 @@ class InternxtApiService(
     // [updatedAt], every later page only the [cursor] the page before it returned, with the same
     // status and limit. A page's nextCursor is null on the last page. They are account-wide
     // listings: the read-idle watchdog rides at the listing limit like the offset ones above, so a
-    // slow page is never cut by the engine's own default timer.
+    // slow page is never cut by the engine's own default timer. A null [status] sends no status
+    // filter (the server then answers rows of every status, each naming its own, and issues cursors
+    // without a status; it refuses a cursor sent with another status than it was issued for).
     suspend fun getFoldersSync(
         updatedAt: String?,
         cursor: String?,
-        status: String = SYNC_LISTING_STATUS,
+        status: String? = SYNC_LISTING_STATUS,
         limit: Int = InternxtConfig.SYNC_PAGE_SIZE,
     ): SyncPage<InternxtFolder> =
         parseFoldersSyncPage(
@@ -435,12 +443,13 @@ class InternxtApiService(
                 syncQueryParams(updatedAt, cursor, status, limit),
                 socketTimeoutMs = listingSocketTimeoutMs,
             ),
+            rowsCarryStatus = status == null,
         )
 
     suspend fun getFilesSync(
         updatedAt: String?,
         cursor: String?,
-        status: String = SYNC_LISTING_STATUS,
+        status: String? = SYNC_LISTING_STATUS,
         limit: Int = InternxtConfig.SYNC_PAGE_SIZE,
     ): SyncPage<InternxtFile> =
         parseFilesSyncPage(
@@ -449,6 +458,7 @@ class InternxtApiService(
                 syncQueryParams(updatedAt, cursor, status, limit),
                 socketTimeoutMs = listingSocketTimeoutMs,
             ),
+            rowsCarryStatus = status == null,
         )
 
     suspend fun getFileMeta(uuid: String): InternxtFile =
@@ -457,10 +467,21 @@ class InternxtApiService(
             json.decodeFromString<InternxtFile>(body)
         }
 
+    // A 200 whose body the model cannot read is not a transport failure: the same body comes back on every attempt, so it
+    // is not retried and is told apart from the HTTP errors, with the server's request id for its support.
     suspend fun getFolderMeta(uuid: String): InternxtFolder =
         folderMetaDedup.load(uuid, currentPriority()) {
-            val body = authenticatedGet("$baseUrl/folders/$uuid/meta")
-            json.decodeFromString<InternxtFolder>(body)
+            val reply = authenticatedGetReply("$baseUrl/folders/$uuid/meta")
+            try {
+                json.decodeFromString<InternxtFolder>(reply.body)
+            } catch (e: SerializationException) {
+                // The first line only: the lines after it quote the body, which holds the folder's names.
+                throw InternxtUnreadableResponse(
+                    "The meta of folder $uuid cannot be read: ${e.message.orEmpty().lineSequence().first()}",
+                    reply.requestId,
+                    e,
+                )
+            }
         }
 
     suspend fun createFile(
@@ -1226,8 +1247,9 @@ class InternxtApiService(
     suspend fun getQuota(): QuotaInfo {
         val usage = authenticatedGet("$baseUrl/users/usage")
         val limit = authenticatedGet("$baseUrl/users/limit")
-        val usedBytes = json.decodeFromString<UsageResponse>(usage).drive
-        val maxBytes = json.decodeFromString<LimitResponse>(limit).maxSpaceBytes
+        // Not model shapes: a null quota is no quota, and must not be read as a limit of 0.
+        val usedBytes = org.krost.unidrive.UnidriveJson.decodeFromString<UsageResponse>(usage).drive
+        val maxBytes = org.krost.unidrive.UnidriveJson.decodeFromString<LimitResponse>(limit).maxSpaceBytes
         return QuotaInfo(total = maxBytes, used = usedBytes, remaining = maxBytes - usedBytes)
     }
 
@@ -1251,7 +1273,19 @@ class InternxtApiService(
         url: String,
         params: Map<String, String> = emptyMap(),
         socketTimeoutMs: Long = HttpDefaults.SOCKET_TIMEOUT_MS,
-    ): String {
+    ): String = authenticatedGetReply(url, params, socketTimeoutMs).body
+
+    // The body of a successful GET and the server's own id of that answer, for a caller that may have to report the body.
+    private class GetReply(
+        val body: String,
+        val requestId: String?,
+    )
+
+    private suspend fun authenticatedGetReply(
+        url: String,
+        params: Map<String, String> = emptyMap(),
+        socketTimeoutMs: Long = HttpDefaults.SOCKET_TIMEOUT_MS,
+    ): GetReply {
         var lastException: InternxtApiException? = null
         // Three attempts have two retry gaps; keep only the delays that are used.
         val delays = listOf(2_000L, 4_000L)
@@ -1298,7 +1332,7 @@ class InternxtApiService(
                             }
                         checkResponse(response)
                         driveBudget.recordSuccess()
-                        return@withAuthRetry response.bodyAsText()
+                        return@withAuthRetry GetReply(response.bodyAsText(), extractRequestId(response))
                     } catch (e: InternxtApiException) {
                         if (e.statusCode == 429 || e.statusCode == 503) driveBudget.recordThrottle(e.retryAfterMs ?: 0L)
                         throw e
@@ -1564,4 +1598,14 @@ class InternxtApiException(
     requestId: String? = null,
     val retryAfterMs: Long? = null,
     cause: Throwable? = null,
+) : ProviderException(message, cause = cause, requestId = requestId)
+
+/**
+ * The server answered with success and a body the model cannot read: a required field missing or null, a value of
+ * another type, something that is no JSON. [requestId] is the server's own id of that answer.
+ */
+class InternxtUnreadableResponse(
+    message: String,
+    requestId: String?,
+    cause: Throwable,
 ) : ProviderException(message, cause = cause, requestId = requestId)

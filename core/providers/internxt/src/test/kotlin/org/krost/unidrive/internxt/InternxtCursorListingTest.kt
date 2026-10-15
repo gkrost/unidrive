@@ -1247,7 +1247,7 @@ class InternxtCursorListingTest {
             )
         assertEquals(listOf("d1"), folders.items.map { it.uuid })
         assertEquals("Docs", folders.items.single().plainName)
-        assertEquals(0L, folders.items.single().parentId, "null where the model has a default takes the default")
+        assertNull(folders.items.single().parentId, "a null parentId is the top of a tree, not a parent number 0")
         assertEquals("abc", folders.nextCursor)
 
         val files =
@@ -1257,6 +1257,7 @@ class InternxtCursorListingTest {
                     "modificationTime":"2026-01-02T00:00:00.123Z","name":"enc","plainName":"a","size":"12","status":"EXISTS","type":"txt",
                     "updatedAt":"2026-01-02T00:00:00.123Z","userId":7,"uuid":"f1"}],"nextCursor":null}""",
             )
+        assertNull(files.items.single().folderId, "a null folderId is no folder row, folderUuid names the folder")
         assertEquals("12", files.items.single().size)
         assertEquals("d1", files.items.single().folderUuid)
         assertNull(files.nextCursor, "a null nextCursor is the last page")

@@ -41,6 +41,8 @@ data class EnumerationStatus(
     val lastScanComplete: Boolean? = null,
     /** One sanitised line: no paths, at most [EnumerationTracker.ERROR_MAX_CHARS] characters. */
     val lastError: String? = null,
+    // #878: a machine-readable cause for the failure (`http_408`, `timeout`, `auth_rejected`); absent when unknown.
+    val lastErrorCode: String? = null,
     /** When the poller tries again after a failure. */
     val nextAttemptAtMs: Long? = null,
 ) {

@@ -324,6 +324,7 @@ Read-only verb; takes no parameters; never returns `ok: false` (a daemon that ca
 | `eta_s`, `eta_kind` | seconds left while listing. `lower_bound`: only the known queue of the folder walk is counted, the real value can be larger. `estimate`: the totals of a previous complete full enumeration give the size of the whole. Absent when neither is known |
 | `last_success_at_ms` | end of the last completed enumeration (epoch ms) |
 | `last_error` | the reason the last attempt failed, until a success: one line, at most 200 characters, with paths, quoted names, addresses and URLs replaced by placeholders |
+| `last_error_code` | #878: a machine-readable cause for the failure, until a success: `http_<status>` for an API error (`http_408`), `auth_rejected` when the provider refused the credentials, otherwise the transport class (`timeout`, `dns`, `tls`, `connect`, `reset`, `io`). Absent when unknown; the field is additive and the wording stays the client's |
 | `next_attempt_at_ms` | while `failed` and the poller runs: when it tries again (epoch ms, the jittered sleep it takes) |
 
 The reply also carries `poll_interval_ms` (additive, #463): the effective interval of the remote poll in ms, `0` when it is off. The poll's schedule after a failure is `enumeration.next_attempt_at_ms`.
@@ -334,7 +335,7 @@ A running enumeration is answered from memory, never from state.db, so a status 
 
 ```json
 {
-  "uploads": {"pending": 3, "in_flight": 1, "failed": 1, "oldest_pending_age_ms": 5400000},
+  "uploads": {"pending": 3, "in_flight": 1, "failed": 1, "oldest_pending_age_ms": 5400000, "as_of_ms": 1760000000000},
   "cache": {"bytes": 1288490188, "budget_bytes": 21474836480},
   "provider_health": {"last_contact_ms": 1700000000000}
 }
@@ -343,6 +344,7 @@ A running enumeration is answered from memory, never from state.db, so a status 
 | field | meaning |
 |---|---|
 | `uploads` | mount profiles only; absent on a mirror profile (no hydration layer) and until the upload queue has been read once after the start |
+| `uploads.as_of_ms` | #747: when the counts were read (epoch ms). A busy state.db serves the last good reading, so a front-end tells fresh from frozen by the stamp not advancing; absent until the first reading |
 | `uploads.pending` | paths whose bytes are not in the cloud yet and that an upload will take: every never-uploaded (`local:`) row, plus every path holding an upload slot (a dirty overwrite of an uploaded row has no such row). Queued, in flight and failed-awaiting-replay all count, **including the start-up replay's own uploads**. **Keep-local rows (`exclude_patterns`, ignore rules) and rows outside `sync_path` are not counted**: no upload will ever take them. `0` means nothing is waiting; a client that wants "everything is uploaded" also checks that `uploads` is present |
 | `uploads.in_flight` | transfer attempts that hold a transfer permit right now (a subset of `pending`); a path waiting for its turn, for the transfer budget or in a retry backoff is pending but not in flight |
 | `uploads.failed` | never-uploaded rows with a failed attempt on record (a subset of `pending`); a daemon restart replays them |

@@ -59,7 +59,7 @@ class DropboxApiException(
     val summary: String,
     val error: JsonObject? = null,
     requestId: String? = null,
-) : ProviderException(message, requestId = requestId) {
+) : ProviderException(message, requestId = requestId, httpStatus = status) {
     /** True when the summary starts with [prefix] (`path/not_found`, `to/conflict`, `reset`). */
     fun isA(prefix: String): Boolean = summary.startsWith(prefix)
 }
@@ -82,7 +82,7 @@ class DropboxApi(
     private val json = org.krost.unidrive.UnidriveJson
     private val metrics = RequestMetricsTap()
 
-    val httpClient: HttpClient = dropboxHttpClient(metrics, config.userAgent, engine)
+    val httpClient: HttpClient = dropboxHttpClient(metrics, config.userAgent, engine, profile = config.tokenPath.fileName.toString())
 
     /**
      * The `Dropbox-API-Path-Root` header value, set at sign-in when the account's root namespace is not its home
@@ -384,6 +384,7 @@ internal fun dropboxHttpClient(
     tap: RequestMetricsTap,
     userAgent: String,
     engine: HttpClientEngine? = null,
+    profile: String? = null,
 ): HttpClient {
     val configure: HttpClientConfig<*>.() -> Unit = {
         install(HttpTimeout) {
@@ -392,10 +393,12 @@ internal fun dropboxHttpClient(
             requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
         }
         install(UserAgent) { agent = userAgent }
+        // #644: the token path's leaf is the profile name; Dropbox maps no server request id header.
         install(RequestId) {
             metrics = tap
             provider = "dropbox"
             endpoints = DropboxEndpoints.classifier
+            this.profile = profile
         }
     }
     return if (engine != null) HttpClient(engine, configure) else HttpClient(configure)

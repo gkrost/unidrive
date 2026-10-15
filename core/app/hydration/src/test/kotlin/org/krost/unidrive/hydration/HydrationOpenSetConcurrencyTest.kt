@@ -104,4 +104,41 @@ class HydrationOpenSetConcurrencyTest {
                 "cache file of a path open for write must never be dehydrated away",
             )
         }
+
+    // #438: a pooled client can close on a connection other than the one that served open_read. The
+    // close must find the handle across connections, and one client's close must never release another
+    // client's handle that happens to carry the same id.
+    @Test
+    fun `a close from another connection releases the handle and a repeated or unknown close is ok`() =
+        runBlocking(Dispatchers.IO) {
+            val env = HydrationTestEnv()
+            val impl = env.hydration
+            env.stateDb.insertHydratedEntry("/victim.txt", localSize = 5)
+            env.syncEngine.seedCacheContent("/victim.txt", "hello")
+            impl.openForRead("conn-a", "wh-1", "/victim.txt")
+            assertTrue(impl.dehydrate("/victim.txt") is DehydrateResult.Busy, "an open handle keeps dehydrate busy")
+            impl.closeHandle("conn-b", "wh-1")
+            assertTrue(impl.dehydrate("/victim.txt") is DehydrateResult.Ok, "the close from conn-b released the handle")
+            impl.closeHandle("conn-b", "wh-1")
+            impl.closeHandle("conn-a", "wh-unknown")
+            assertTrue(impl.dehydrate("/victim.txt") is DehydrateResult.Ok, "a repeated and an unknown close change nothing")
+        }
+
+    @Test
+    fun `two clients with the same handle id on different connections close independently`() =
+        runBlocking(Dispatchers.IO) {
+            val env = HydrationTestEnv()
+            val impl = env.hydration
+            env.stateDb.insertHydratedEntry("/victim.txt", localSize = 5)
+            env.syncEngine.seedCacheContent("/victim.txt", "hello")
+            env.stateDb.insertHydratedEntry("/second.txt", localSize = 5)
+            env.syncEngine.seedCacheContent("/second.txt", "hello")
+            impl.openForRead("conn-a", "wh-1", "/victim.txt")
+            impl.openForRead("conn-b", "wh-1", "/second.txt")
+            impl.closeHandle("conn-a", "wh-1")
+            assertTrue(impl.dehydrate("/victim.txt") is DehydrateResult.Ok, "conn-a's close released conn-a's handle")
+            assertTrue(impl.dehydrate("/second.txt") is DehydrateResult.Busy, "conn-b's handle with the same id is untouched")
+            impl.closeHandle("conn-b", "wh-1")
+            assertTrue(impl.dehydrate("/second.txt") is DehydrateResult.Ok, "conn-b's own close releases its handle")
+        }
 }

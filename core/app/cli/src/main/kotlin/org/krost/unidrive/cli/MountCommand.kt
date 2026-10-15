@@ -57,18 +57,17 @@ class MountCommand : Runnable {
             SyncEngine.defaultHydrationCacheRoot(),
             profile.name,
         )
-        val binary = defaultBinaryPath()
+        val envBinary = System.getenv("UNIDRIVE_MOUNT_BIN")
+        val locations = searchLocations()
+        val binary = chooseBinary(envBinary, locations)
 
-        val existsExit = checkBinaryExists(binary)
-        if (existsExit != 0) {
-            System.err.println(
-                "unidrive mount: co-daemon binary not found at $binary",
-            )
+        if (binary == null || checkBinaryExists(binary) != 0) {
+            System.err.println(binaryMissingMessage(envBinary, locations))
             System.err.println(
                 "Build manually: cd ../unidrive-mount-linux && cargo build --release " +
                     "&& cp target/release/unidrive-mount ~/.local/lib/unidrive/",
             )
-            System.exit(existsExit)
+            System.exit(EX_CONFIG)
             return
         }
 
@@ -115,17 +114,32 @@ class MountCommand : Runnable {
         const val EX_USAGE: Int = 64
         const val SIGTERM_GRACE_MS: Long = 10_000
 
-        fun defaultBinaryPath(): Path =
-            Paths.get(
-                System.getProperty("user.home"),
-                ".local",
-                "lib",
-                "unidrive",
-                "unidrive-mount",
+        /** The locations the co-daemon search looks at, in order: per-user first, then the system-wide package path. */
+        fun searchLocations(): List<Path> =
+            listOf(
+                // The per-user location the tarball and `install.sh` write.
+                Paths.get(System.getProperty("user.home"), ".local", "lib", "unidrive", "unidrive-mount"),
+                // The system-wide location the deb/rpm/AUR packages write.
+                Paths.get("/", "usr", "lib", "unidrive", "unidrive-mount"),
             )
 
-        fun hydrationCacheRoot(cacheRoot: Path, cacheKey: String): Path =
-            SyncEngine.hydrationCacheRoot(cacheRoot, cacheKey)
+        /**
+         * The first executable search location. An explicit `UNIDRIVE_MOUNT_BIN` is returned as given:
+         * the caller refuses a missing one without falling back.
+         */
+        fun chooseBinary(envValue: String?, locations: List<Path>): Path? =
+            if (!envValue.isNullOrBlank()) {
+                Paths.get(envValue)
+            } else {
+                locations.firstOrNull { Files.isExecutable(it) }
+            }
+
+        fun binaryMissingMessage(envValue: String?, locations: List<Path>): String =
+            if (!envValue.isNullOrBlank()) {
+                "unidrive mount: co-daemon binary not found at $envValue (UNIDRIVE_MOUNT_BIN; no fallback)"
+            } else {
+                "unidrive mount: co-daemon binary not found (tried ${locations.joinToString(", ")})"
+            }
 
         fun buildArgv(
             binary: Path,

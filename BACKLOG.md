@@ -10,13 +10,6 @@
 
 Top of file = next up. Work down. No IDs, no dates, no versions.
 
-## Critical — data-risk
-
-Silent corruption, orphan storage, lost local metadata. Fix before anything else.
-
-- [#288] Tracking-set: delta deletions keyed by path, but OneDrive tombstones carry no usable path — incremental remote deletes structurally cannot propagate
-- [#364] [Security] Internxt Desktop stores master encryption mnemonic in plaintext in AppData config.json
-
 ## High — correctness, required for first release
 
 - [#99] Tracking-set sync engine (post-MVP epic; the engine is frozen, data-safety fixes only)
@@ -33,15 +26,10 @@ Silent corruption, orphan storage, lost local metadata. Fix before anything else
 - [#130] OneDrive per-tenant concurrency calibration
 - [#131] OneDrive `HttpRetryBudget` per-provider override
 - [#132] Internxt deletions aren't promptly reaped — the `/files` listing `status` lags a web-UI trash by ≥60 min
-- [#135] Socket-path name hashing diverges from hydration cache root naming for long profile names
-- [#141] Convert `unidrive sync` into a client of the `unidrive daemon` process (daemon-decomposition phase 2)
-- [#142] Auto-spawn `unidrive daemon` on first client connection (daemon-decomposition phase 3)
 
 ## Low — guards and UX
 
-- [#147] `StateDatabase.batch{}` holds the `@Synchronized` lock across a full enumeration → mount `ls` stalls during `enumerateRemoteIntoState(reset)`
 - [#150] Local-dev redeploy + co-daemon observability gaps (`scripts/dev/redeploy-local.sh`)
-- [#151] `rm` on the mount records `status=DELETED` but the provider trashes (recoverable) — label vs disposition mismatch
 - [#153] OneDrive `malware` facet skip on download
 - [#154] OneDrive `fileSize` precheck → early 507
 - [#155] Internxt keep-overwritten prune

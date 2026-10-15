@@ -11,7 +11,9 @@ data class InternxtFolder(
     val name: String? = null,
     val plainName: String? = null,
     val type: String? = null,
-    val parentId: Long = 0,
+    // Null is the top of a tree: the server's own rule (Folder.isRootFolder is `parentId === null`), sent as an
+    // explicit null together with a null parentUuid. Nothing reads the number; parentUuid builds the path.
+    val parentId: Long? = null,
     val parentUuid: String? = null,
     val bucket: String? = null,
     val encryptVersion: String? = null,

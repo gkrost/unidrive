@@ -1,6 +1,9 @@
 package org.krost.unidrive.telemetry
 
+import org.junit.experimental.categories.Category
 import org.krost.unidrive.io.OwnerOnly
+import org.krost.unidrive.testing.Flaky
+import org.krost.unidrive.testing.FlakyTests
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
@@ -200,6 +203,9 @@ class TransferHistoryTest {
     }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 832, reason = "history.flush() times out on a loaded Windows runner (writer thread too slow)",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38284021448/job/114927958874")
     fun `retention prunes the oldest rows when the file is over the size limit`() {
         val cap = 256L * 1024
         val history = open(HistoryConfig(maxBytes = cap, batchSize = 200))
@@ -250,6 +256,9 @@ class TransferHistoryTest {
     }
 
     @Test
+    @Category(FlakyTests::class)
+    @Flaky(issue = 832, reason = "writer thread too slow for 50000 SQLite rows on a loaded Windows runner",
+        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38284021448/job/114927958874")
     fun `a burst of 50000 rows goes through the queue without dropping`() {
         val total = 50_000
         val history = open(HistoryConfig(queueCapacity = 4 * total, batchSize = 1000))

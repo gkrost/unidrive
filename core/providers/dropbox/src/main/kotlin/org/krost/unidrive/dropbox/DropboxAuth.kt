@@ -59,25 +59,49 @@ class DropboxAuth(
                 timeout = 5.minutes,
                 bindFailureHint = "Set ${DropboxConfig.OAUTH_PORT_ENV} to a free port (and register that redirect URI with the Dropbox app).",
             )
-        val fresh = exchangeCode(code, verifier)
+        saveToken(exchangeCode(code, verifier))
+    }
+
+    /** Persists a freshly exchanged grant (the browser flow and the no-redirect flow share it). */
+    internal fun saveToken(fresh: DropboxToken) {
         store.save(fresh)
         token = fresh
     }
 
+    /**
+     * The authorization url. With [redirect] (the browser flow) Dropbox calls back to [DropboxConfig.redirectUri];
+     * without it (#866) Dropbox shows the user a code to paste instead of calling back.
+     */
     internal fun authorizationUrl(
         state: String,
         challenge: String,
+        redirect: Boolean = true,
     ): String =
         URLBuilder(config.authorizeUrl)
             .apply {
                 parameters.append("client_id", config.appKey)
                 parameters.append("response_type", "code")
-                parameters.append("redirect_uri", config.redirectUri)
+                if (redirect) parameters.append("redirect_uri", config.redirectUri)
                 parameters.append("token_access_type", "offline")
                 parameters.append("code_challenge", challenge)
                 parameters.append("code_challenge_method", "S256")
                 parameters.append("state", state)
             }.buildString()
+
+    /** The token exchange of the no-redirect flow: no `redirect_uri`, the code the user pasted. */
+    internal suspend fun exchangeCodeNoRedirect(
+        code: String,
+        verifier: String,
+    ): DropboxToken =
+        requestToken(
+            Parameters.build {
+                append("grant_type", "authorization_code")
+                append("code", code)
+                append("client_id", config.appKey)
+                append("code_verifier", verifier)
+            },
+            previousRefreshToken = null,
+        )
 
     internal suspend fun exchangeCode(
         code: String,

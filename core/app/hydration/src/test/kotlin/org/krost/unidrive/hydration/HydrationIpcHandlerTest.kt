@@ -57,6 +57,23 @@ class HydrationIpcHandlerTest {
         assertEquals("""{"ok":true}""", reply.trim())
     }
 
+    // #438: a pooled client closes on another connection than the open; the handler answers ok and the
+    // handle is really gone (a later dehydrate of the path is not busy).
+    @Test
+    fun `close_handle works across connections`() = runTest {
+        val env = HydrationTestEnv()
+        env.stateDb.insertHydratedEntry("/foo.txt", localSize = 5)
+        env.syncEngine.seedCacheContent("/foo.txt", "hello")
+        val handler = HydrationIpcHandler(env.hydration)
+
+        handler.handle("conn-a", """{"verb":"hydration.open_read","handle_id":"h1","path":"/foo.txt"}""")
+        val close = handler.handle("conn-b", """{"verb":"hydration.close_handle","handle_id":"h1"}""")
+        val reply = handler.handle("conn-b", """{"verb":"hydration.dehydrate","path":"/foo.txt"}""")
+
+        assertEquals("""{"ok":true}""", close.trim())
+        assertEquals("""{"ok":true}""", reply.trim(), "the cross-connection close released the handle")
+    }
+
     @Test
     fun `open_read without handle_id returns missing_handle_id error`() = runTest {
         val env = HydrationTestEnv()

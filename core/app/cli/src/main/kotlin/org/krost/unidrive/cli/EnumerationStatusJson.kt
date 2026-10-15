@@ -29,5 +29,7 @@ internal fun EnumerationStatus.toJson(): JsonObject =
         lastSuccessAtMs?.let { put("last_success_at_ms", it) }
         lastScanComplete?.let { put("last_scan_complete", it) }
         lastError?.let { put("last_error", it) }
+        // #878: a machine-readable cause (http_408, timeout, auth_rejected); absent when unknown.
+        lastErrorCode?.let { put("last_error_code", it) }
         nextAttemptAtMs?.let { put("next_attempt_at_ms", it) }
     }
