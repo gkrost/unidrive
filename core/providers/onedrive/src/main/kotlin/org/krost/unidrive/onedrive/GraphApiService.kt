@@ -44,7 +44,8 @@ class GraphApiService(
     // The seam the daemon attaches its request-attempt recorder to; no sink, no metrics (see attachRequestMetrics).
     private val requestMetrics = RequestMetricsTap()
 
-    private val httpClient = graphHttpClient(requestMetrics, config.userAgent, engine)
+    // #644: the token path's leaf is the profile name, so the request log lines carry the account.
+    private val httpClient = graphHttpClient(requestMetrics, config.userAgent, engine, profile = config.tokenPath.fileName.toString())
 
     fun attachRequestMetrics(sink: RequestMetricsSink?) {
         requestMetrics.sink = sink

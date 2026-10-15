@@ -32,6 +32,7 @@ internal fun graphHttpClient(
     tap: RequestMetricsTap,
     userAgent: String,
     engine: HttpClientEngine? = null,
+    profile: String? = null,
 ): HttpClient {
     val configure: HttpClientConfig<*>.() -> Unit = {
         install(HttpTimeout) {
@@ -40,10 +41,13 @@ internal fun graphHttpClient(
             requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
         }
         install(UserAgent) { agent = userAgent }
+        // #644: the token path's leaf is the profile name; Graph answers request-id / client-request-id.
         install(RequestId) {
             metrics = tap
             provider = "onedrive"
             endpoints = GraphEndpoints.classifier
+            this.profile = profile
+            serverRequestIdHeaders = listOf("request-id", "client-request-id")
         }
     }
     return if (engine != null) HttpClient(engine, configure) else HttpClient(configure)

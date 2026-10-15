@@ -75,8 +75,9 @@ class InternxtApiService(
     private val listingSocketTimeoutMs: Long = LISTING_SOCKET_TIMEOUT_MS,
     // The seam the daemon attaches its request-attempt recorder to; no sink, no metrics (see attachRequestMetrics).
     private val requestMetrics: RequestMetricsTap = RequestMetricsTap(),
-    // Tests hand in a client on a MockEngine; production builds the default one.
-    private val httpClient: HttpClient = defaultHttpClient(requestMetrics),
+    // Tests hand in a client on a MockEngine; production builds the default one. The token path's leaf is the
+    // profile name, so the request log lines carry the account independent of the thread's MDC (#644).
+    private val httpClient: HttpClient = defaultHttpClient(requestMetrics, profile = config.tokenPath.fileName.toString()),
     // The limits of the shard PUT's write-progress watchdog (#571). A parameter so that loopback tests can run on a
     // scale of milliseconds.
     private val shardPutWatchdog: UploadWatchdogLimits = UploadWatchdogLimits.DEFAULT,
@@ -105,6 +106,7 @@ class InternxtApiService(
         internal fun defaultHttpClient(
             tap: RequestMetricsTap,
             engine: io.ktor.client.engine.HttpClientEngine? = null,
+            profile: String? = null,
         ): HttpClient {
             val configure: io.ktor.client.HttpClientConfig<*>.() -> Unit = {
                 install(HttpTimeout) {
@@ -113,10 +115,13 @@ class InternxtApiService(
                     requestTimeoutMillis = HttpDefaults.REQUEST_TIMEOUT_MS
                 }
                 // UD-255: per-request correlation id + DEBUG req/response logging; the attempt metrics ride on it.
+                // #644: the profile and the server's x-request-id join the response line.
                 install(org.krost.unidrive.http.RequestId) {
                     metrics = tap
                     provider = "internxt"
                     endpoints = InternxtEndpoints.classifier
+                    this.profile = profile
+                    serverRequestIdHeaders = listOf("x-request-id")
                 }
             }
             return if (engine != null) HttpClient(engine, configure) else HttpClient(configure)
