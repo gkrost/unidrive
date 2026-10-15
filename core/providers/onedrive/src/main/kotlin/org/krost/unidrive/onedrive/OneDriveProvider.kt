@@ -10,6 +10,7 @@ import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
+import org.krost.unidrive.io.withLocalIoRetry
 
 class OneDriveProvider(
     private val config: OneDriveConfig = OneDriveConfig(),
@@ -211,7 +212,8 @@ class OneDriveProvider(
         val sharedId = existingRemoteId?.takeIf { SharedItemId.isShared(it) }
         suspend fun put(conflictBehavior: String, etag: String? = null, target: String = remotePath, itemId: String? = null) =
             if (fileSize <= 4 * 1024 * 1024) {
-                val content = Files.readAllBytes(localPath)
+                // #802: the read races whatever holds the file open (indexer, backup); a short lock is retried.
+                val content = withLocalIoRetry { Files.readAllBytes(localPath) }
                 graphApi.uploadSimple(target, content, fsInfo, conflictBehavior, etag, itemId)
             } else {
                 graphApi.uploadLargeFile(localPath, target, onProgress, fsInfo, conflictBehavior, etag, itemId)
