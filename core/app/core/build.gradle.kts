@@ -1,6 +1,9 @@
 plugins {
     kotlin("jvm")
     alias(libs.plugins.kotlin.serialization)
+    // The flaky-test marker (org.krost.unidrive.testing.Flaky) lives in the test fixtures: every module's tests get
+    // it from the root build script, and it stays out of the shipped jar.
+    `java-test-fixtures`
 }
 
 kotlin {
