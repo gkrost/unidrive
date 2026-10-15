@@ -104,6 +104,16 @@ Live `unidrive sync --dry-run` against the gateway has been seeing `GET /drive/f
 
 `InternxtProvider.buildFolderPath` returns null when an item's `parentUuid` is missing from the in-memory `folderMap`. Delta drops such an item and leaves the gather incomplete rather than re-emitting it at the root, which would orphan subtrees and duplicate `remote_id` rows (`docs/audits/internxt-phantom-investigation.md`).
 
+## Resolving the paths after a listing
+
+A listing returns live items with the uuid of their parent folder; a path needs every folder up to the root, and a folder that holds live items without being live itself (a trashed folder) is not in a listing of the live items. After a full listing the provider therefore finds, before it builds any path, every folder that some path runs through and that the listing did not return, in this order of cost:
+
+1. **The listing.** The folders it returned.
+2. **Ancestor-only records.** The listing without the status filter (see *A cursor the server cannot answer*) returns the trashed folders too. They are kept, never emitted as items, and staged beside the live rows with a tag of their own in the same transaction as their page, so a restart in between keeps them. A deleted folder is not kept: on the account this was measured on, none of the 948 folders needed was deleted, of 421,897 deleted against 47,241 trashed. The scan marker is unchanged, and a scan staged before these records existed resumes as it did.
+3. **A request.** `GET /folders/{uuid}/meta` for each folder still missing, once each, with at most four in flight (the tree walk's limit). The server answers a trashed folder with HTTP 200 and its row. A folder that hangs below another missing one is found in a second round. A folder whose meta cannot be read or is gone drops the items below it and makes the page incomplete.
+
+The step is reported in `daemon.status.enumeration` as `phase: resolving_paths` with `paths_done` and `paths_total`; before it existed the status stood on the listing's last item count for as long as the requests took (eight minutes for 949 folders asked for one after the other).
+
 ## Request-id correlation
 
 Internxt's drive server emits `x-request-id` on every response. `InternxtApiService.extractRequestId` reads it; carried on `ProviderException.requestId` and surfaced in `unidrive.log` as `requestId=…`.

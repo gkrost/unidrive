@@ -123,6 +123,31 @@ class EnumerationStatusJsonTest {
         assertFalse("last_error_code" in uncoded.keys, "unknown means absent: $uncoded")
     }
 
+    // The step after the listing: its phase and its own counts, absent (never null) outside it.
+    @Test
+    fun `resolving paths names its phase and its counts`() {
+        val resolving =
+            wire(
+                EnumerationStatus(
+                    state = EnumerationStatus.State.RUNNING,
+                    first = true,
+                    attempt = 1,
+                    phase = EnumerationStatus.Phase.RESOLVING_PATHS,
+                    listing = "cursor",
+                    items = 387_140,
+                    pathsDone = 400,
+                    pathsTotal = 949,
+                ),
+            )
+        val listing = wire(EnumerationStatus(state = EnumerationStatus.State.RUNNING, first = true, attempt = 1, phase = EnumerationStatus.Phase.LISTING, items = 5))
+
+        assertEquals("resolving_paths", resolving.getValue("phase").jsonPrimitive.content)
+        assertEquals(400, resolving.getValue("paths_done").jsonPrimitive.int)
+        assertEquals(949, resolving.getValue("paths_total").jsonPrimitive.int)
+        assertEquals(387_140, resolving.getValue("items").jsonPrimitive.int)
+        assertFalse("paths_done" in listing.keys || "paths_total" in listing.keys, "unknown means absent: $listing")
+    }
+
     @Test
     fun `no field is ever written as null`() {
         val json = wire(EnumerationStatus(state = EnumerationStatus.State.RUNNING, first = true, attempt = 1, items = 5))

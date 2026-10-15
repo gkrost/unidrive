@@ -60,6 +60,12 @@ data class ScanContext(
  * [foldersDone] folders listed or skipped, [foldersKnown] folders discovered so far
  * (a lower bound of the total), [foldersSkipped] folders that failed and were skipped.
  * [listing] names the strategy, [LISTING_ACCOUNT], [LISTING_CURSOR] or [LISTING_TREE].
+ *
+ * [pathsTotal] and [pathsDone] describe the step that follows the listing: the paths of the gathered items are
+ * resolved, and the folders that the listing did not return but that some item hangs below are asked for one by one.
+ * [pathsTotal] is the number of such folders known so far (it can grow when a folder fetched turns out to hang below
+ * another one that is missing), [pathsDone] how many of them are resolved. A report that names [pathsTotal] says the
+ * listing itself is over: [items] no longer rises. Null for a report from the listing.
  */
 data class ScanProgress(
     val items: Int,
@@ -67,6 +73,8 @@ data class ScanProgress(
     val foldersKnown: Int? = null,
     val foldersSkipped: Int? = null,
     val listing: String? = null,
+    val pathsDone: Int? = null,
+    val pathsTotal: Int? = null,
 ) {
     companion object {
         /** Account-wide offset pagination. */

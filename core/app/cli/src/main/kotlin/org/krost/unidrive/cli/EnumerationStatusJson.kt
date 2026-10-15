@@ -23,6 +23,8 @@ internal fun EnumerationStatus.toJson(): JsonObject =
         foldersDone?.let { put("folders_done", it) }
         foldersKnown?.let { put("folders_known", it) }
         foldersSkipped?.let { put("folders_skipped", it) }
+        pathsDone?.let { put("paths_done", it) }
+        pathsTotal?.let { put("paths_total", it) }
         ratePerS?.let { put("rate_per_s", (it * 10).roundToLong() / 10.0) }
         etaS?.let { put("eta_s", it) }
         etaKind?.let { put("eta_kind", it.wire) }

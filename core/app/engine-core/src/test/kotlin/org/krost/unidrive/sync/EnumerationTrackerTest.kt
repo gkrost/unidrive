@@ -348,6 +348,100 @@ class EnumerationTrackerTest {
         assertNull(s.listing)
     }
 
+    // The step after the listing: the status showed "listing, 387140 items" unchanged for eight minutes while the
+    // provider asked for 949 folders one by one. The provider says so, and the status carries its own counts.
+    @Test
+    fun `resolving paths is a phase of its own with done and total, and the item count stands`() {
+        tracker.begin()
+        listItems(seconds = 20, perSecond = 100, listing = ScanProgress.LISTING_CURSOR)
+
+        after(1)
+        tracker.onProgress(ScanProgress(items = 2_000, listing = ScanProgress.LISTING_CURSOR, pathsDone = 0, pathsTotal = 949))
+        after(30)
+        tracker.onProgress(ScanProgress(items = 2_000, listing = ScanProgress.LISTING_CURSOR, pathsDone = 400, pathsTotal = 949))
+
+        val s = tracker.snapshot()
+        assertEquals(EnumerationStatus.State.RUNNING, s.state)
+        assertEquals(EnumerationStatus.Phase.RESOLVING_PATHS, s.phase)
+        assertEquals(2_000, s.items)
+        assertEquals(400, s.pathsDone)
+        assertEquals(949, s.pathsTotal)
+        assertEquals(ScanProgress.LISTING_CURSOR, s.listing)
+        assertEquals(51_000L, s.elapsedMs, "the attempt's time keeps running: only saving freezes it")
+        assertNull(s.ratePerS, "the rate and the estimate are the listing's; this step does not move the item count")
+        assertNull(s.etaS)
+    }
+
+    @Test
+    fun `the total of the step can grow and neither count goes back`() {
+        tracker.begin()
+        tracker.onProgress(ScanProgress(items = 10, pathsDone = 0, pathsTotal = 2))
+        tracker.onProgress(ScanProgress(items = 10, pathsDone = 2, pathsTotal = 2))
+        tracker.onProgress(ScanProgress(items = 10, pathsDone = 2, pathsTotal = 3))
+        tracker.onProgress(ScanProgress(items = 10, pathsDone = 1, pathsTotal = 2))
+
+        val s = tracker.snapshot()
+
+        assertEquals(2, s.pathsDone, "a late report of an earlier count does not lower it")
+        assertEquals(3, s.pathsTotal)
+    }
+
+    @Test
+    fun `done is never above the total`() {
+        tracker.begin()
+
+        tracker.onProgress(ScanProgress(items = 10, pathsDone = 9, pathsTotal = 4))
+
+        assertEquals(4, tracker.snapshot().pathsDone)
+    }
+
+    @Test
+    fun `saving ends the step and clears its counts`() {
+        tracker.begin()
+        tracker.onProgress(ScanProgress(items = 10, pathsDone = 3, pathsTotal = 3))
+
+        tracker.saving(finalItems = 10)
+
+        val s = tracker.snapshot()
+        assertEquals(EnumerationStatus.Phase.SAVING, s.phase)
+        assertNull(s.pathsDone)
+        assertNull(s.pathsTotal)
+    }
+
+    @Test
+    fun `a failure in the step keeps how far it got, and the next attempt starts clean`() {
+        tracker.begin()
+        tracker.onProgress(ScanProgress(items = 10, pathsDone = 3, pathsTotal = 8))
+
+        tracker.failed("the folder cannot be read")
+
+        val failed = tracker.snapshot()
+        assertEquals(3, failed.pathsDone)
+        assertEquals(8, failed.pathsTotal)
+        assertNull(failed.phase)
+
+        tracker.begin()
+        val retry = tracker.snapshot()
+        assertEquals(EnumerationStatus.Phase.LISTING, retry.phase)
+        assertNull(retry.pathsDone)
+        assertNull(retry.pathsTotal)
+    }
+
+    @Test
+    fun `a listing report names no paths and a finished attempt shows none`() {
+        tracker.begin()
+        listItems(seconds = 3, perSecond = 10)
+        assertNull(tracker.snapshot().pathsTotal)
+
+        tracker.onProgress(ScanProgress(items = 40, pathsDone = 1, pathsTotal = 1))
+        tracker.saving(40)
+        tracker.succeeded()
+
+        val done = tracker.snapshot()
+        assertEquals(EnumerationStatus.State.IDLE, done.state)
+        assertNull(done.pathsTotal)
+    }
+
     // ---- where the items come from -------------------------------------------------------------------------------------
 
     @Test
