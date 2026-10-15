@@ -104,6 +104,8 @@ class DaemonRunCommand : Runnable {
             excludePatterns = config.effectiveExcludePatterns(profile.name),
             ignoreSettings = config.ignoreSettings(profile.name),
             pollIntervalMs = pollIntervalMs,
+            // #891: the health line, one INFO line per minute in unidrive.log.
+            healthIntervalMs = 60_000,
             hydrationCacheMaxBytes = config.hydrationCacheMaxBytes(profile.name),
             profileMode = mode,
             // #655: the quota snapshot's TTL (profile config quota_refresh_minutes, default 15
