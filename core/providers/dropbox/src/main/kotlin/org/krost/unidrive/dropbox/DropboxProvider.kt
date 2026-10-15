@@ -293,27 +293,9 @@ class DropboxProvider(
                 }
                 if (length <= 0) throw java.io.IOException("'$localPath' became shorter while it was uploaded")
                 val chunk = buffer.copyOf(length)
-                try {
-                    api.content(
-                        "files/upload_session/append_v2",
-                        obj("cursor" to obj("session_id" to sessionId, "offset" to offset), "close" to false),
-                        UploadTimeoutPolicy.computeRequestTimeoutMs(length.toLong()),
-                    ) { chunk }
-                } catch (e: DropboxApiException) {
-                    // Dropbox answers incorrect_offset with the offset it actually holds. Trust it once:
-                    // a second mismatch means the session is not ours any more. Any other failure keeps
-                    // the session — the next attempt resumes where this one stopped.
-                    val correct = correctOffsetOf(e)
-                    if (correct != null && offsetCorrected) {
-                        sessionStore.delete(remotePath)
-                        throw ProviderException(
-                            "Dropbox upload session offset mismatch at $offset (server says $correct); the upload restarts",
-                            e,
-                            e.requestId,
-                        )
-                    }
-                    if (correct == null) throw e
-                    offset = correct
+                val corrected = appendChunkOrCorrect(remotePath, sessionId, offset, chunk, offsetCorrected)
+                if (corrected != null) {
+                    offset = corrected
                     offsetCorrected = true
                     continue
                 }
@@ -329,6 +311,41 @@ class DropboxProvider(
             ) { ByteArray(0) }
         sessionStore.delete(remotePath)
         return meta
+    }
+
+    /**
+     * One append of [chunk] at [offset]; the returned offset is Dropbox's correction to resume at
+     * (`incorrect_offset` answered with the offset the session actually holds — trusted once per
+     * session, a second mismatch means the session is not ours any more). Any other failure keeps
+     * the session — the next attempt resumes where this one stopped — and is the exception thrown.
+     */
+    private suspend fun appendChunkOrCorrect(
+        remotePath: String,
+        sessionId: String,
+        offset: Long,
+        chunk: ByteArray,
+        offsetCorrected: Boolean,
+    ): Long? {
+        try {
+            api.content(
+                "files/upload_session/append_v2",
+                obj("cursor" to obj("session_id" to sessionId, "offset" to offset), "close" to false),
+                UploadTimeoutPolicy.computeRequestTimeoutMs(chunk.size.toLong()),
+            ) { chunk }
+            return null
+        } catch (e: DropboxApiException) {
+            val correct = correctOffsetOf(e)
+            if (correct != null && offsetCorrected) {
+                sessionStore.delete(remotePath)
+                throw ProviderException(
+                    "Dropbox upload session offset mismatch at $offset (server says $correct); the upload restarts",
+                    e,
+                    e.requestId,
+                )
+            }
+            if (correct == null) throw e
+            return correct
+        }
     }
 
     /** The `correct_offset` Dropbox reports inside an `incorrect_offset` answer, or null. */
