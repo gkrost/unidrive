@@ -32,6 +32,7 @@ import kotlin.io.path.fileSize
  */
 @Command(
     name = "pending",
+    mixinStandardHelpOptions = true,
     description = ["Inspect and safely drop stranded pending upload rows"],
     subcommands = [PendingCommand.ListCommand::class, PendingCommand.DropCommand::class],
 )
