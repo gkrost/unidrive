@@ -14,7 +14,8 @@ data class InternxtFile(
     val type: String? = null,
     val size: String = "0",
     val bucket: String? = null,
-    val folderId: Long = 0,
+    // Null when the server names no folder row (explicit null or absent). Nothing reads the number; folderUuid does.
+    val folderId: Long? = null,
     val folderUuid: String? = null,
     val encryptVersion: String? = null,
     val status: String = "EXISTS",
