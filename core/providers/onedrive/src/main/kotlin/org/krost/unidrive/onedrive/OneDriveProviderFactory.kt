@@ -186,6 +186,7 @@ open class OneDriveProviderFactory : ProviderFactory {
     override suspend fun completeInteractiveAuth(
         profileDir: Path,
         continuationHandle: String,
+        secret: String?,
     ): CompleteAuthResult {
         val state =
             OneDriveDeviceFlowRegistry.get(continuationHandle)
