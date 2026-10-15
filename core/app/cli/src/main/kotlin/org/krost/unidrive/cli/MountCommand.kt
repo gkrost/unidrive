@@ -128,14 +128,14 @@ class MountCommand : Runnable {
          * the caller refuses a missing one without falling back.
          */
         fun chooseBinary(envValue: String?, locations: List<Path>): Path? =
-            if (envValue != null) {
+            if (!envValue.isNullOrBlank()) {
                 Paths.get(envValue)
             } else {
                 locations.firstOrNull { Files.isExecutable(it) }
             }
 
         fun binaryMissingMessage(envValue: String?, locations: List<Path>): String =
-            if (envValue != null) {
+            if (!envValue.isNullOrBlank()) {
                 "unidrive mount: co-daemon binary not found at $envValue (UNIDRIVE_MOUNT_BIN; no fallback)"
             } else {
                 "unidrive mount: co-daemon binary not found (tried ${locations.joinToString(", ")})"

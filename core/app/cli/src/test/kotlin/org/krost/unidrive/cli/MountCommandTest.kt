@@ -266,6 +266,19 @@ class MountCommandTest {
     }
 
     @Test
+    fun `an empty UNIDRIVE_MOUNT_BIN counts as unset and the search runs`() {
+        val dir = Files.createTempDirectory("mount-bin-empty")
+        try {
+            val perUser = executableFile(dir.resolve("home").resolve("unidrive-mount"))
+            assertEquals(perUser, MountCommand.chooseBinary("", listOf(perUser)), "empty value: search, not Paths.get(\"\")")
+            assertEquals(perUser, MountCommand.chooseBinary("  ", listOf(perUser)), "blank value: search")
+            assertTrue("tried" in MountCommand.binaryMissingMessage("", listOf(perUser)), "message lists the search")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `with nothing installed the not-found message names every location tried`() {
         val locations = MountCommand.searchLocations()
         assertEquals(2, locations.size, "per-user first, then system-wide: $locations")
