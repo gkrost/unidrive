@@ -62,13 +62,33 @@ class SystemdUnitsTest {
     @Test
     fun mount_template_clears_a_dead_mount_around_the_run_and_keeps_privileges_for_fusermount() {
         val d = directives(unit("unidrive-mount@.service"))
-        assertTrue("ExecStartPre=-/usr/bin/fusermount3 -uz \${UNIDRIVE_MOUNTPOINT}" in d)
-        assertTrue("ExecStopPost=-/usr/bin/fusermount3 -uz \${UNIDRIVE_MOUNTPOINT}" in d)
+        // Only a DEAD endpoint is cleared before the start: test -e fails for ENOTCONN, and a live mount
+        // started by hand at the same directory is left alone. After a stop the endpoint is ours, so the
+        // ExecStopPost unmount stays broad. systemd expands ${UNIDRIVE_MOUNTPOINT} before sh parses the
+        // script (brace form: one word, safe for paths with spaces).
+        assertTrue(
+            "ExecStartPre=-/bin/sh -c 'test -e \"\${UNIDRIVE_MOUNTPOINT}\" || /usr/bin/fusermount3 -uz \"\${UNIDRIVE_MOUNTPOINT}\"'" in d,
+            "the start guard clears only a dead endpoint: $d",
+        )
+        assertTrue("ExecStopPost=-/usr/bin/fusermount3 -uz \${UNIDRIVE_MOUNTPOINT}" in d, "after a stop the endpoint is ours: $d")
         assertTrue("ExecStart=%h/.local/bin/unidrive -p %i mount \${UNIDRIVE_MOUNTPOINT}" in d)
         assertTrue("SuccessExitStatus=78 143" in d, "a permanent refusal (78) must not restart-loop: $d")
         // The setuid fusermount3 is blocked by NoNewPrivileges, and a private mount namespace hides the mount.
         val sandboxing = listOf("NoNewPrivileges", "RestrictSUIDSGID", "ProtectSystem", "ProtectHome", "PrivateTmp", "PrivateMounts")
         assertFalse(d.any { line -> sandboxing.any { line.startsWith("$it=") } }, "mount unit must not sandbox: $d")
+    }
+
+    @Test
+    fun mount_startpre_guard_is_valid_shell() {
+        assumeTrue("embedded sh script: sh -n only exists on Linux", System.getProperty("os.name").lowercase().contains("linux"))
+        val line = directives(unit("unidrive-mount@.service")).first { it.startsWith("ExecStartPre=") }
+        val script = line.substringAfter("sh -c '").substringBeforeLast("'")
+        val guard = dir.resolve("startpre-guard.sh")
+        Files.writeString(guard, script)
+        val p = ProcessBuilder("sh", "-n", guard.toString()).redirectErrorStream(true).start()
+        val out = p.inputStream.readAllBytes().decodeToString()
+        assertTrue(p.waitFor(30, TimeUnit.SECONDS), "sh -n did not finish")
+        assertEquals(0, p.exitValue(), "the embedded script parses: $out")
     }
 
     @Test
