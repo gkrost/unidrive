@@ -69,6 +69,9 @@ class DropboxProvider(
 
     private val log = org.slf4j.LoggerFactory.getLogger(DropboxProvider::class.java)
     private val api: DropboxApi = DropboxApi(config, { force -> auth.accessToken(force) }, engine)
+
+    // #867: upload sessions in flight, so an interrupted big upload resumes at the committed offset.
+    private val sessionStore = DropboxSessionStore(config.tokenPath)
     private val auth: DropboxAuth = DropboxAuth(config, api.httpClient)
     private val items = DropboxItems()
     private val pathRootLock = Mutex()
@@ -235,7 +238,7 @@ class DropboxProvider(
                         streamingFileBody(localPath, size)
                     }
                 } else {
-                    uploadInSession(localPath, size, commit, onProgress)
+                    uploadInSession(remotePath, localPath, size, commit, onProgress)
                 }
             } catch (e: DropboxApiException) {
                 throw uploadFailure(e, remotePath, guarded = ifMatchETag != null)
@@ -263,17 +266,25 @@ class DropboxProvider(
     }
 
     private suspend fun uploadInSession(
+        remotePath: String,
         localPath: Path,
         size: Long,
         commit: JsonObject,
         onProgress: ((Long, Long) -> Unit)?,
     ): JsonObject {
+        val mtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toMillis() }
+        // #867: the session survives the process. A same-shaped local file resumes at the committed
+        // offset; a changed file (or an older session, or none) starts a new one.
+        val stored = sessionStore.get(remotePath, size, mtime)
         val sessionId =
-            api.content("files/upload_session/start", obj("close" to false)) { ByteArray(0) }["session_id"]
+            stored?.sessionId ?: api.content("files/upload_session/start", obj("close" to false)) { ByteArray(0) }["session_id"]
                 ?.jsonPrimitive
-                ?.contentOrNull ?: throw ProviderException("Dropbox started an upload session without an id")
+                ?.contentOrNull
+                ?.also { sessionStore.put(remotePath, it, 0L, size, mtime) }
+                ?: throw ProviderException("Dropbox started an upload session without an id")
+        var offset = stored?.committedOffset ?: 0L
         val buffer = ByteArray(config.uploadChunkBytes)
-        var offset = 0L
+        var offsetCorrected = false
         RandomAccessFile(localPath.toFile(), "r").use { file ->
             while (offset < size) {
                 val length = withContext(Dispatchers.IO) {
@@ -282,20 +293,70 @@ class DropboxProvider(
                 }
                 if (length <= 0) throw java.io.IOException("'$localPath' became shorter while it was uploaded")
                 val chunk = buffer.copyOf(length)
-                api.content(
-                    "files/upload_session/append_v2",
-                    obj("cursor" to obj("session_id" to sessionId, "offset" to offset), "close" to false),
-                    UploadTimeoutPolicy.computeRequestTimeoutMs(length.toLong()),
-                ) { chunk }
+                val corrected = appendChunkOrCorrect(remotePath, sessionId, offset, chunk, offsetCorrected)
+                if (corrected != null) {
+                    offset = corrected
+                    offsetCorrected = true
+                    continue
+                }
                 offset += length
+                sessionStore.put(remotePath, sessionId, offset, size, mtime)
                 onProgress?.invoke(offset, size)
             }
         }
-        return api.content(
-            "files/upload_session/finish",
-            obj("cursor" to obj("session_id" to sessionId, "offset" to offset), "commit" to commit),
-        ) { ByteArray(0) }
+        val meta =
+            api.content(
+                "files/upload_session/finish",
+                obj("cursor" to obj("session_id" to sessionId, "offset" to offset), "commit" to commit),
+            ) { ByteArray(0) }
+        sessionStore.delete(remotePath)
+        return meta
     }
+
+    /**
+     * One append of [chunk] at [offset]; the returned offset is Dropbox's correction to resume at
+     * (`incorrect_offset` answered with the offset the session actually holds — trusted once per
+     * session, a second mismatch means the session is not ours any more). Any other failure keeps
+     * the session — the next attempt resumes where this one stopped — and is the exception thrown.
+     */
+    private suspend fun appendChunkOrCorrect(
+        remotePath: String,
+        sessionId: String,
+        offset: Long,
+        chunk: ByteArray,
+        offsetCorrected: Boolean,
+    ): Long? {
+        try {
+            api.content(
+                "files/upload_session/append_v2",
+                obj("cursor" to obj("session_id" to sessionId, "offset" to offset), "close" to false),
+                UploadTimeoutPolicy.computeRequestTimeoutMs(chunk.size.toLong()),
+            ) { chunk }
+            return null
+        } catch (e: DropboxApiException) {
+            val correct = correctOffsetOf(e)
+            if (correct != null && offsetCorrected) {
+                sessionStore.delete(remotePath)
+                throw ProviderException(
+                    "Dropbox upload session offset mismatch at $offset (server says $correct); the upload restarts",
+                    e,
+                    e.requestId,
+                )
+            }
+            if (correct == null) throw e
+            return correct
+        }
+    }
+
+    /** The `correct_offset` Dropbox reports inside an `incorrect_offset` answer, or null. */
+    private fun correctOffsetOf(e: DropboxApiException): Long? =
+        runCatching {
+            val reason = e.error?.get("reason")?.jsonObject
+            (reason?.get("correct_offset") ?: e.error?.get("correct_offset"))
+                ?.jsonPrimitive
+                ?.content
+                ?.toLongOrNull()
+        }.getOrNull()
 
     private fun uploadFailure(
         e: DropboxApiException,
