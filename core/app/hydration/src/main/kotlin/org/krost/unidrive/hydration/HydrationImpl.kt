@@ -450,6 +450,9 @@ class HydrationImpl(
         baseEtag: String?,
     ): OpenResult {
         if (!resolvesInsideCache(path)) return OpenResult.Failed(HydrationError.InvalidPath)
+        // The trash namespace is read-only: no upload is queued for a change there. The copy the client holds is
+        // untouched (a refusal is not a delete), the client says why from the `read_only` token.
+        if (mount.isReadOnlyPath(path)) return OpenResult.Failed(HydrationError.ReadOnly)
         val entry = stateDb.getEntry(path)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         // The client hands the cache path back. Only a file inside the profile's cache folder is uploaded: the path
@@ -1078,13 +1081,17 @@ class HydrationImpl(
         return listCacheFiles { job?.ensureActive() }.sortedBy { it.path }
     }
 
+    // A row the replay and the rescan leave alone: keep-local names, the trash namespace (read-only, never sent) and
+    // paths outside the profile's scope.
+    private fun skipsReplay(path: String): Boolean = mount.isExcludedPath(path) || mount.isReadOnlyPath(path) || mount.isOutOfScope(path)
+
     /**
      * #526/#729: the cache copy of [path] through this replay's containment [pass], or null. Null covers every
      * row the replay skips before any filesystem work: excluded (keep-local) and out-of-scope rows, rows whose
      * local name the platform rejects (warned as before) and rows whose cache copy is gone.
      */
     private fun cacheCopy(pass: CachePaths.Pass, path: String): Path? {
-        if (mount.isExcludedPath(path) || mount.isOutOfScope(path)) return null
+        if (skipsReplay(path)) return null
         replayProbeCheckpoint()
         val cachePath =
             try {
@@ -1478,14 +1485,14 @@ class HydrationImpl(
         if (direct.isEmpty()) return BlockedUploads()
         val items = LinkedHashMap<String, BlockedItem>()
         for (b in direct) {
-            if (mount.isExcludedPath(b.path) || mount.isOutOfScope(b.path)) continue
+            if (skipsReplay(b.path)) continue
             items[PathNormalizer.nfc(b.path)] = BlockedItem(b.path, b.block.reason, b.block.sibling, parent = null)
         }
         for (b in direct) {
             if (!b.isFolder) continue
             for (e in stateDb.getEntriesByPrefix(b.path.trimEnd('/') + "/")) {
                 // A row with a remote id reached the drive some other way and is not waiting for the folder.
-                if (e.remoteId != null || mount.isExcludedPath(e.path) || mount.isOutOfScope(e.path)) continue
+                if (e.remoteId != null || skipsReplay(e.path)) continue
                 items.putIfAbsent(PathNormalizer.nfc(e.path), BlockedItem(e.path, BLOCKED_BY_PARENT, sibling = null, parent = b.path))
             }
         }
@@ -1502,14 +1509,14 @@ class HydrationImpl(
             oldestSinceMs = oldestSinceMs?.let { minOf(it, atMs) } ?: atMs
         }
         for (row in stateDb.pendingUploadRows()) {
-            if (mount.isExcludedPath(row.path) || mount.isOutOfScope(row.path)) continue
+            if (skipsReplay(row.path)) continue
             pendingPaths += PathNormalizer.nfc(row.path)
             if (row.lastErrorAt != null) failed++
             since(row.lastSynced.toEpochMilli())
         }
         // Slots without such a row: dirty overwrites. A slot of a row counted above adds nothing.
         for ((path, slot) in uploadSlots) {
-            if (mount.isExcludedPath(path) || mount.isOutOfScope(path)) continue
+            if (skipsReplay(path)) continue
             if (pendingPaths.add(PathNormalizer.nfc(path))) since(slot.enqueuedAtMs)
         }
         return UploadSnapshot(pendingPaths.size, uploadsInFlight.get(), failed, oldestSinceMs, System.currentTimeMillis(), takeBlocked())
@@ -1734,6 +1741,8 @@ class HydrationImpl(
                         pendingUpload = pendingUpload,
                         hasError = e.lastErrorAt != null,
                         excluded = mount.isExcludedPath(e.path, e.isFolder),
+                        readOnly = mount.isReadOnlyPath(e.path),
+                        trashRoot = mount.isTrashRoot(e.path),
                         blocked =
                             blockedByPath[PathNormalizer.nfc(e.path)]
                                 ?: BLOCKED_BY_PARENT.takeIf { e.remoteId == null && blockedFolders.any { f -> e.path.startsWith(f) } },
@@ -1769,6 +1778,7 @@ class HydrationImpl(
         // would land in the cloud but never show in the mounted view (the view
         // only lists the scope). Refuse before touching the provider.
         if (mount.isOutOfScope(normalised)) return MkdirResult.Failed(HydrationError.OutOfScope)
+        if (mount.isReadOnlyPath(normalised)) return MkdirResult.Failed(HydrationError.ReadOnly)
         return runCatching {
             _events.emit(HydrationEvent.Hydrating(normalised))
             mount.createRemoteFolder(normalised)
@@ -1815,6 +1825,7 @@ class HydrationImpl(
 
     override suspend fun unlink(path: String): UnlinkResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        if (mount.isReadOnlyPath(normalised)) return UnlinkResult.Failed(HydrationError.ReadOnly)
         val entry = stateDb.getEntry(normalised)
             ?: return UnlinkResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return UnlinkResult.PathIsFolder
@@ -1899,6 +1910,7 @@ class HydrationImpl(
 
     override suspend fun rmdir(path: String): RmdirResult {
         val normalised = path.trimEnd('/').let { if (it == "") "/" else it }
+        if (mount.isReadOnlyPath(normalised)) return RmdirResult.Failed(HydrationError.ReadOnly)
         val entry = stateDb.getEntry(normalised)
             ?: return RmdirResult.Failed(HydrationError.UnknownPath)
         if (!entry.isFolder) return RmdirResult.PathIsFile
@@ -2002,6 +2014,7 @@ class HydrationImpl(
         // Scope guard: same rationale as mkdir — a truncate outside the
         // profile's sync_path set would touch cloud data the view never shows.
         if (mount.isOutOfScope(normalised)) return OpenResult.Failed(HydrationError.OutOfScope)
+        if (mount.isReadOnlyPath(normalised)) return OpenResult.Failed(HydrationError.ReadOnly)
         val entry = stateDb.getEntry(normalised)
             ?: return OpenResult.Failed(HydrationError.UnknownPath)
         if (entry.isFolder) return OpenResult.Failed(HydrationError.Generic("path_is_folder"))
@@ -2034,6 +2047,7 @@ class HydrationImpl(
             // Scope guard: a file created outside the profile's sync_path set
             // would upload to the cloud but never show in the mounted view.
             if (mount.isOutOfScope(normalised)) return@withLock CreateResult.Failed(HydrationError.OutOfScope)
+            if (mount.isReadOnlyPath(normalised)) return@withLock CreateResult.Failed(HydrationError.ReadOnly)
 
             if (stateDb.getEntry(normalised) != null) return@withLock CreateResult.PathExists
 
@@ -2107,6 +2121,11 @@ class HydrationImpl(
         // does not own. Either end out of scope → refuse, nothing is moved.
         if (mount.isOutOfScope(oldNorm) || mount.isOutOfScope(newNorm)) {
             return RenameResult.Failed(HydrationError.OutOfScope)
+        }
+
+        // The trash namespace is read-only: nothing is moved out of it, into it or within it.
+        if (mount.isReadOnlyPath(oldNorm) || mount.isReadOnlyPath(newNorm)) {
+            return RenameResult.Failed(HydrationError.ReadOnly)
         }
 
         // Pre-flight: source must exist in state.db.

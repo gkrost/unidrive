@@ -145,6 +145,12 @@ class MountEngine private constructor(
     /** See [RemoteOperationGuard.isOutOfScope]. */
     fun isOutOfScope(path: String): Boolean = guard.isOutOfScope(path)
 
+    /** See [RemoteOperationGuard.isReadOnlyPath]. */
+    fun isReadOnlyPath(path: String): Boolean = guard.isReadOnlyPath(path)
+
+    /** True when [path] is the root folder of the trash namespace itself. */
+    fun isTrashRoot(path: String): Boolean = guard.trash.isRoot(path)
+
     /** See [RemoteOperationGuard.isExcludedPath]. */
     fun isExcludedPath(
         path: String,
@@ -545,7 +551,8 @@ class MountEngine private constructor(
         onProgress: ((Long, Long) -> Unit)? = null,
     ): UploadOutcome {
         require(Files.exists(cachePath)) { "Cache path missing: $cachePath" }
-        if (isExcludedPath(path)) return keepLocal(path, cachePath)
+        // The trash namespace is read-only: whatever changed in a cache copy there is kept, and is never sent.
+        if (isExcludedPath(path) || isReadOnlyPath(path)) return keepLocal(path, cachePath)
         val existingEntry = db.getEntry(path)
             // #319/#301: no row means the file was renamed away, unlinked, or reaped
             // (the remote vanished) while this upload sat queued. The old fallback

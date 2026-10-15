@@ -67,8 +67,16 @@ class HydrationErrorTest {
             is HydrationError.NameRefused -> "name_refused"
             is HydrationError.BlockedByParent -> "blocked_by_parent"
             HydrationError.Paused -> "paused"
+            HydrationError.ReadOnly -> "read_only"
         }
         assertTrue(rendered.startsWith("generic:"))
+    }
+
+    // The trash namespace is read-only: every verb that would write answers this, and list says it beforehand.
+    @Test
+    fun `read only carries the stable read_only wire token`() {
+        assertEquals("read_only", HydrationError.ReadOnly.message)
+        assertEquals("read_only", HydrationError.READ_ONLY_TOKEN)
     }
 
     @Test

@@ -161,7 +161,23 @@ sealed interface HydrationError {
         override val message: String = PAUSED_TOKEN
     }
 
+    /**
+     * The path is in the trash namespace, which the engine never writes to: the root folder and everything below it
+     * show what the provider keeps in its trash, and an item there can be read, hydrated and copied out but not
+     * changed, created, moved, renamed or deleted. Raised by every verb that would write (create, mkdir, rename
+     * (either end), unlink, rmdir, open_write and open_write_begin), before anything is touched or queued. Its
+     * [message] is the STABLE wire token `read_only`; the entries of `hydration.list` carry the same fact as
+     * `read_only: true`, so a client can refuse the action before it asks. Changing this string breaks that
+     * cross-repo contract.
+     */
+    data object ReadOnly : HydrationError {
+        override val message: String = READ_ONLY_TOKEN
+    }
+
     companion object {
+        /** Wire token for [ReadOnly]; shared verbatim with the clients. */
+        const val READ_ONLY_TOKEN = "read_only"
+
         /** Wire token prefix for [BlockedByParent]. */
         const val BLOCKED_BY_PARENT_TOKEN = "blocked_by_parent"
 

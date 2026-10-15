@@ -26,6 +26,8 @@ import org.krost.unidrive.sync.SyncDirection
 import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.SyncScope
 import org.krost.unidrive.sync.ThrottledProvider
+import org.krost.unidrive.engine.ReadOnlyTrashProvider
+import org.krost.unidrive.engine.TrashNamespace
 import org.krost.unidrive.sync.TrashManager
 import org.krost.unidrive.sync.computePollIntervalWithWs
 import org.krost.unidrive.sync.pollStateName
@@ -307,10 +309,16 @@ open class SyncCommand : Runnable {
             configureFileLogging(logFile)
         }
 
+        // The trash namespace is read-only: the wrapper is the last line of that rule, and the same namespace goes to the
+        // engine, whose guard and planner ask it too.
+        val trash = TrashNamespace(config.trashFolderName(profile.name))
         val provider =
-            config.maxBandwidthKbps
-                ?.let { ThrottledProvider(rawProvider, it.toLong() * 1024) }
-                ?: rawProvider
+            ReadOnlyTrashProvider(
+                config.maxBandwidthKbps
+                    ?.let { ThrottledProvider(rawProvider, it.toLong() * 1024) }
+                    ?: rawProvider,
+                trash,
+            )
 
         val dbPath = parent.providerConfigDir().resolve("state.db")
 
@@ -474,6 +482,7 @@ open class SyncCommand : Runnable {
         val engine =
             SyncEngine(
                 provider = provider,
+                trashNamespace = trash,
                 db = db,
                 syncRoot = config.syncRoot,
                 conflictPolicy = config.conflictPolicy,

@@ -105,6 +105,22 @@ internal fun CredentialHealthMonitor.Reading.toJson(nowMs: Long): JsonObject =
     }
 
 /**
+ * `trash` in `daemon.status`: present only while something is in the provider's trash. [rootPath] is where the read-only
+ * folder that shows it is now (`/Papierkorb`), `folder_name` its name on disk (the configured name, suffixed with ` (2)`, ...
+ * when a live top-level item already has it) and `configured_name` the name the profile asks for (`trash_folder_name`, or the
+ * default), so a client sees at once whether the two differ.
+ */
+internal fun trashStatusJson(
+    rootPath: String,
+    configuredName: String,
+): JsonObject =
+    buildJsonObject {
+        put("root_path", rootPath)
+        put("folder_name", rootPath.substringAfterLast('/'))
+        put("configured_name", configuredName)
+    }
+
+/**
  * `ignore` in `daemon.status` (#660): the folders whose uploads are held back because a rule file in them cannot be
  * read (fail closed). `held_back.count` counts the folders found so far: a folder's rules are read when something below
  * it is written or asked about, so a folder nothing was written to is not known yet. `items` is capped

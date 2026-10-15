@@ -102,6 +102,24 @@ class RemoteGather(
     /** Whether every delta of the provider is a full listing. */
     val deltaIsFullListing: Boolean get() = provider.deltaIsFullListing
 
+    /**
+     * The trash namespace of this profile's guard: the items a provider marks [CloudItem.trashed] are given their place
+     * under it, the root folder is added, and the page goes on as any other. A page without a trashed item is returned as
+     * it is. Every path that gathers pages calls this on each page before it resolves paths and admits items.
+     */
+    fun placeTrashed(page: DeltaPage): DeltaPage {
+        val placed = guard.trash.place(page.items) { liveTopLevelNames() }
+        return if (placed === page.items) page else page.copy(items = placed)
+    }
+
+    // The names of the top-level items state.db holds alive, except the trash root: a collision with one of them is
+    // decided against what the page does not carry too.
+    private fun liveTopLevelNames(): List<String> =
+        db.listDirectChildren("").filter { it.remoteId != TrashNamespace.ROOT_ID }.map { it.path.removePrefix("/") }
+
+    /** Reads the place of the trash root from state.db again: its row has appeared, moved or been reaped. */
+    fun refreshTrash() = guard.trash.refresh(db)
+
     /** #115: see the constructor's `localTopAliases`. */
     fun canonicalToLocalTop(remoteChanges: Map<String, CloudItem>): Map<String, String> = localTopAliases(remoteChanges)
 
@@ -466,7 +484,7 @@ class RemoteGather(
             if (!page.complete) {
                 allComplete = false
             }
-            return page
+            return placeTrashed(page)
         }
 
         // Persist the running completeness flag alongside the cursor.
@@ -553,7 +571,7 @@ class RemoteGather(
                     }
                 log.debug("Delta (recovery): {} items, hasMore={}", p.items.size, p.hasMore)
                 if (!p.complete) allComplete = false
-                return p
+                return placeTrashed(p)
             }
             // Reset all mutable accumulation state for the recovery pass.
             changes = mutableMapOf()
@@ -951,6 +969,7 @@ class RemoteGather(
                 changed += realLocalPath
             }
         }
+        refreshTrash()
         return RemoteMerge(changedPaths = changed, moved = moved)
     }
 

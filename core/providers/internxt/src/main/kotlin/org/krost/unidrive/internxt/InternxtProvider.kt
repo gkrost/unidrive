@@ -2095,8 +2095,18 @@ class InternxtProvider(
             allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor) }
         val filesDropped = rawFiles.count { it == null }
         val foldersDropped = rawFolders.count { it == null }
-        val items = rawFiles.filterNotNull() + rawFolders.filterNotNull()
+        val trashed = TrashChains(folderMap, creds.rootFolderId)
+        val items =
+            allFiles.zip(rawFiles).mapNotNull { (file, item) -> item?.markIfTrashed(trashed, file.folderUuid) } +
+                allFolders.zip(rawFolders).mapNotNull { (folder, item) -> item?.markIfTrashed(trashed, folder.parentUuid) } +
+                trashedFolderItems(trashed, allFolders.mapTo(HashSet()) { it.uuid }) { folder ->
+                    folder.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor)
+                }
 
+        val inTrash = items.count { it.trashed }
+        if (inTrash > 0) {
+            log.info("{} items sit in the trash ({} of them trashed folders); they are reported as trashed", inTrash, items.count { it.trashed && it.isFolder })
+        }
         val skipped = foldersSkipped.get()
         if (skipped > 0) {
             log.warn(
@@ -2125,6 +2135,27 @@ class InternxtProvider(
             complete = skipped == 0 && ancestorDrops == 0,
         )
     }
+
+    // A live item whose parent folder is in the trash (see [TrashChains]) keeps the path of the provider's own tree and is
+    // marked as trashed; the engine puts it under the trash namespace. A tombstone stays one: a deleted item is gone, not
+    // trashed.
+    private fun CloudItem.markIfTrashed(
+        chains: TrashChains,
+        parentUuid: String?,
+    ): CloudItem = if (!deleted && chains.contains(parentUuid)) copy(trashed = true) else this
+
+    // The trashed folders that a live item hangs below, as folder items of the trash namespace: without them the way to
+    // those items would not exist as folders, and a listing of the namespace could not reach them. A folder the page
+    // already carries (the tombstone of an incremental delta, [inPage]) is not repeated: it stays the deletion it is.
+    // [itemOf] builds the item of a folder, or null when its path cannot be resolved.
+    private suspend fun trashedFolderItems(
+        chains: TrashChains,
+        inPage: Set<String>,
+        itemOf: suspend (InternxtFolder) -> CloudItem?,
+    ): List<CloudItem> =
+        chains.trashedFolders
+            .filter { it.uuid !in inPage }
+            .mapNotNull { folder -> itemOf(folder)?.copy(deleted = false, trashed = true) }
 
     // An offset listing's marker or rows, a damaged marker, a cursor of another status, a marker whose rows are
     // gone: none of it is the cursor listing's to resume. The engine clears the staging when the enumeration

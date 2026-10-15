@@ -340,6 +340,9 @@ data class RawProvider(
     // #660: the account's own ignore rules, git syntax, applied at the root (below every rule file, above the
     // built-in defaults). Not the same as exclude_patterns, which keep their glob syntax and meaning.
     val ignore_rules: List<String>? = null,
+    // The name of the virtual folder that shows what the provider keeps in its trash (the trash namespace, read-only,
+    // under the root of the profile). Absent = "Papierkorb". A client sets it from its UI language; one folder name, no path.
+    val trash_folder_name: String? = null,
     // S3 credentials
     val bucket: String? = null,
     val region: String? = null,
@@ -491,6 +494,9 @@ data class SyncConfig(
             accountRules = providers[profileName]?.ignoreRules ?: emptyList(),
         )
 
+    /** The profile's `trash_folder_name`, null when unset (the engine then names the folder "Papierkorb"). */
+    fun trashFolderName(profileName: String): String? = providers[profileName]?.trashFolderName
+
     fun effectiveExcludePatterns(providerId: String): List<String> =
         DEFAULT_EXCLUDE_PATTERNS + globalExcludePatterns + (providers[providerId]?.excludePatterns ?: emptyList())
 
@@ -503,6 +509,7 @@ data class SyncConfig(
         val daemonPollSeconds: Int? = null,
         val honorGitignore: Boolean = false,
         val ignoreRules: List<String> = emptyList(),
+        val trashFolderName: String? = null,
     )
 
     companion object {
@@ -916,6 +923,7 @@ data class SyncConfig(
                         daemonPollSeconds = rp.daemon_poll_seconds,
                         honorGitignore = rp.honor_gitignore ?: false,
                         ignoreRules = rp.ignore_rules ?: emptyList(),
+                        trashFolderName = rp.trash_folder_name,
                     )
                 }
             val pollInt = general.poll_interval ?: 60
