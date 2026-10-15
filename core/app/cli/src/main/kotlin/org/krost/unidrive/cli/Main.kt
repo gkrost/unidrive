@@ -52,6 +52,7 @@ import java.nio.file.Paths
         ProfileCommand::class,
         VaultCommand::class,
         ConflictsCommand::class,
+        PendingCommand::class,
         RelocateCommand::class,
         ShareCommand::class,
         TrashCommand::class,

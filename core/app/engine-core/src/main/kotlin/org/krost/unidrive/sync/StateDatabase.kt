@@ -1441,6 +1441,51 @@ class StateDatabase(
      * long a row has been waiting (a `local:` row is written once, so `last_synced` is when its content
      * first existed only on this machine) and whether an attempt failed. Unordered; the caller aggregates.
      */
+    /**
+     * One row awaiting upload with what #753's recovery needs: the remote id (a real one is never dropped),
+     * the local size (a zero size with no cache content is the stranded shape) and the two stamps.
+     */
+    data class PendingRowDetail(
+        val path: String,
+        val remoteId: String,
+        val localSize: Long?,
+        val lastSynced: Instant,
+        val lastErrorAt: Instant?,
+    )
+
+    /** [pendingUploadRows] with the remote id and the local size, for the recovery command. */
+    @Synchronized
+    fun pendingRowDetails(): List<PendingRowDetail> {
+        val out = mutableListOf<PendingRowDetail>()
+        conn.createStatement().use { stmt ->
+            val rs = stmt.executeQuery("SELECT path, remote_id, local_size, last_synced, last_error_at FROM sync_entries WHERE $PENDING_UPLOAD_ROWS")
+            while (rs.next()) {
+                out +=
+                    PendingRowDetail(
+                        path = rs.getString(1),
+                        remoteId = rs.getString(2),
+                        localSize = rs.getObject(3)?.let { (it as Number).toLong() },
+                        lastSynced = IsoInstants.parse(rs.getString(4)),
+                        lastErrorAt = rs.getString(5)?.let { IsoInstants.parse(it) },
+                    )
+            }
+        }
+        return out
+    }
+
+    /**
+     * Deletes the pending row at [path] — only while it is still a `local:` row, whatever the caller asked
+     * for (#753): a row with a real remote id is the cloud's truth and is never touched here. True when a
+     * row went away.
+     */
+    @Synchronized
+    fun deleteLocalPendingRow(path: String): Boolean {
+        conn.prepareStatement("DELETE FROM sync_entries WHERE path=? AND $PENDING_UPLOAD_ROWS").use { stmt ->
+            stmt.setString(1, path)
+            return stmt.executeUpdate() > 0
+        }
+    }
+
     @Synchronized
     fun pendingUploadRows(): List<PendingUploadRow> {
         val out = mutableListOf<PendingUploadRow>()
