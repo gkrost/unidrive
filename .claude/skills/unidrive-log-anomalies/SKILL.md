@@ -34,8 +34,8 @@ this rubric:
 |---|---|
 | `429 throttle hits` >> historical baseline | Check whether `UD-232 throttle storm` lines are firing (`grep "UD-232 throttle storm"`). If not, ThrottleBudget may not be engaged on the running jar — verify the deployed jar's mtime vs the HEAD commit. |
 | `attempt 5/5 (fatal)` > 0 | Files gave up mid-retry. File location: `grep -B1 "attempt 5/5" ...`. If `retryAfterSeconds` > 300, server asked for longer than the 300s cap allows — UD-232b follow-up territory. |
-| `JWT malformed` > 0 | [UD-312](docs/backlog/BACKLOG.md) is live. Capture the timestamp + surrounding context and append to the ticket. |
-| `TLS handshake` > 0 | [UD-311](docs/backlog/BACKLOG.md). Same — capture. |
+| `JWT malformed` > 0 | UD-312 is live. Capture the timestamp + surrounding context and append to the ticket. |
+| `TLS handshake` > 0 | UD-311. Same — capture. |
 | `ERROR` lines about `Authentication` | Token refresh race (UD-310 era). Cross-check against most recent auth commit. |
 
 ## After the summary

@@ -131,3 +131,9 @@ Things that were done before this branch started. Append new entries when items 
 - `unidrive refresh` against a profile with a pre-existing delta cursor returned only the incremental delta, not a full enumeration
 - Reach the 5+5+2 live-integration smoke target (OneDrive 9, Internxt 10, sync 2+ test methods, all behind `UNIDRIVE_INTEGRATION_TESTS`)
 - `unidrive-ui` calls `sync.subscribe` after connecting (was: the event stream needed an explicit client-side subscribe; drained from BACKLOG: Low)
+- Tracked data protected during reconciliation — an adoption/refresh can no longer clobber rows a concurrent apply is acting on (reconciliation guard, `fix: protect tracked data during reconciliation`; BACKLOG: Critical)
+- Socket-path name hashing and the hydration cache root share `IpcServer.canonicalDiskName` — verbatim for short profile names, 8-hex SHA-1 for long ones, with migration of an existing long cache directory (BACKLOG: Medium)
+- `unidrive sync` as a daemon client — superseded, not planned: a profile is a mirror or a mount (`docs/adr/independent-profiles.md`), so the daemon-decomposition phase-2 conversion has no subject (BACKLOG: Medium)
+- The daemon auto-spawns on the first client connection (`DaemonAutospawn.ensureDaemonRunning`), designed for both profile modes (daemon-decomposition phase 3; BACKLOG: Medium)
+- The enumeration merge holds `StateDatabase.batch{}` in bounded chunks, so a full enumeration no longer stalls a mount `ls` behind the `@Synchronized` lock (BACKLOG: Low)
+- Mount `rm` label vs disposition: TRASHED/DELETED are documented as encoding which side noticed the deletion (remote delta cascade vs engine-side), not recoverability — the schema header and `markDeleted` state it (BACKLOG: Low)

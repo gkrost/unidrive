@@ -51,7 +51,7 @@ class CloudItemTest {
     // `Set<CloudItem>` in the delta walker) would fail loudly; no runtime
     // test would catch a regression the type-system wouldn't catch first.
     // The defaults tests (`deleted defaults to false`, `hydrated defaults
-    // to true`) remain below — those pin business invariants. See CHANGELOG.
+    // to true`) remain below — those pin business invariants.
 
     @Test
     fun `hydrated defaults to true`() {
