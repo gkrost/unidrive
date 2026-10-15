@@ -5,6 +5,7 @@ import org.krost.unidrive.Capability
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
+import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.ScanContext
 import org.krost.unidrive.sync.EnumerationTracker
@@ -18,9 +19,9 @@ import kotlin.system.exitProcess
  * #891: the retained-heap probe of a full enumeration. A fake provider streams N items in cursor-sized
  * pages through the real [RemoteGather]/[RemoteEnumeration] into a temp `state.db`, in two variants:
  * fresh (one full pass) and resumed (a first pass over N/2 items leaves its rows staged, then the full
- * pass runs over that database, as the 2026-10-14 capture resumed). After a forced GC the retained heap
- * is read; the task fails when the resumed variant retains more than [RESUMED_RATIO_FAIL] times the
- * fresh one. Not part of `check`: run with `./gradlew :app:engine-core:heapProbe [sizes...]`.
+ * pass runs over that database, as the 2026-10-14 capture resumed). During each gather, after the same
+ * item count, a forced GC reads the retained heap; the task fails when resumed retains more than
+ * [RESUMED_RATIO_FAIL] times the fresh one. Not part of `check`: run with `./gradlew :app:engine-core:heapProbe [sizes...]`.
  */
 private const val RESUMED_RATIO_FAIL = 1.5
 
@@ -30,15 +31,13 @@ private const val PAGE_SIZE = 1_000
 // the last natural collection left. The double call with the sleeps lets finalizers and reference
 // processing settle between passes.
 @Suppress("ExplicitGarbageCollectionCall")
-private fun retainedMib(keepAlive: Any, block: () -> Unit): Long {
-    block()
-    // A forced collection so the reading is the live set, not whatever the last collection left. The
-    // holders stay reachable through [keepAlive]: the question is what the running engine retains.
+private fun retainedMib(): Long {
+    // The caller is inside gather's progress callback, while its item map and any resumed staging list
+    // are still reachable. A completed scan has already released the latter and hides the resume cost.
     System.gc()
     Thread.sleep(200)
     System.gc()
     Thread.sleep(100)
-    check(keepAlive.toString().isNotEmpty())
     return heap().used / (1024L * 1024L)
 }
 
@@ -52,6 +51,9 @@ private fun runVariant(
     val db = StateDatabase(tmp.resolve("state.db"))
     db.initialize()
     try {
+        val stagedHalf = minOf(items, ((items / 2 + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE)
+        val sampleAt = minOf(items, stagedHalf + PAGE_SIZE)
+        var sampledMib: Long? = null
         val provider = PagedProvider(total = items, pageSize = PAGE_SIZE)
         val enumeration =
             RemoteEnumeration(
@@ -71,6 +73,12 @@ private fun runVariant(
                         localTopAliases = { emptyMap() },
                         listener =
                             object : RemoteGather.Listener {
+                                override fun onScanProgress(count: Int) {
+                                    // Gather has admitted the same number of items in both variants. The resumed
+                                    // pass still holds its loaded staging list here; completion would release it.
+                                    if (count >= sampleAt && sampledMib == null) sampledMib = retainedMib()
+                                }
+
                                 override fun onViewInvalidated(
                                     changedPaths: Set<String>,
                                     full: Boolean,
@@ -90,22 +98,22 @@ private fun runVariant(
             )
         runBlocking {
             if (resume) {
-                // The first pass stages half the account, as an interrupted scan left it.
-                provider.limit = items / 2
-                enumeration.enumerate(reset = true)
-                provider.limit = items
-                enumeration.enumerate(reset = false)
+                // Stop after persisting half the pages, leaving the actual checkpoint and staged rows.
+                provider.interruptAt = stagedHalf
+                check(!enumeration.enumerate(reset = true).ok)
+                provider.interruptAt = null
+                check(enumeration.enumerate(reset = false).ok)
+                check(provider.resumedFrom == stagedHalf && provider.resumedCount == stagedHalf) {
+                    "the probe did not resume from its staged half"
+                }
             } else {
-                enumeration.enumerate(reset = true)
+                check(enumeration.enumerate(reset = true).ok)
             }
         }
-        // The holders themselves, not their descriptions: only a reference to the objects keeps them
-        // through the collection.
-        val keepAlive = Triple(provider, enumeration, db)
-        val mib = retainedMib(keepAlive) { keepAlive.second.status().state }
-        db.close()
+        val mib = checkNotNull(sampledMib) { "the gather never reached the sampling point" }
         return mib
     } finally {
+        db.close()
         tmp.toFile().deleteRecursively()
     }
 }
@@ -115,7 +123,9 @@ private class PagedProvider(
     private val total: Int,
     private val pageSize: Int,
 ) : CloudProvider {
-    var limit: Int = total
+    var interruptAt: Int? = null
+    var resumedFrom: Int = 0
+    var resumedCount: Int = 0
 
     override val id = "probe"
     override val displayName = "probe"
@@ -130,9 +140,13 @@ private class PagedProvider(
         onPageProgress: ((itemsSoFar: Int) -> Unit)?,
         scanContext: ScanContext?,
     ): DeltaPage {
-        val offset = cursor?.toIntOrNull() ?: 0
-        val end = minOf(offset + pageSize, limit)
-        val page =
+        val offset = cursor?.toIntOrNull() ?: scanContext?.resumeMarker?.toIntOrNull() ?: 0
+        if (cursor == null && scanContext?.resumeMarker != null) {
+            resumedFrom = offset
+            resumedCount = scanContext.resumedItems.size
+        }
+        val end = minOf(offset + pageSize, total)
+        val newItems =
             (offset until end).map { i ->
                 CloudItem(
                     id = "id-$i",
@@ -146,8 +160,10 @@ private class PagedProvider(
                     mimeType = null,
                 )
             }
-        onPageProgress?.invoke(end)
-        return DeltaPage(items = page, cursor = end.toString(), hasMore = end < limit)
+        scanContext?.persistPage?.invoke(newItems, end.toString())
+        interruptAt?.let { if (end >= it) throw ProviderException("probe interrupted after staging $end items") }
+        val page = if (cursor == null) scanContext?.resumedItems.orEmpty() + newItems else newItems
+        return DeltaPage(items = page, cursor = end.toString(), hasMore = end < total)
     }
 
     override val deltaIsFullListing: Boolean get() = true
