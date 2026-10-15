@@ -6,25 +6,25 @@ done; it does not need other documents. Anchors were checked by reading `origin/
 only the logout/auth files and the README). Symbols and files are named; line numbers are hints and drift. Claims in a portion are tagged `[measured]` (a trace or database copy of the 2026-10-14 capture
 runs), `[code]` (read in the tree), `[inferred]` or `[unverified]`. Nothing was built or run: no gradle task, no test, no provider API call.
 
-This is a planning snapshot. Check live issues, PRs and main before assigning any portion. Since the snapshot, PRs #880 and #877 merged;
-P14 is in PR #895 and P20 is in PR #896. PR #901 also edits Internxt provider files and PR #907 edits test/build wiring. Do not start a
-duplicate portion or concurrent edit on those files while these PRs remain open.
+This is a planning snapshot. Check live issues, PRs and main before assigning any portion. Since the snapshot, PRs #880, #877, #895,
+#901 and #907 merged; P14 was implemented in #895 and P20 is covered by #896. Recheck file anchors and open PRs before starting a
+portion, especially in the Internxt provider and test/build wiring.
 
 Planning sources read first: `lane-bugs-quickwins.md` and `lane-desktop-ui.md` (tracked, in this folder's parent), and the untracked
 plans of the owner's checkout (`agent-correctness-worklist.md`, `Agent_open-bug-sweep.md`, `Agent_internxt-cursor-sync-windows-gaps.md`,
 `Agent_server-side-cursor-sync.md`, the two first-startup captures and the Internxt-vs-UniDrive comparison). The untracked files are not on
 main; a portion therefore never depends on them. Where they are stale, see "Stale planning documents".
 
-## In flight (not portions)
+## Work claimed since this snapshot
 
 | What | Issue | State |
 |---|---|---|
-| [PR #895](https://github.com/gkrost/unidrive/pull/895) | #891 health line and heap probe | P14 in progress; do not start it again |
-| [PR #896](https://github.com/gkrost/unidrive/pull/896) | #753 pending rows CLI | P20 in progress; do not start it again |
-| [PR #901](https://github.com/gkrost/unidrive/pull/901) | #899 Internxt folder meta | overlaps the Internxt provider family |
-| [PR #907](https://github.com/gkrost/unidrive/pull/907) | flaky test quarantine | overlaps test and build wiring |
+| [PR #895](https://github.com/gkrost/unidrive/pull/895) | #891 health line and heap probe | merged; P14 was implemented |
+| [PR #896](https://github.com/gkrost/unidrive/pull/896) | #753 pending rows CLI | P20 is claimed; check its live state |
+| [PR #901](https://github.com/gkrost/unidrive/pull/901) | #899 Internxt folder meta | merged; refresh Internxt provider anchors |
+| [PR #907](https://github.com/gkrost/unidrive/pull/907) | flaky test quarantine | merged; refresh test/build wiring anchors |
 
-PRs #880 and #877 have merged. Check the live diff of each open PR above before editing its file family.
+Check main and the live open PR set before editing a file family.
 
 ## Index
 
@@ -48,13 +48,13 @@ issue to be filed first (the portion says so).
 | [P11](P11-enumerate-retry-scheduling.md) Enumeration retries: the reported next attempt, manual retries and the poller agree | new issue to file | 11 / wave 2 | S-M | [P10](P10-enumeration-error-code.md) | ready after the error-code portion |
 | [P12](P12-enumeration-per-stream-state.md) daemon.status.enumeration: report the folders and files streams separately | new issue to file | 12 / wave 3 | M | PR #880, [P10](P10-enumeration-error-code.md) | ready after PR #880 and the error-code portion |
 | [P13](P13-enumeration-progress-contract.md) daemon.status.enumeration: expected total and ETA for a scan | new issue to file | 13 / wave 3 | M | [P10](P10-enumeration-error-code.md) ([P12](P12-enumeration-per-stream-state.md) for per-stream totals) | ready after the error-code portion |
-| [P14](P14-heap-visibility-and-probe.md) Heap of a full enumeration: a health line and a repeatable probe | #891 | 14 / wave 1 | S-M | - | in progress by PR #895 |
+| [P14](P14-heap-visibility-and-probe.md) Heap of a full enumeration: a health line and a repeatable probe | #891 | 14 / wave 1 | S-M | - | implemented by PR #895; live histogram remains |
 | [P15](P15-internxt-stage-and-release.md) Internxt full enumeration: stage pages and release them instead of holding the account | #638 | 15 / wave 3 | M | PR #880, [P14](P14-heap-visibility-and-probe.md) | ready after PR #880 and the heap probe |
 | [P16](P16-internxt-scoped-walk-followups.md) Internxt folder walk: what the resume work left open | #393, #693 | 16 / wave 3 | M | PR #880 | ready after PR #880 |
 | [P17](P17-remote-incomplete-memory.md) A truncated cloud object: remember the refusal per object instead of asking again on every read | #696 | 17 / wave 2 | M | [P18](P18-hydration-close-handle-and-uploads-staleness.md) | ready after the close-handle portion |
 | [P18](P18-hydration-close-handle-and-uploads-staleness.md) close_handle across connections, and a staleness signal for the uploads reading | #438, #747 | 18 / wave 1 | M | - | ready |
 | [P19](P19-hot-reauth.md) Sign in again while the daemon holds the profile | #813 | 19 / wave 3 | M | PR #876 (merged); pick A or B | ready (pick A or B on the issue first) |
-| [P20](P20-pending-rows-cli.md) CLI: inspect and safely drop stranded pending upload rows | #753 | 20 / wave 1 | M | - | in progress by PR #896 |
+| [P20](P20-pending-rows-cli.md) CLI: inspect and safely drop stranded pending upload rows | #753 | 20 / wave 1 | M | - | covered by PR #896; check live state |
 | [P21](P21-http-concurrency-latency.md) HttpRetryBudget: make the concurrency limit real and let rising latency slow a provider down | #517 | 21 / wave 4 | M | PR #880, [P09](P09-internxt-cursor-fallback-followups.md) | ready after PR #880 and the cursor follow-ups |
 | [P22](P22-incremental-poll-through-sync.md) Internxt incremental poll through the keyset endpoints | #312 | 22 / wave 3 | M | PR #880 | ready after PR #880 |
 | [P23](P23-reconcile-slice-cost.md) Streaming reconcile loads the whole sync_entries table once per delta page | #316 | 23 / wave 3 | M | PR #877 | ready after PR #877 |
@@ -153,7 +153,7 @@ wave, portions of the same file family (table below) run one after the other, in
 
 | Wave | Portions |
 |---|---|
-| 0 (in flight) | P14 (PR #895), P20 (PR #896); PR #901 and PR #907 overlap other file families |
+| 0 (claimed or merged) | P14 (PR #895), P20 (PR #896); refresh anchors after #901 and #907 |
 | 1 (start after checking live PRs) | P01, P07, P10, P18, P33, P34, P41, P43, P44, P48, P49, P50, P54 |
 | 2 | P09 (after #880), P11 (after P10), P17 (after P18), P28, P29, P37 (after #877), P39, P45, P47; P02 once decided |
 | 3 | P08, P12, P13, P15, P16, P19 (after P34), P22, P23 (after #877), P26, P27, P38, P51; P04 once decided |

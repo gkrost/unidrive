@@ -6,7 +6,7 @@
 | Labels | enhancement, sev:medium, area:cli, kind:reliability, lane:cli-trust |
 | Size | M |
 | Priority | rank 20 of 54 (first-sync group), wave 1 |
-| Status | in progress by PR #896; do not start another implementation |
+| Status | covered by PR #896; check its live state before starting more work |
 | Depends on | nothing |
 | Not in parallel with | P40 (`Main.kt` subcommand list), P18 (replay reads the same rows); same file family (take them one after the other, order in README): P40, P32, P39 |
 | Status check | verified on main a0c6c4d3, 2026-10-14: still open (only `status --pending` as a count flag exists) |
