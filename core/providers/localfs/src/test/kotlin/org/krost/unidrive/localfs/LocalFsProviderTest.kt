@@ -2,6 +2,7 @@ package org.krost.unidrive.localfs
 
 import kotlinx.coroutines.test.runTest
 import org.krost.unidrive.CapabilityResult
+import org.krost.unidrive.ProviderException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
@@ -144,5 +145,79 @@ class LocalFsProviderTest {
             }
             p.delete("/sub")
             assertTrue(Files.exists(outside.resolve("keep.txt")), "delete must not follow a symlink outside root")
+        }
+
+    @Test
+    fun delta_skips_an_unreadable_directory_and_reports_the_listing_incomplete() =
+        runTest {
+            val root = newRoot()
+            val p = LocalFsProvider(root)
+            p.authenticate()
+            Files.writeString(root.resolve("ok.txt"), "readable")
+            val locked = Files.createDirectories(root.resolve("locked"))
+            Files.writeString(locked.resolve("hidden.txt"), "unreachable")
+            val restore = denyRead(locked)
+            org.junit.Assume.assumeTrue("this platform cannot deny access to a directory", restore != null)
+
+            try {
+                val page = p.delta(null)
+
+                assertFalse(
+                    page.complete,
+                    "a walk that skipped an unreadable directory must not read as complete, or the engine infers deletions for it",
+                )
+                val paths = page.items.map { it.path }.toSet()
+                assertTrue("/ok.txt" in paths, "the readable part must still be listed; got $paths")
+                assertTrue(
+                    page.items.none { it.path.startsWith("/locked") },
+                    "nothing under the unreadable directory may be listed; got $paths",
+                )
+                assertTrue(
+                    p.lastDeltaSkippedPaths.any { it.endsWith("locked") },
+                    "the skipped path must be named for the operator; got ${p.lastDeltaSkippedPaths}",
+                )
+            } finally {
+                restore?.invoke()
+                locked.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun delta_skips_the_windows_system_folders_by_policy_and_stays_complete() =
+        runTest {
+            val root = newRoot()
+            val p = LocalFsProvider(root)
+            p.authenticate()
+            Files.writeString(root.resolve("mine.txt"), "mine")
+            Files.createDirectories(root.resolve("\$RECYCLE.BIN")).resolve("x").let { Files.writeString(it, "r") }
+            Files.createDirectories(root.resolve("System Volume Information")).resolve("y").let { Files.writeString(it, "s") }
+
+            val page = p.delta(null)
+
+            assertTrue(page.complete, "a policy skip is deliberate; it must not flip the page incomplete")
+            val paths = page.items.map { it.path }.toSet()
+            assertTrue("/mine.txt" in paths)
+            assertTrue(paths.none { it.contains("RECYCLE") || it.contains("System Volume") }, "system folders must not sync; got $paths")
+        }
+
+    @Test
+    fun authenticate_refuses_a_root_it_cannot_read() =
+        runTest {
+            val root = newRoot()
+            Files.writeString(root.resolve("x.txt"), "x")
+            val restore = denyRead(root)
+            org.junit.Assume.assumeTrue("this platform cannot deny access to a directory", restore != null)
+
+            try {
+                val p = LocalFsProvider(root)
+                val e = assertFailsWith<ProviderException> { p.authenticate() }
+                assertTrue(
+                    "root_not_readable" in (e.message ?: ""),
+                    "the refusal must carry the wizard's token; got: ${e.message}",
+                )
+                assertFalse(p.isAuthenticated, "a failed authenticate must not leave the provider authenticated")
+            } finally {
+                restore?.invoke()
+            }
         }
 }
