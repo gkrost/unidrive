@@ -508,6 +508,7 @@ fun Test.flakyTestGuarded() {
 }
 
 subprojects {
+    val module = this
     pluginManager.withPlugin("org.jetbrains.kotlin.jvm") {
         // The category must load on the test classpath of every module, also of one with no quarantined test: Gradle's
         // category filter fails the whole task on a class it cannot load. testFixtures keeps it out of the shipped jar.
@@ -530,14 +531,11 @@ subprojects {
             // One log line per flaky test, so a run that never ends still shows what it got through.
             testLogging { events("passed", "failed", "skipped") }
             // A module with nothing quarantined starts no test JVM.
-            onlyIf { mentionsQuarantine(project) }
+            onlyIf { mentionsQuarantine(module) }
             // A run that is stopped writes no reports; the last run's must not stand in for it.
-            doFirst {
-                project.delete(
-                    layout.buildDirectory.dir("test-results/$flakyTestTask"),
-                    layout.buildDirectory.dir("reports/tests/$flakyTestTask"),
-                )
-            }
+            val staleReports =
+                listOf(layout.buildDirectory.dir("test-results/$flakyTestTask"), layout.buildDirectory.dir("reports/tests/$flakyTestTask"))
+            doFirst { staleReports.forEach { it.get().asFile.deleteRecursively() } }
             flakyTestGuarded()
         }
     }
