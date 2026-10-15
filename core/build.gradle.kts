@@ -22,6 +22,12 @@ configure<JacocoPluginExtension> {
     toolVersion = jacocoToolVersion
 }
 
+// Stable and flaky tests (docs/dev/testing-flaky-policy.md): the JUnit 4 category the quarantined tests carry
+// (org.krost.unidrive.testing.FlakyTests, in :app:core's test fixtures) and the per-module task that runs only them.
+// The wiring is in the "Stable and flaky tests" section below.
+val flakyCategory = "org.krost.unidrive.testing.FlakyTests"
+val flakyTestTask = "flakyTest"
+
 allprojects {
     group = "org.krost.unidrive"
     // Greenfield monorepo restart baseline. Next planned release: 0.0.1.
@@ -262,7 +268,9 @@ subprojects {
         testLogging {
             exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
         }
-        finalizedBy(tasks.withType<JacocoReport>())
+        // The advisory flakyTest run (below) is not part of the coverage report, and the report's input is the
+        // stable `test` task: finalizing flakyTest with it would run the whole stable suite behind it.
+        if (name != flakyTestTask) finalizedBy(tasks.withType<JacocoReport>())
         // #453: redirect the test JVM's home to the build dir. Tests that build a
         // provider config without an explicit path (OneDriveConfig's default
         // tokenPath, the XDG/user-dir resolvers, …) then read and write under
@@ -309,6 +317,363 @@ providers.gradleProperty("unidriveTestJvm").orNull?.let { jvmVersion ->
     }
 }
 
+// ---- Stable and flaky tests (docs/dev/testing-flaky-policy.md) --------------------------------------------------------
+//
+// A test that fails on CI without a related change is quarantined, not retried and not deleted: it carries
+//     @Category(FlakyTests::class)
+//     @Flaky(issue = N, reason = "...", firstFailure = "https://github.com/gkrost/unidrive/actions/runs/...")
+// (org.krost.unidrive.testing, :app:core's test fixtures). Then:
+//   - every Test task except flakyTest (`test`, and with it `check`, and sync-tracking's liveTest* tiers) excludes the
+//     category: it runs the stable tests only and fails on a stable failure, as before;
+//   - `flakyTest` (one per module, plus a root aggregate) runs ONLY the category, with ignoreFailures, and still writes
+//     the normal XML/HTML reports under build/test-results|reports/flakyTest. Nothing in `check` depends on it;
+//   - `flakyReport` (finalizer of the aggregate) prints the outcome, appends a table to the GitHub job summary and
+//     emits one ::warning:: per failed flaky test;
+//   - `checkFlakyQuarantine` (part of every `check`) fails on a quarantined test without a complete @Flaky and lists
+//     the quarantine once.
+//
+// ignoreFailures covers failed assertions and exceptions, which is what flaky tests do. A test JVM that dies, or a run
+// that has to be stopped for taking too long, is a failure of the task itself, which ignoreFailures does not cover;
+// see flakyTestGuarded.
+
+class QuarantinedTest(
+    val module: String,
+    val owner: String,
+    val test: String,
+    val issue: Int,
+    val reason: String,
+    val firstFailure: String,
+    val location: String,
+)
+
+class QuarantineScan(val quarantined: List<QuarantinedTest>, val problems: List<String>)
+
+fun sourcesOf(module: Project): Sequence<java.io.File> =
+    module.projectDir.resolve("src/test").walkTopDown().filter { it.isFile && (it.extension == "kt" || it.extension == "java") }
+
+fun mentionsQuarantine(module: Project): Boolean = sourcesOf(module).any { it.readText().contains("FlakyTests") }
+
+// Index of the parenthesis closing the one at `open`, skipping parentheses inside string literals; -1 if unbalanced.
+fun closingParenthesis(text: String, open: Int): Int {
+    var depth = 0
+    var inString = false
+    var i = open
+    while (i < text.length) {
+        val c = text[i]
+        if (inString) {
+            if (c == '\\') i++ else if (c == '"') inString = false
+        } else {
+            when (c) {
+                '"' -> inString = true
+                '(' -> depth++
+                ')' -> if (--depth == 0) return i
+            }
+        }
+        i++
+    }
+    return -1
+}
+
+fun scanQuarantine(modules: Collection<Project>, rootDir: java.io.File): QuarantineScan {
+    val category = Regex("""@Category\s*\(\s*FlakyTests::class\s*\)""")
+    val categoryAtEnd = Regex(category.pattern + """\z""")
+    val flakyStart = Regex("""@Flaky\s*\(""")
+    val declaration = Regex("""\A(?:[a-z]+\s+)*(fun|class)\s+(`[^`]+`|[A-Za-z_]\w*)""")
+    val found = mutableListOf<QuarantinedTest>()
+    val problems = mutableListOf<String>()
+    for (module in modules) {
+        for (file in sourcesOf(module)) {
+            val text = file.readText()
+            if (!text.contains("FlakyTests") && !flakyStart.containsMatchIn(text)) continue
+            val rel = file.relativeTo(rootDir).invariantSeparatorsPath
+            val lines = text.lines()
+
+            fun lineOf(index: Int) = text.substring(0, index).count { it == '\n' } + 1
+
+            fun at(index: Int) = "$rel:${lineOf(index)}"
+            val marks = category.findAll(text).toList()
+            // Every use of the category name is an import or the exact marker, so the build sees all of them.
+            val stray = Regex("""\bFlakyTests\b""").findAll(text).count { hit ->
+                val line = lines[lineOf(hit.range.first) - 1].trimStart()
+                val prose = line.startsWith("import ") || line.startsWith("//") || line.startsWith("*") || line.startsWith("/*")
+                !prose && marks.none { hit.range.first in it.range }
+            }
+            if (stray > 0) problems += "$rel: FlakyTests is used other than as @Category(FlakyTests::class)"
+            for (mark in marks) {
+                if (!text.substring(mark.range.last + 1).trimStart().startsWith("@Flaky")) {
+                    problems += "${at(mark.range.first)}: @Category(FlakyTests::class) needs @Flaky(issue, reason, firstFailure) right after it"
+                }
+            }
+            for (start in flakyStart.findAll(text)) {
+                val where = at(start.range.first)
+                if (!categoryAtEnd.containsMatchIn(text.substring(0, start.range.first).trimEnd().takeLast(80))) {
+                    problems += "$where: @Flaky without @Category(FlakyTests::class) right before it, so the test still runs in the stable build"
+                    continue
+                }
+                val open = start.range.last
+                val close = closingParenthesis(text, open)
+                if (close < 0) {
+                    problems += "$where: unbalanced @Flaky(...)"
+                    continue
+                }
+                val args = text.substring(open + 1, close)
+                val issue = Regex("""\bissue\s*=\s*(\d+)""").find(args)?.groupValues?.get(1)?.toInt() ?: 0
+                // One string literal, or several joined with `+` when the reason does not fit a line.
+                val reasonLiterals = Regex("""\breason\s*=\s*((?:"(?:[^"\\]|\\.)*"\s*\+?\s*)+)""").find(args)?.groupValues?.get(1).orEmpty()
+                val reason = Regex(""""((?:[^"\\]|\\.)*)"""").findAll(reasonLiterals).joinToString("") { it.groupValues[1] }
+                val firstFailure = Regex("""\bfirstFailure\s*=\s*"(https://github\.com/gkrost/unidrive/[^"\s]+)"""").find(args)?.groupValues?.get(1).orEmpty()
+                if (issue <= 0) problems += "$where: @Flaky needs issue = <number of the open issue that tracks the fix>"
+                if (reason.isBlank()) problems += "$where: @Flaky needs reason = \"what makes the test non-deterministic\""
+                if (firstFailure.isEmpty()) problems += "$where: @Flaky needs firstFailure = \"https://github.com/gkrost/unidrive/...\" (the first CI run that showed it)"
+                // Skip the annotations between @Flaky and the declaration it applies to.
+                var rest = text.substring(close + 1).trimStart()
+                while (rest.startsWith("@")) {
+                    val name = Regex("""\A@[\w.:]+""").find(rest)?.value ?: break
+                    rest = rest.substring(name.length)
+                    if (rest.startsWith("(")) rest = rest.substring(closingParenthesis(rest, 0).coerceAtLeast(0) + 1)
+                    rest = rest.trimStart()
+                }
+                val decl = declaration.find(rest)
+                if (decl == null) {
+                    problems += "$where: @Flaky is not followed by a fun or class"
+                } else if (issue > 0 && reason.isNotBlank() && firstFailure.isNotEmpty()) {
+                    val name = decl.groupValues[2].trim('`')
+                    // The test class is the last top-level class above the marker (nested helper classes are indented).
+                    val enclosing =
+                        Regex("""(?m)^(?:(?:public|internal|private|open|abstract|final)\s+)*class\s+(\w+)""")
+                            .findAll(text.substring(0, start.range.first)).lastOrNull()?.groupValues?.get(1)
+                    val onClass = decl.groupValues[1] == "class"
+                    found += QuarantinedTest(
+                        module.path,
+                        if (onClass) name else enclosing ?: file.nameWithoutExtension,
+                        if (onClass) "*" else name,
+                        issue,
+                        reason,
+                        firstFailure,
+                        where,
+                    )
+                }
+            }
+        }
+    }
+    return QuarantineScan(found.sortedWith(compareBy({ it.module }, { it.owner }, { it.test })), problems)
+}
+
+// ignoreFailures covers failed assertions and exceptions. It does not cover a test JVM that dies, and Gradle's own task
+// `timeout` fails the task from outside its actions. A hung or crashing flaky test must not fail a build, so the task's
+// actions are wrapped: a crash is logged, remembered for flakyReport and swallowed, and a watchdog interrupts a run
+// that outlives flakyTestTimeout (what Gradle's timeout does, minus the failure; the worker JVM is stopped by the
+// interrupt). XML/HTML reports are written only when a run ends normally.
+val flakyTestTimeout: java.time.Duration =
+    java.time.Duration.ofSeconds(providers.gradleProperty("flakyTestTimeoutSeconds").orNull?.toLong() ?: 300L)
+val flakyTaskFailures = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+fun Test.flakyTestGuarded() {
+    val original = actions.toList()
+    setActions(
+        original.map { action ->
+            Action<Task> {
+                val worker = Thread.currentThread()
+                var timedOut = false
+                val watchdog = java.util.Timer("flakyTest-watchdog", true)
+                watchdog.schedule(
+                    object : java.util.TimerTask() {
+                        override fun run() {
+                            timedOut = true
+                            worker.interrupt()
+                        }
+                    },
+                    flakyTestTimeout.toMillis(),
+                )
+                try {
+                    action.execute(this)
+                } catch (e: org.gradle.api.BuildCancelledException) {
+                    throw e
+                } catch (e: Exception) {
+                    val why =
+                        if (timedOut) {
+                            "no end after ${flakyTestTimeout.seconds} s, stopped"
+                        } else {
+                            generateSequence<Throwable>(e) { it.cause }.last().message ?: e.toString()
+                        }
+                    flakyTaskFailures[path] = why
+                    logger.warn("$path did not finish ($why); flaky tests never fail the build.")
+                } finally {
+                    watchdog.cancel()
+                    Thread.interrupted()
+                }
+            }
+        },
+    )
+}
+
+subprojects {
+    pluginManager.withPlugin("org.jetbrains.kotlin.jvm") {
+        // The category must load on the test classpath of every module, also of one with no quarantined test: Gradle's
+        // category filter fails the whole task on a class it cannot load. testFixtures keeps it out of the shipped jar.
+        if (path != ":app:core") {
+            dependencies.add("testImplementation", dependencies.testFixtures(dependencies.project(mapOf("path" to ":app:core"))))
+        }
+        val testSourceSet = the<SourceSetContainer>()["test"]
+        tasks.register<Test>(flakyTestTask) {
+            group = "verification"
+            description = "Runs only the quarantined (flaky) tests. Reports their outcome, never fails the build, not part of check."
+            testClassesDirs = testSourceSet.output.classesDirs
+            classpath = testSourceSet.runtimeClasspath
+            useJUnit { includeCategories(flakyCategory) }
+            ignoreFailures = true
+            failOnNoDiscoveredTests = false
+            // A probe has to run every time (a failure with ignoreFailures still leaves the task "successful" and
+            // so up to date).
+            outputs.upToDateWhen { false }
+            outputs.doNotCacheIf("a flaky run must really run") { true }
+            // One log line per flaky test, so a run that never ends still shows what it got through.
+            testLogging { events("passed", "failed", "skipped") }
+            // A module with nothing quarantined starts no test JVM.
+            onlyIf { mentionsQuarantine(project) }
+            // A run that is stopped writes no reports; the last run's must not stand in for it.
+            doFirst {
+                project.delete(
+                    layout.buildDirectory.dir("test-results/$flakyTestTask"),
+                    layout.buildDirectory.dir("reports/tests/$flakyTestTask"),
+                )
+            }
+            flakyTestGuarded()
+        }
+    }
+    afterEvaluate {
+        // After the module's own `tasks.test { useJUnit() }` and after the JaCoCo plugin's task extension, so neither
+        // can undo what is set here.
+        tasks.withType<Test>().configureEach {
+            if (name == flakyTestTask) {
+                extensions.configure<JacocoTaskExtension> { isEnabled = false }
+            } else {
+                useJUnit { excludeCategories(flakyCategory) }
+            }
+        }
+    }
+}
+
+tasks.register("checkFlakyQuarantine") {
+    group = "verification"
+    description = "Fails on a quarantined test without a complete @Flaky (issue, reason, first failing run); lists the quarantine."
+    doLast {
+        val scan = scanQuarantine(subprojects, rootDir)
+        val list = scan.quarantined
+        logger.lifecycle(
+            if (list.isEmpty()) {
+                "Quarantined (flaky) tests: none."
+            } else {
+                "Quarantined (flaky) tests: ${list.size}. They run in flakyTest, not in test or check; each needs an open issue.\n" +
+                    list.joinToString("\n") { "  ${it.module}  ${it.owner} > ${it.test}  (#${it.issue})" }
+            },
+        )
+        layout.buildDirectory.file("flaky/quarantine.tsv").get().asFile.apply {
+            parentFile.mkdirs()
+            writeText(list.joinToString("") { "${it.issue}\t${it.module}\t${it.owner}\t${it.test}\t${it.location}\n" })
+        }
+        if (scan.problems.isNotEmpty()) {
+            throw GradleException(
+                "Quarantine markers are incomplete (docs/dev/testing-flaky-policy.md):\n  " + scan.problems.joinToString("\n  "),
+            )
+        }
+    }
+}
+
+subprojects {
+    tasks.matching { it.name == "check" }.configureEach { dependsOn(":checkFlakyQuarantine") }
+}
+
+// GitHub workflow command values: %, CR and LF must be escaped, and `:` and `,` as well in a property.
+fun String.workflowData() = replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+fun String.workflowProperty() = workflowData().replace(":", "%3A").replace(",", "%2C")
+
+tasks.register("flakyReport") {
+    group = "verification"
+    description = "Prints the outcome of the last flakyTest run, adds it to the GitHub job summary and annotates failures."
+    // The module tasks cannot be depended on (they run only when asked); this orders it behind them.
+    mustRunAfter(provider { subprojects.mapNotNull { it.tasks.findByName(flakyTestTask) } })
+    doLast {
+        class Row(val module: String, val owner: String, val test: String, val result: String, val message: String)
+        val quarantined = scanQuarantine(subprojects, rootDir).quarantined
+        val rows = mutableListOf<Row>()
+        val builder = javax.xml.parsers.DocumentBuilderFactory.newInstance().apply {
+            setFeature(javax.xml.XMLConstants.FEATURE_SECURE_PROCESSING, true)
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+        }.newDocumentBuilder()
+        val unfinished = mutableListOf<Pair<String, String>>()
+        subprojects.sortedBy { it.path }.forEach { module ->
+            // Only a module whose flakyTest really ran in this build: another module's reports may be older.
+            val task = module.tasks.findByName(flakyTestTask)
+            if (task == null || !task.state.executed || task.state.skipped) return@forEach
+            flakyTaskFailures[task.path]?.let { unfinished += module.path to it }
+            val results = module.layout.buildDirectory.dir("test-results/$flakyTestTask").get().asFile
+            results.listFiles { f -> f.name.startsWith("TEST-") && f.extension == "xml" }.orEmpty().sortedBy { it.name }.forEach { xml ->
+                val cases = builder.parse(xml).documentElement.getElementsByTagName("testcase")
+                for (i in 0 until cases.length) {
+                    val case = cases.item(i) as org.w3c.dom.Element
+
+                    fun child(tag: String) = case.getElementsByTagName(tag).takeIf { it.length > 0 }?.item(0) as? org.w3c.dom.Element
+                    val failure = child("failure") ?: child("error")
+                    val result = when {
+                        failure != null -> "failed"
+                        child("skipped") != null -> "skipped"
+                        else -> "passed"
+                    }
+                    val message = failure?.getAttribute("message").orEmpty().lineSequence().firstOrNull().orEmpty().take(300)
+                    rows += Row(module.path, case.getAttribute("classname").substringAfterLast('.'), case.getAttribute("name"), result, message)
+                }
+            }
+        }
+        val passed = rows.count { it.result == "passed" }
+        val failed = rows.count { it.result == "failed" }
+        val skipped = rows.count { it.result == "skipped" }
+
+        fun issueOf(row: Row) = quarantined.firstOrNull { it.owner == row.owner && (it.test == row.test || it.test == "*") }?.issue
+
+        logger.lifecycle("Flaky tests (advisory, they never fail the build): ${rows.size} run, $passed passed, $failed failed, $skipped skipped.")
+        rows.filter { it.result != "passed" }.forEach {
+            logger.lifecycle("  ${it.result.uppercase()}  ${it.module}  ${it.owner} > ${it.test}  ${it.message}")
+        }
+        unfinished.forEach { (module, why) -> logger.lifecycle("  NOT FINISHED  $module  $why") }
+
+        rows.filter { it.result == "failed" }.forEach {
+            val tracked = issueOf(it)?.let { n -> " Tracked in #$n." }.orEmpty()
+            println(
+                "::warning title=${"Flaky test failed (does not fail the build)".workflowProperty()}::" +
+                    "${it.owner} > ${it.test} (${it.module}): ${it.message}.$tracked".workflowData(),
+            )
+        }
+        unfinished.forEach { (module, why) ->
+            println("::warning title=${"Flaky run did not finish".workflowProperty()}::${"$module: $why".workflowData()}")
+        }
+
+        System.getenv("GITHUB_STEP_SUMMARY")?.takeIf { it.isNotBlank() }?.let { summary ->
+            val table = StringBuilder()
+            table.append("### Flaky tests (advisory: they never fail the build)\n\n")
+            table.append("| Run | Passed | Failed | Skipped |\n|---:|---:|---:|---:|\n| ${rows.size} | $passed | $failed | $skipped |\n\n")
+            if (rows.isNotEmpty()) {
+                table.append("| Result | Test | Module | Issue |\n|---|---|---|---|\n")
+                rows.sortedWith(compareBy({ it.result == "passed" }, { it.module }, { it.owner }, { it.test })).forEach {
+                    table.append("| ${it.result} | `${it.owner} > ${it.test}` | `${it.module}` | ${issueOf(it)?.let { n -> "#$n" }.orEmpty()} |\n")
+                }
+                table.append("\n")
+            }
+            unfinished.forEach { (module, why) -> table.append("`$module` did not finish: ${why.lineSequence().firstOrNull().orEmpty()}\n\n") }
+            if (rows.isEmpty() && unfinished.isEmpty()) table.append("No flaky test ran.\n\n")
+            java.io.File(summary).appendText(table.toString())
+        }
+    }
+}
+
+tasks.register("flakyTest") {
+    group = "verification"
+    description = "Runs every module's quarantined tests and reports them. Never fails the build; run it with --continue."
+    dependsOn(provider { subprojects.mapNotNull { it.tasks.findByName(flakyTestTask) } })
+    finalizedBy("flakyReport")
+}
+
 tasks.register<JacocoReport>("jacocoMergedReport") {
     // Only projects that actually define a `test` task (leaf modules, not the
     // `:app` / `:providers` containers). Wrapped in a provider so it is
@@ -335,7 +700,7 @@ tasks.register<JacocoReport>("jacocoMergedReport") {
     }
     val execData = provider {
         subprojects.flatMap { sp ->
-            sp.tasks.withType<Test>().mapNotNull { t ->
+            sp.tasks.withType<Test>().filter { it.name != flakyTestTask }.mapNotNull { t ->
                 t.extensions.findByType<JacocoTaskExtension>()?.destinationFile
             }
         }
