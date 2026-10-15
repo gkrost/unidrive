@@ -21,6 +21,21 @@ private val RETRY_DELAYS_MS = longArrayOf(100, 300, 900)
 
 private val WINDOWS = System.getProperty("os.name").lowercase().contains("windows")
 
+/**
+ * What the retry loop does with a [FileSystemException] on [attempt]: null means worth another try (a
+ * lock that may clear, attempts left); otherwise the failure to give up with — the original, when the
+ * operation did not fail on a lock at all, or [lockedUp] when the attempts are used up.
+ */
+private fun lockRetryVerdict(
+    e: FileSystemException,
+    attempt: Int,
+): FileSystemException? =
+    when {
+        !isRetriableLock(e) -> e
+        attempt >= RETRY_DELAYS_MS.size -> lockedUp(e)
+        else -> null
+    }
+
 suspend fun <T> withLocalIoRetry(
     delayMs: suspend (Long) -> Unit = { delay(it) },
     action: suspend () -> T,
@@ -33,8 +48,8 @@ suspend fun <T> withLocalIoRetry(
         } catch (e: CancellationException) {
             throw e
         } catch (e: FileSystemException) {
-            if (!isRetriableLock(e)) throw e
-            if (attempt >= RETRY_DELAYS_MS.size) throw lockedUp(e)
+            val giveUp = lockRetryVerdict(e, attempt)
+            if (giveUp != null) throw giveUp
             delayMs(RETRY_DELAYS_MS[attempt])
             attempt++
         }
@@ -51,8 +66,8 @@ fun <T> withLocalIoRetryBlocking(action: () -> T): T {
         } catch (e: CancellationException) {
             throw e
         } catch (e: FileSystemException) {
-            if (!isRetriableLock(e)) throw e
-            if (attempt >= RETRY_DELAYS_MS.size) throw lockedUp(e)
+            val giveUp = lockRetryVerdict(e, attempt)
+            if (giveUp != null) throw giveUp
             Thread.sleep(RETRY_DELAYS_MS[attempt])
             attempt++
         }
