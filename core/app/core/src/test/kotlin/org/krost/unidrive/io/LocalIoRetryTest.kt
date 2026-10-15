@@ -36,7 +36,7 @@ class LocalIoRetryTest {
             val attempts = AtomicInteger(0)
             val file = existingFile()
             val result =
-                withLocalIoRetry(delayMs = { delays += it }) {
+                withLocalIoRetry(delayMs = { delays += it }, windows = true) {
                     if (attempts.incrementAndGet() < 3) throw LockFailure(file, "being used by another process")
                     "done"
                 }
@@ -51,7 +51,7 @@ class LocalIoRetryTest {
             val file = existingFile()
             val failure =
                 assertFailsWith<FileSystemException> {
-                    withLocalIoRetry(delayMs = { delays += it }) {
+                    withLocalIoRetry(delayMs = { delays += it }, windows = true) {
                         throw LockFailure(file, "being used by another process")
                     }
                 }
@@ -65,7 +65,7 @@ class LocalIoRetryTest {
             val delays = mutableListOf<Long>()
             val failure =
                 assertFailsWith<FileSystemException> {
-                    withLocalIoRetry(delayMs = { delays += it }) {
+                    withLocalIoRetry(delayMs = { delays += it }, windows = true) {
                         throw LockFailure(Path.of("gone.bin"), "being used by another process")
                     }
                 }
@@ -79,7 +79,7 @@ class LocalIoRetryTest {
             val delays = mutableListOf<Long>()
             val failure =
                 assertFailsWith<IllegalStateException> {
-                    withLocalIoRetry(delayMs = { delays += it }) { error("different failure") }
+                    withLocalIoRetry(delayMs = { delays += it }, windows = true) { error("different failure") }
                 }
             assertEquals("different failure", failure.message)
             assertEquals(0, delays.size, "no sleep, no retry")
@@ -89,7 +89,7 @@ class LocalIoRetryTest {
     fun `no sleep on a first-attempt success`() =
         runBlocking {
             val delays = mutableListOf<Long>()
-            assertEquals(1, withLocalIoRetry(delayMs = { delays += it }) { 1 })
+            assertEquals(1, withLocalIoRetry(delayMs = { delays += it }, windows = true) { 1 })
             assertEquals(0, delays.size)
         }
 
@@ -99,7 +99,7 @@ class LocalIoRetryTest {
             val delays = mutableListOf<Long>()
             val attempts = AtomicInteger(0)
             val file = existingFile()
-            withLocalIoRetry(delayMs = { delays += it }) {
+            withLocalIoRetry(delayMs = { delays += it }, windows = true) {
                 if (attempts.incrementAndGet() == 1) throw AccessDeniedException(file.toString())
                 1
             }
@@ -150,7 +150,7 @@ class LocalIoRetryTest {
                     withLocalIoRetry(delayMs = {
                         scope.cancel()
                         kotlinx.coroutines.delay(1) // a delay in a cancelled scope throws CancellationException
-                    }) {
+                    }, windows = true) {
                         throw LockFailure(file, "being used by another process")
                     }
                 }

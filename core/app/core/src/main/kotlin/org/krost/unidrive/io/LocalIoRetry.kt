@@ -38,9 +38,10 @@ private fun lockRetryVerdict(
 
 suspend fun <T> withLocalIoRetry(
     delayMs: suspend (Long) -> Unit = { delay(it) },
+    windows: Boolean = WINDOWS,
     action: suspend () -> T,
 ): T {
-    if (!WINDOWS) return action()
+    if (!windows) return action()
     var attempt = 0
     while (true) {
         try {
