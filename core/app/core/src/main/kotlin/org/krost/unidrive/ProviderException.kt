@@ -29,6 +29,9 @@ open class ProviderException(
     message: String,
     cause: Throwable? = null,
     val requestId: String? = null,
+    // #878: the HTTP status of an API error, so the status report can answer a machine-readable
+    // `last_error_code` (http_408) without parsing the sanitized message. Null for a non-HTTP failure.
+    val httpStatus: Int? = null,
 ) : Exception(message, cause)
 
 open class AuthenticationException(

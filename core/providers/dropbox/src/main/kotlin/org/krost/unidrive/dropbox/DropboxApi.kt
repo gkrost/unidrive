@@ -59,7 +59,7 @@ class DropboxApiException(
     val summary: String,
     val error: JsonObject? = null,
     requestId: String? = null,
-) : ProviderException(message, requestId = requestId) {
+) : ProviderException(message, requestId = requestId, httpStatus = status) {
     /** True when the summary starts with [prefix] (`path/not_found`, `to/conflict`, `reset`). */
     fun isA(prefix: String): Boolean = summary.startsWith(prefix)
 }

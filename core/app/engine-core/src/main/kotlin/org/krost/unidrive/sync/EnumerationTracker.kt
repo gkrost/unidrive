@@ -55,6 +55,8 @@ class EnumerationTracker(
     private var foldersSkipped: Int? = null
     private var lastSuccessAtMs: Long? = null
     private var lastError: String? = null
+    // #878: the machine-readable cause of the last failure; cleared by a success and by a new attempt.
+    private var lastErrorCode: String? = null
     private var nextAttemptAtMs: Long? = null
 
     /**
@@ -77,6 +79,9 @@ class EnumerationTracker(
             phase = EnumerationStatus.Phase.LISTING
             attempt++
             startedAtMs = now
+            // The reason survives a retry (#478-era contract); the code goes, so a run that fails a
+            // different way does not answer the previous cause.
+            lastErrorCode = null
             nextAttemptAtMs = null
             clearProgress()
             samples.addLast(Sample(now, 0, 0))
@@ -140,6 +145,7 @@ class EnumerationTracker(
             first = false
             lastSuccessAtMs = clock()
             lastError = null
+            lastErrorCode = null
             nextAttemptAtMs = null
             clearProgress()
         }
@@ -152,12 +158,14 @@ class EnumerationTracker(
     fun failed(
         reason: String?,
         authRejected: Boolean = false,
+        code: String? = null,
     ) {
         synchronized(lock) {
             if (authRejected) authRejectedAtMs = clock()
             state = EnumerationStatus.State.FAILED
             attempt = max(attempt, 1)
             lastError = sanitizeError(reason)
+            lastErrorCode = code
             samples.clear()
         }
     }
@@ -210,6 +218,7 @@ class EnumerationTracker(
                 etaKind = eta?.second,
                 lastSuccessAtMs = lastSuccessAtMs,
                 lastError = lastError,
+                lastErrorCode = lastErrorCode,
                 nextAttemptAtMs = if (state == EnumerationStatus.State.FAILED) nextAttemptAtMs else null,
             )
         }
@@ -325,7 +334,11 @@ class EnumerationTracker(
          * Quoted text goes too: provider messages quote the names of folders and files.
          */
         fun sanitizeError(raw: String?): String? {
-            val line = raw?.lineSequence()?.firstOrNull { it.isNotBlank() } ?: return null
+            val firstLine = raw?.lineSequence()?.firstOrNull { it.isNotBlank() } ?: return null
+            // #878: a provider error message carries the response body after " - "; the body would only
+            // be sanitized into punctuation, so it is dropped before the rules run.
+            val cut = listOf(" - {", " - [", " - <").firstNotNullOfOrNull { firstLine.indexOf(it).takeIf { i -> i >= 0 } }
+            val line = if (cut != null) firstLine.take(cut) else firstLine
             val clean =
                 line
                     .replace(URL, "<url>")

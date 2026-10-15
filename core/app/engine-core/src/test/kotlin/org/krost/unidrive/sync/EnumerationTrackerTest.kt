@@ -612,4 +612,46 @@ class EnumerationTrackerTest {
         assertEquals(now - 5_000, tracker.authRejectedAtMs, "kept: the reader compares it with lastSuccessAtMs")
         assertEquals(now, tracker.snapshot().lastSuccessAtMs)
     }
+
+    // #878: last_error_code — the machine-readable cause of the failure, cleared by a success and by
+    // the next attempt, and absent while nothing has failed.
+    @Test
+    fun `the failure carries its code and a success or a new attempt clears it`() {
+        assertEquals(null, tracker.snapshot().lastErrorCode, "nothing failed yet")
+        tracker.begin()
+        tracker.failed("API error: 408 Request Timeout", code = "http_408")
+        assertEquals("http_408", tracker.snapshot().lastErrorCode)
+
+        tracker.succeeded()
+        assertEquals(null, tracker.snapshot().lastErrorCode, "a success clears the code")
+
+        tracker.begin()
+        tracker.failed("connect timed out", code = "timeout")
+        assertEquals("timeout", tracker.snapshot().lastErrorCode)
+        tracker.begin()
+        assertEquals(null, tracker.snapshot().lastErrorCode, "a new attempt starts without a code")
+        assertEquals("connect timed out", tracker.snapshot().lastError, "the reason survives the retry")
+    }
+
+    @Test
+    fun `the sanitised reason drops the response body that follows the status line`() {
+        // The shapes the providers produce: " - {json}", " - [xml]", " - <html>".
+        assertEquals(
+            "API error: 408 Request Timeout",
+            EnumerationTracker.sanitizeError("API error: 408 Request Timeout - {\"statusCode\":408,\"message\":\"Request timed out\"}"),
+        )
+        assertEquals(
+            "API error: 502 Bad Gateway",
+            EnumerationTracker.sanitizeError("API error: 502 Bad Gateway - <html><body>cloudflare</body></html>"),
+        )
+        assertEquals(
+            "the server answered 503",
+            EnumerationTracker.sanitizeError("the server answered 503 - [error]"),
+        )
+        // A message without a body is untouched by the cut.
+        assertEquals(
+            "cannot list <path>: connection closed",
+            EnumerationTracker.sanitizeError("cannot list /Secret/Plans: connection closed"),
+        )
+    }
 }
