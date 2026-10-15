@@ -181,30 +181,30 @@ val RequestId =
         }
     }
 
-    /** Settings of [RequestId]; every one is optional. */
-    class RequestIdConfig {
-        /** Where attempts are reported once the tap has a sink; null for a client that reports nothing. */
-        var metrics: RequestMetricsTap? = null
+/** Settings of [RequestId]; every one is optional. */
+class RequestIdConfig {
+    /** Where attempts are reported once the tap has a sink; null for a client that reports nothing. */
+    var metrics: RequestMetricsTap? = null
 
-        /** The provider id written into every attempt. */
-        var provider: String = "unknown"
+    /** The provider id written into every attempt. */
+    var provider: String = "unknown"
 
-        /** Names the endpoints of this client's API; the default hides every path ([EndpointClassifier.OPAQUE]). */
-        var endpoints: EndpointClassifier = EndpointClassifier.OPAQUE
+    /** Names the endpoints of this client's API; the default hides every path ([EndpointClassifier.OPAQUE]). */
+    var endpoints: EndpointClassifier = EndpointClassifier.OPAQUE
 
-        /**
-         * The profile name printed into the response line (`[profile]`); null (the default) keeps the line in
-         * the old format. The name travels in the message because the MDC does not reach every worker thread.
-         */
-        var profile: String? = null
+    /**
+     * The profile name printed into the response line (`[profile]`); null (the default) keeps the line in
+     * the old format. The name travels in the message because the MDC does not reach every worker thread.
+     */
+    var profile: String? = null
 
-        /**
-         * Response headers that may carry the server's own request id, tried in order; the first present
-         * value is printed as `srv=<id>` (empty when none). Redaction rule as ever: the URL stays
-         * query-free, the header value comes from the response, not from anything the request carried.
-         */
-        var serverRequestIdHeaders: List<String> = emptyList()
-    }
+    /**
+     * Response headers that may carry the server's own request id, tried in order; the first present
+     * value is printed as `srv=<id>` (empty when none). Redaction rule as ever: the URL stays
+     * query-free, the header value comes from the response, not from anything the request carried.
+     */
+    var serverRequestIdHeaders: List<String> = emptyList()
+}
 
 /**
  * UD-773: format the `up=N dn=M` segment for the RequestId close line.

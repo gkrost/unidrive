@@ -196,7 +196,7 @@ class RequestIdPluginTest {
                 }
             val close = lines.last { it.startsWith("←") }
             assertTrue(Regex("""^← req=[^ ]+ 200 \(\d+ms\)( up=\S+ dn=\S+)?$""").matches(close), "the old close line, unchanged: $close")
-            assertTrue("![" !in close && " srv=" !in close, "no new segments: $close")
+            assertTrue(" [" !in close && " srv=" !in close, "no new segments: $close")
             client.close()
         }
 
