@@ -48,6 +48,10 @@ class FakeCloudProvider : CloudProvider {
     var deltaItems = listOf<CloudItem>()
     var deltaCursor = "cursor-1"
 
+    // #321: runs at the top of every delta() call, so a test can land a state.db write
+    // mid-gather (a mount write-back completing while a long enumeration walks).
+    var duringDelta: (() -> Unit)? = null
+
     // Multi-page delta driver: when non-empty, successive delta() calls
     // return successive entries (last page has hasMore=false). Lets a test
     // drive the streaming gather across ≥2 pages (the single-page deltaItems
@@ -342,6 +346,7 @@ class FakeCloudProvider : CloudProvider {
         deltaCalls++
         deltaCursorArguments.add(cursor)
         lastScanContext = scanContext
+        duringDelta?.invoke()
         if (deltaThrowExpiredOnResumedCursor && cursor != null) {
             deltaThrowExpiredOnResumedCursor = false // self-clearing; recovery pass uses cursor=null
             throw org.krost.unidrive.DeltaCursorExpiredException("410 Gone — delta token is too old (test)")

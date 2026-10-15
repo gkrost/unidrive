@@ -413,7 +413,8 @@ open class SyncEngine(
     private fun detectMissingAfterFullSync(
         remoteChanges: MutableMap<String, CloudItem>,
         admittedLoserIds: Set<String> = emptySet(),
-    ) = remoteGather.detectMissingAfterFullSync(remoteChanges, admittedLoserIds)
+        gatherStartedAt: Instant,
+    ) = remoteGather.detectMissingAfterFullSync(remoteChanges, admittedLoserIds, gatherStartedAt)
 
     // #401: a path-addressed mutation on a collided path could hit either twin and
     // the action carries no remote id to aim it with. Skip; the action re-plans
@@ -1926,6 +1927,10 @@ open class SyncEngine(
         val storedCursor = if (retryIncompleteEnumeration) null else db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
         val isFullSync = cursor == null || provider.deltaIsFullListing
+        // #321: when the remote walk began — the absence sweep defers the deletion verdict
+        // for any row written after this instant, because these listing pages cannot have
+        // seen that write.
+        val gatherStartedAt = Instant.now()
         val changes = mutableMapOf<String, CloudItem>()
         // #401: the streaming path admits through the same collision winner-rule as
         // the buffered gather (see gatherRemoteChanges).
@@ -2362,7 +2367,7 @@ open class SyncEngine(
         val collisionLoserIds = reportGatheredCollisions(collisions, dryRun = false)
 
         if (isFullSync && allComplete) {
-            detectMissingAfterFullSync(changes, collisionLoserIds)
+            detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt)
         } else if (isFullSync) {
             val msg =
                 "UD-360: at least one delta page returned complete=false; " +

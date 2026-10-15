@@ -288,6 +288,10 @@ class RemoteGather(
         if (retryIncompleteEnumeration && db.getSyncState("last_gather_full") == "false") {
             db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let(db::completeScan)
         }
+        // #321: when the remote walk began. The absence sweep defers the deletion verdict
+        // for any row written after this instant — the listing pages that follow cannot
+        // have seen such a write.
+        val gatherStartedAt = Instant.now()
         val storedCursor = if (retryIncompleteEnumeration) null else db.getSyncState("delta_cursor")
         val cursor = storedCursor?.ifEmpty { null }
         var isFullSync = cursor == null || provider.deltaIsFullListing
@@ -609,7 +613,7 @@ class RemoteGather(
         val collisionLoserIds = reportCollisions(collisions, readOnly)
 
         if (isFullSync && allComplete) {
-            detectMissingAfterFullSync(changes, collisionLoserIds)
+            detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt)
         } else if (isFullSync) {
             val msg =
                 "UD-360: at least one delta page returned complete=false; " +
@@ -724,6 +728,7 @@ class RemoteGather(
     fun detectMissingAfterFullSync(
         remoteChanges: MutableMap<String, CloudItem>,
         admittedLoserIds: Set<String> = emptySet(),
+        gatherStartedAt: Instant,
     ) {
         val seenRemoteIds = remoteChanges.values.mapTo(mutableSetOf()) { it.id }
         // #401: a twin suppressed by the gather collision winner-rule keeps its DB row
@@ -732,6 +737,10 @@ class RemoteGather(
         // wrong-twin delete #402 closed. Suppressed ≠ deleted.
         seenRemoteIds.addAll(admittedLoserIds)
         pruneRecentlyUploaded()
+        // One boundary for the whole sweep: a stamp past this instant is a write that
+        // landed after the sweep began (the next full gather judges it), never one the
+        // walk could have seen.
+        val sweptAt = Instant.now()
 
         for (entry in db.getAllEntries()) {
             if (entry.remoteId == null) continue
@@ -743,6 +752,25 @@ class RemoteGather(
             val effectiveRemote = entry.remotePath ?: entry.path
             if (!guard.isTracked(effectiveRemote)) continue
             if (effectiveRemote in remoteChanges) continue
+
+            // #321: a write-back that landed while this gather walked — a mount upload
+            // during a multi-hour enumeration, or one whose in-memory grace mark a daemon
+            // restart lost — has its completion recorded on the row itself. The listing
+            // pages predate that write, so their silence about the path proves nothing
+            // yet: defer the verdict to the next full gather that starts after the row's
+            // write. Unlike the wall-clock grace below, this survives restarts and does
+            // not expire under a long gather. A stamp in the future is clock noise, not a
+            // mid-gather write (production never writes one); that row stays with the
+            // #301 watermark guard, which compares the stamp against the cache file.
+            val lastSynced = entry.lastSynced
+            if (lastSynced != null && !lastSynced.isAfter(sweptAt) && lastSynced.isAfter(gatherStartedAt)) {
+                log.debug(
+                    "Full sync: DB entry {} (remoteId={}) not in delta but its row was written after the gather started; deferring the deletion verdict",
+                    entry.path,
+                    entry.remoteId,
+                )
+                continue
+            }
 
             val uploadedAt = recentlyUploaded[effectiveRemote]
             if (uploadedAt != null) {
