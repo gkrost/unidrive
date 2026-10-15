@@ -7,14 +7,18 @@ import org.krost.unidrive.CapabilityResult
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
+import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
 import org.krost.unidrive.ScanContext
 import org.slf4j.LoggerFactory
 import java.io.FileNotFoundException
+import java.io.IOException
 import java.nio.channels.FileChannel
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
@@ -50,7 +54,17 @@ class LocalFsProvider(root: Path) : CloudProvider {
         setOf(Capability.Delta, Capability.QuotaExact, Capability.VerifyItem)
 
     override suspend fun authenticate() {
-        withContext(Dispatchers.IO) { Files.createDirectories(rootNorm) }
+        withContext(Dispatchers.IO) {
+            Files.createDirectories(rootNorm)
+            // #910: the account is a two-way mirror, so "authenticated" has to mean the root is
+            // actually usable, not merely present — a profile pointed at an unreadable or
+            // read-only directory must fail here with its token instead of surfacing later as
+            // a mysterious `io` error on the first transfer.
+            val token = RootAccess.validate(rootNorm)
+            if (token != null) {
+                throw ProviderException("localfs $token: $rootNorm is not usable as a sync root")
+            }
+        }
         isAuthenticated = true
         log.debug("localfs authenticated, root={}", rootNorm)
     }
@@ -218,13 +232,21 @@ class LocalFsProvider(root: Path) : CloudProvider {
 
     /**
      * Full-walk enumeration. localfs has no native change feed, so every call
-     * returns the complete current inventory under [root]. `complete = true`
-     * keeps the engine's absence-implies-deletion sweep enabled (the full set
-     * is authoritative); the [cursor] is advisory (a wall-clock stamp) and
-     * ignored on the next call. Folders are emitted before/with their children
-     * via the natural pre-order walk.
+     * returns the current inventory under [root]. The walk is tolerant (#910): a
+     * directory that cannot be read (an NTFS `$RECYCLE.BIN` per-SID folder, a
+     * `System Volume Information`) is skipped, logged (once per path), and the
+     * page comes back `complete = false` — the engine must not infer deletions
+     * for a part of the tree it never saw. The well-known Windows system folders
+     * are skipped by policy even when readable, without flipping the page
+     * incomplete: they are never meant to sync. The [cursor] is advisory (a
+     * wall-clock stamp) and ignored on the next call. Folders are emitted
+     * before/with their children via the natural pre-order walk.
      */
     override val deltaIsFullListing: Boolean get() = true
+
+    /** The paths the last [delta] skipped, oldest first, capped at twenty. */
+    var lastDeltaSkippedPaths: List<String> = emptyList()
+        private set
 
     override suspend fun delta(
         cursor: String?,
@@ -233,22 +255,118 @@ class LocalFsProvider(root: Path) : CloudProvider {
     ): DeltaPage =
         withContext(Dispatchers.IO) {
             val items = mutableListOf<CloudItem>()
+            val skips = DeltaSkips()
             if (Files.exists(rootNorm)) {
-                // Files.walk doesn't follow symlinks but still yields the link entry itself;
-                // skip any entry whose real path escapes the root (see withinRoot).
-                Files.walk(rootNorm).use { stream ->
-                    stream.forEach { path ->
-                        val norm = path.toAbsolutePath().normalize()
-                        if (norm != rootNorm && withinRoot(path)) {
-                            items.add(toItem(path))
-                            if (items.size % 500 == 0) onPageProgress?.invoke(items.size)
+                // walkFileTree instead of Files.walk: a stream throws out of forEach on the
+                // first unreadable directory and aborts the whole listing; the visitor skips
+                // the entry (visitFileFailed) and lets the rest through.
+                Files.walkFileTree(
+                    rootNorm,
+                    object : SimpleFileVisitor<Path>() {
+                        override fun preVisitDirectory(
+                            dir: Path,
+                            attrs: BasicFileAttributes,
+                        ): FileVisitResult {
+                            val norm = dir.toAbsolutePath().normalize()
+                            if (norm == rootNorm) return FileVisitResult.CONTINUE
+                            val name = norm.fileName.toString()
+                            if (systemFolderNames.any { it.equals(name, ignoreCase = true) }) {
+                                skips.policySkip(norm)
+                                return FileVisitResult.SKIP_SUBTREE
+                            }
+                            // A symlink whose real path escapes the root is a policy skip (see
+                            // withinRoot); an unreadable directory is an incomplete one.
+                            if (!withinRoot(dir)) return FileVisitResult.SKIP_SUBTREE
+                            try {
+                                items.add(toItem(dir))
+                            } catch (e: IOException) {
+                                skips.unreadable(norm, e)
+                            }
+                            return FileVisitResult.CONTINUE
                         }
-                    }
-                }
+
+                        override fun visitFile(
+                            file: Path,
+                            attrs: BasicFileAttributes,
+                        ): FileVisitResult {
+                            if (withinRoot(file)) {
+                                try {
+                                    items.add(toItem(file))
+                                    if (items.size % 500 == 0) onPageProgress?.invoke(items.size)
+                                } catch (e: IOException) {
+                                    skips.unreadable(file.toAbsolutePath().normalize(), e)
+                                }
+                            }
+                            return FileVisitResult.CONTINUE
+                        }
+
+                        override fun visitFileFailed(
+                            file: Path,
+                            e: IOException,
+                        ): FileVisitResult {
+                            skips.unreadable(file.toAbsolutePath().normalize(), e)
+                            return FileVisitResult.CONTINUE
+                        }
+                    },
+                )
             }
+            skips.summarize()
+            lastDeltaSkippedPaths = skips.names
             onPageProgress?.invoke(items.size)
-            DeltaPage(items = items, cursor = System.currentTimeMillis().toString(), hasMore = false, complete = true)
+            DeltaPage(
+                items = items,
+                cursor = System.currentTimeMillis().toString(),
+                hasMore = false,
+                complete = !skips.hasUnreadable,
+            )
         }
+
+    /** Windows folders that exist on every drive and are never meant to be synced. */
+    private val systemFolderNames = setOf("\$RECYCLE.BIN", "System Volume Information")
+
+    private val skipNamesKept = 20
+
+    /**
+     * Skips of one walk. A policy skip (system folder, symlink escape) is deliberate; an
+     * unreadable entry means part of the tree is unknown and the page must not read as
+     * complete. Paths are recorded once each, capped so a hostile tree cannot grow the
+     * list without bound.
+     */
+    private inner class DeltaSkips {
+        private val seen = linkedSetOf<String>()
+        var hasUnreadable = false
+            private set
+
+        val names: List<String> get() = seen.toList()
+
+        fun policySkip(path: Path) {
+            record(path)
+            log.debug("localfs: skipping {} (system folder or outside the real root)", path)
+        }
+
+        fun unreadable(
+            path: Path,
+            e: IOException,
+        ) {
+            hasUnreadable = true
+            if (record(path)) {
+                log.warn("localfs: skipping unreadable path {} ({}); this enumeration is incomplete", path, e.message)
+            }
+        }
+
+        fun summarize() {
+            if (hasUnreadable) {
+                log.warn(
+                    "localfs: enumeration skipped {} unreadable path(s), first: {}; reporting the listing as incomplete",
+                    seen.size,
+                    seen.take(5),
+                )
+            }
+        }
+
+        private fun record(path: Path): Boolean =
+            if (seen.size < skipNamesKept) seen.add(path.toString()) else false
+    }
 
     override suspend fun verifyItemExists(remoteId: String): CapabilityResult<Boolean> =
         CapabilityResult.Success(withContext(Dispatchers.IO) { Files.exists(toLocal(remoteId)) })
