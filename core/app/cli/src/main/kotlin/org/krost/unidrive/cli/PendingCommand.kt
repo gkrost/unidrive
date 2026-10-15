@@ -19,7 +19,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
 import java.time.Instant
-import kotlin.io.path.exists
 import kotlin.io.path.fileSize
 
 /**
@@ -228,7 +227,7 @@ class PendingCommand {
 
         fun cacheSize(path: String): Long? {
             val file = cachePath(path)
-            if (!file.exists()) return null
+            if (Files.notExists(file)) return null
             if (!Files.isRegularFile(file)) throw LifecycleError("cache_unreadable", "cache path of '$path' is not a regular file")
             return try {
                 file.fileSize()
