@@ -26,6 +26,10 @@ private const val RESUMED_RATIO_FAIL = 1.5
 
 private const val PAGE_SIZE = 1_000
 
+// The explicit collections are the probe's whole point: the reading must be the live set, not whatever
+// the last natural collection left. The double call with the sleeps lets finalizers and reference
+// processing settle between passes.
+@Suppress("ExplicitGarbageCollectionCall")
 private fun retainedMib(keepAlive: Any, block: () -> Unit): Long {
     block()
     // A forced collection so the reading is the live set, not whatever the last collection left. The
@@ -192,7 +196,7 @@ fun main(args: Array<String>) {
         val ratio = if (fresh == 0L) Double.NaN else resumed.toDouble() / fresh
         println(
             "$n | $fresh | ${fresh * 1_048_576 / n} | $resumed | ${resumed * 1_048_576 / n} | " +
-                String.format("%.2f", ratio),
+                String.format(java.util.Locale.ROOT, "%.2f", ratio),
         )
         if (ratio > RESUMED_RATIO_FAIL) {
             println("FAIL: the resumed variant retains more than $RESUMED_RATIO_FAIL x the fresh variant at $n items")
