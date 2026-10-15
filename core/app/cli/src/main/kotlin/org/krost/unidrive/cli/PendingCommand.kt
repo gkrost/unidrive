@@ -8,6 +8,7 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.sync.IpcServer
+import org.krost.unidrive.sync.ProcessLock
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import picocli.CommandLine.Command
@@ -16,7 +17,6 @@ import picocli.CommandLine.Parameters
 import picocli.CommandLine.ParentCommand
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 import java.time.Duration
 import java.time.Instant
 import kotlin.io.path.exists
@@ -55,7 +55,7 @@ class PendingCommand {
                 if (rows.isEmpty()) {
                     if (json) emitJson(buildJsonObject { put("ok", true); put("count", 0) }) else println("No pending upload rows.")
                 } else if (json) {
-                    emitJson(rowsJson(rows, env.now))
+                    emitJson(rowsJson(rows, env.now, env::cacheSize))
                 } else {
                     println("Pending upload rows (${rows.size}):")
                     for (row in rows) {
@@ -103,8 +103,10 @@ class PendingCommand {
                     if (json) emitJson(dropJson(emptyList(), emptyList(), null)) else println("Nothing to drop.")
                     return 0
                 }
-                println("Would drop ${selected.size} row(s):")
-                selected.forEach { println("  ${it.path}  size=${it.localSize ?: "?"}") }
+                if (!json) {
+                    println("Would drop ${selected.size} row(s):")
+                    selected.forEach { println("  ${it.path}  size=${it.localSize ?: "?"}") }
+                }
                 if (!yes) {
                     if (json) throw LifecycleError("confirmation_required", "--yes is required with --json; the command never prompts")
                     print("Drop these rows? [y/N] ")
@@ -114,24 +116,31 @@ class PendingCommand {
                         return 0
                     }
                 }
-                val movedTo = if (selected.any { env.cacheHasContent(it.path) }) env.reserveAsideFolder() else null
                 val dropped = mutableListOf<String>()
                 val moved = mutableListOf<Pair<String, Path>>()
-                for (row in selected) {
-                    val hasContent = env.cacheHasContent(row.path)
-                    if (hasContent && movedTo != null) {
-                        val target = movedTo.resolve(row.path.removePrefix("/"))
-                        Files.createDirectories(target.parent)
-                        // The move happens BEFORE the row goes: a failure here leaves the row intact.
-                        Files.move(env.cachePath(row.path), target, StandardCopyOption.REPLACE_EXISTING)
-                        moved += row.path to target
+                var movedTo: Path? = null
+                env.withDropLock {
+                    // A prompt may have been open while another CLI ran. Recheck every row under the lock.
+                    val pending = env.readRows().mapTo(mutableSetOf()) { it.path }
+                    for (row in selected) {
+                        if (row.path !in pending) continue
+                        val hasContent = env.cacheHasContent(row.path)
+                        if (hasContent) {
+                            val aside = movedTo ?: env.reserveAsideFolder().also { movedTo = it }
+                            val target = CachePaths.resolveInside(aside, row.path)
+                            Files.createDirectories(target.parent)
+                            // The move happens BEFORE the row goes: a failure here leaves the row intact.
+                            Files.move(env.cachePath(row.path), target)
+                            moved += row.path to target
+                        }
+                        if (env.deleteLocalRow(row.path)) dropped += row.path
                     }
-                    if (env.deleteLocalRow(row.path)) dropped += row.path
                 }
-                movedTo?.let { aside -> if (moved.isEmpty() && aside.toFile().list().isNullOrEmpty()) Files.deleteIfExists(aside) }
-                println("Dropped ${dropped.size} row(s).")
-                moved.forEach { (path, target) -> println("  cache of $path moved to $target") }
-                println("Changed rows are logged above; the command is safe to run again.")
+                if (!json) {
+                    println("Dropped ${dropped.size} row(s).")
+                    moved.forEach { (path, target) -> println("  cache of $path moved to $target") }
+                    println("Changed rows are logged above; the command is safe to run again.")
+                }
                 if (json) emitJson(dropJson(dropped, moved.map { it.first }, movedTo))
                 0
             } catch (e: LifecycleError) {
@@ -164,6 +173,19 @@ class PendingCommand {
         private val cacheRoot: Path =
             SyncEngine.hydrationCacheRoot(SyncEngine.defaultHydrationCacheRoot(), profile.name)
 
+        fun <T> withDropLock(block: () -> T): T {
+            val lock = ProcessLock(profileDir.resolve(".lock"))
+            if (!lock.tryLock(ProcessLock.Mode.SYNC)) {
+                val token = if (ProfileRemover.holderOf(profileDir, socketPath) == ProfileRemover.Holder.DAEMON) "daemon_running" else "profile_in_use"
+                throw LifecycleError(token, "profile '${profile.name}' became busy; nothing was dropped")
+            }
+            try {
+                return block()
+            } finally {
+                lock.unlock()
+            }
+        }
+
         /** The read-only state.db, or null when it cannot be opened or initialised (locked, corrupt, unexpected schema) —
          * the same trio the read-only reads of `profile remove` accept as "nothing can be said about it". */
         private fun openReadOnly(): StateDatabase? =
@@ -190,29 +212,47 @@ class PendingCommand {
             }
         }
 
-        /** The cache file of a logical path, or the cache root itself when the path does not resolve inside it. */
+        /** Refuse malformed row paths: the cache root is never a file to move aside. */
         fun cachePath(path: String): Path =
-            runCatching { CachePaths.resolveInside(cacheRoot, path) }.getOrDefault(cacheRoot)
+            try {
+                CachePaths.resolveInside(cacheRoot, path).also {
+                    if (it.toAbsolutePath().normalize() == cacheRoot.toAbsolutePath().normalize()) {
+                        throw SecurityException("path resolves to the cache root")
+                    }
+                }
+            } catch (e: IllegalArgumentException) {
+                throw LifecycleError("cache_path_invalid", "pending row has an invalid cache path", e)
+            } catch (e: SecurityException) {
+                throw LifecycleError("cache_path_invalid", "pending row has an invalid cache path", e)
+            }
+
+        fun cacheSize(path: String): Long? {
+            val file = cachePath(path)
+            if (!file.exists()) return null
+            if (!Files.isRegularFile(file)) throw LifecycleError("cache_unreadable", "cache path of '$path' is not a regular file")
+            return try {
+                file.fileSize()
+            } catch (e: java.io.IOException) {
+                throw LifecycleError("cache_unreadable", "cache path of '$path' could not be read", e)
+            }
+        }
 
         fun cacheHasContent(path: String): Boolean {
-            val file = cachePath(path)
-            return file.exists() && file.fileSize() > 0
+            return (cacheSize(path) ?: 0) > 0
         }
 
         fun cacheState(path: String): String {
-            val file = cachePath(path)
-            return when {
-                !file.exists() -> "missing"
-                file.fileSize() == 0L -> "empty"
-                else -> "content(${file.fileSize()}B)"
+            val size = cacheSize(path)
+            return when (size) {
+                null -> "missing"
+                0L -> "empty"
+                else -> "content(${size}B)"
             }
         }
 
         /** The folder a dropped row's non-empty cache copy is moved to: a sibling of the cache, never the sync root. */
         fun reserveAsideFolder(): Path =
-            Files.createDirectories(
-                cacheRoot.resolveSibling("dropped-pending-" + now.toString().replace(':', '-')),
-            )
+            Files.createTempDirectory(cacheRoot.parent, "dropped-pending-")
 
         /** Deletes the row only while it is still a `local:` pending row; the database re-checks. */
         fun deleteLocalRow(path: String): Boolean {
@@ -230,6 +270,7 @@ class PendingCommand {
         fun rowsJson(
             rows: List<StateDatabase.PendingRowDetail>,
             now: Instant,
+            cacheSize: (String) -> Long?,
         ): JsonObject =
             buildJsonObject {
                 put("ok", true)
@@ -241,6 +282,9 @@ class PendingCommand {
                                 put("path", row.path)
                                 put("remote_id", row.remoteId)
                                 put("local_size", row.localSize)
+                                val size = cacheSize(row.path)
+                                put("cache_present", size != null)
+                                put("cache_size", size)
                                 put("age_ms", Duration.between(row.lastSynced, now).toMillis())
                                 put("last_error_at", row.lastErrorAt?.toString())
                             },

@@ -137,6 +137,8 @@ class PendingCommandTest {
         // The row object carries the same facts the text shows.
         assertTrue("\"/stuck.txt\"" in row.toString(), row.toString())
         assertTrue("\"local_size\":42" in row.toString(), row.toString())
+        assertTrue("\"cache_present\":true" in row.toString(), row.toString())
+        assertTrue("\"cache_size\":5" in row.toString(), row.toString())
     }
 
     @Test
@@ -161,6 +163,30 @@ class PendingCommandTest {
 
         assertEquals(0, run("drop", "/drop/", "--yes"))
         assertTrue("Nothing to drop." in out.toString(Charsets.UTF_8), "the second run changes nothing")
+    }
+
+    @Test
+    fun `drop json emits one parseable object`() {
+        seedRow("/drop/x.txt")
+        assertEquals(0, run("drop", "/drop/", "--yes", "--json"))
+        val json = Json.parseToJsonElement(out.toString(Charsets.UTF_8)).jsonObject
+        assertEquals(1, json.getValue("dropped").jsonPrimitive.long)
+    }
+
+    @Test
+    fun `an invalid row path cannot move the cache root`() {
+        seedRow("/")
+        seedCache("/child.txt", "preserve")
+
+        assertEquals(1, run("drop", "/", "--yes"))
+        assertTrue(Files.exists(cacheRoot.resolve("child.txt")))
+        val db = StateDatabase(profileDir.resolve("state.db"))
+        try {
+            db.initialize()
+            assertTrue(db.getEntry("/") != null)
+        } finally {
+            db.close()
+        }
     }
 
     @Test
