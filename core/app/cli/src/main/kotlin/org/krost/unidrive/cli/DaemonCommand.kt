@@ -103,6 +103,7 @@ class DaemonRunCommand : Runnable {
             syncPaths = config.syncPaths,
             excludePatterns = config.effectiveExcludePatterns(profile.name),
             ignoreSettings = config.ignoreSettings(profile.name),
+            trashFolderName = config.trashFolderName(profile.name),
             pollIntervalMs = pollIntervalMs,
             // #891: the health line, one INFO line per minute in unidrive.log.
             healthIntervalMs = 60_000,

@@ -328,6 +328,20 @@ Read-only verb; takes no parameters; never returns `ok: false` (a daemon that ca
 | `last_error_code` | #878: a machine-readable cause for the failure, until a success: `http_<status>` for an API error (`http_408`), `auth_rejected` when the provider refused the credentials, otherwise the transport class (`timeout`, `dns`, `tls`, `connect`, `reset`, `io`). Absent when unknown; the field is additive and the wording stays the client's |
 | `next_attempt_at_ms` | while `failed` and the poller runs: when it tries again (epoch ms, the jittered sleep it takes) |
 
+**The `trash` object** (additive; the protocol version does not change) is present only while something is in the
+provider's trash, which the engine shows apart in a read-only virtual folder (ipc-write-protocol.md section 4.1). Absent
+means there is none.
+
+```json
+{"trash": {"root_path": "/Papierkorb", "folder_name": "Papierkorb", "configured_name": "Papierkorb"}}
+```
+
+| field | meaning |
+|---|---|
+| `root_path` | where the folder is now. Everything at and below it is read-only; its `hydration.list` entry carries `trash_root:true` |
+| `folder_name` | its name on disk. It differs from `configured_name` (`Papierkorb (2)`, `(3)`, ...) while a live top-level item already has that name: the live item keeps it, and the engine logs the collision once |
+| `configured_name` | the name the profile asks for (`trash_folder_name`, set from the client's language with `profile set`; `Papierkorb` when unset) |
+
 The reply also carries `poll_interval_ms` (additive, #463): the effective interval of the remote poll in ms, `0` when it is off. The poll's schedule after a failure is `enumeration.next_attempt_at_ms`.
 
 A running enumeration is answered from memory, never from state.db, so a status request does not wait for the batch that saves the result.

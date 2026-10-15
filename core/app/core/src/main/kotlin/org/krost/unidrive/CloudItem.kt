@@ -32,4 +32,11 @@ data class CloudItem(
     // local name stays and later operations address the item under its server name. False for every item a
     // caller did not ask to place under another name, and for a keep-both copy named by the server.
     val nameOverridden: Boolean = false,
+    // The item is live, but it sits in the provider's trash: a folder above it was trashed (Internxt trashes a folder
+    // and leaves what is in it as it was, so the items below keep reporting `EXISTS`), or it is such a folder itself
+    // while something live is below it. [path] is where the provider's own tree has it, the original place; the engine
+    // shows these items apart, under the trash namespace (see `TrashNamespace`), and never writes to them. Distinct from
+    // [deleted], which says the item is gone: a trashed item is still there, to be read and copied out. False for every
+    // provider that does not report it.
+    val trashed: Boolean = false,
 )

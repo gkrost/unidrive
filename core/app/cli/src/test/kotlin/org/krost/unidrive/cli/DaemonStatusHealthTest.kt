@@ -58,6 +58,10 @@ class DaemonStatusHealthTest {
 
     private class FlakyProvider : CloudProvider {
         val outage = AtomicBoolean(false)
+
+        // What the next listing reports (the trash test puts a trashed item here).
+        @Volatile
+        var items: List<CloudItem> = emptyList()
         override val id: String = "stub"
         override val displayName: String = "Stub"
         override var isAuthenticated: Boolean = true
@@ -92,7 +96,7 @@ class DaemonStatusHealthTest {
             scanContext: org.krost.unidrive.ScanContext?,
         ): DeltaPage {
             if (outage.get()) throw ProviderException("the provider is unreachable")
-            return DeltaPage(items = emptyList(), cursor = "cursor-1", hasMore = false)
+            return DeltaPage(items = items, cursor = "cursor-1", hasMore = false)
         }
 
         override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
@@ -103,6 +107,7 @@ class DaemonStatusHealthTest {
         mode: ProfileMode = ProfileMode.MOUNT,
         excludePatterns: List<String> = emptyList(),
         cacheBudget: Long = HydrationImpl.DEFAULT_CACHE_MAX_BYTES,
+        trashFolderName: String? = null,
     ) = DaemonRuntime(
         profileMode = mode,
         profileName = "test_profile",
@@ -114,6 +119,7 @@ class DaemonStatusHealthTest {
         providerHasQuota = false,
         excludePatterns = excludePatterns,
         hydrationCacheMaxBytes = cacheBudget,
+        trashFolderName = trashFolderName,
     )
 
     private fun status(): JsonObject {
@@ -285,6 +291,32 @@ class DaemonStatusHealthTest {
                 failed.getValue("provider_health").jsonObject.getValue("last_contact_ms").jsonPrimitive.long,
                 "the outage does not move the last successful contact",
             )
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    @Test
+    fun `the trash is in the status once something is in it, under the name the profile asks for`() = runBlocking {
+        val provider =
+            FlakyProvider().apply {
+                items = listOf(CloudItem("t1", "a.txt", "/Old/a.txt", 1, false, null, null, null, null, trashed = true))
+            }
+        val runtime = runtime(provider, trashFolderName = "Corbeille")
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+        try {
+            assertFalse("trash" in status(), "nothing is in the trash before the first listing: the key is absent")
+
+            send("""{"verb":"sync.enumerate"}""")
+            val s = awaitStatus("a trash") { "trash" in it }
+
+            val trash = s.getValue("trash").jsonObject
+            assertEquals(setOf("root_path", "folder_name", "configured_name"), trash.keys)
+            assertEquals("/Corbeille", trash.getValue("root_path").jsonPrimitive.content)
+            assertEquals("Corbeille", trash.getValue("folder_name").jsonPrimitive.content)
+            assertEquals("Corbeille", trash.getValue("configured_name").jsonPrimitive.content)
         } finally {
             runtime.close()
             daemonJob.join()

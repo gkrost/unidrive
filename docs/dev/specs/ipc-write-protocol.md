@@ -222,6 +222,32 @@ that would need a download with `{"ok":false,"error":"excluded"}`, preceded by
 `skipped` and a `completed ok:false error:excluded`, never `failed`. `ls` marks excluded rows and `get` skips excluded
 paths rather than downloading them.
 
+### 4.1 The trash namespace is read-only
+
+When the provider keeps live items in its trash (Internxt: the items below a trashed folder keep reporting `EXISTS`), the
+engine shows them apart, in a virtual top-level folder (default name `Papierkorb`, profile key `trash_folder_name`, set by
+the client from the user's language). The root folder and everything below it is **read-only**; an item there keeps the
+path it has in the provider's own tree below the root, so the user sees where it came from. The engine is the guarantee:
+it never sends an upload, a delete, a move or a rename for such a path to the cloud, ignores local changes there, and a
+local delete does not become a remote delete. Reading, hydrating and copying out work as everywhere else.
+
+`hydration.list` entries carry the machine-readable marker, so a client can refuse the action before it asks (a courtesy:
+the engine refuses anyway):
+
+| field | meaning |
+|---|---|
+| `"read_only":true` | the entry is the trash root or lies below it. Absent otherwise (a reply for a live item is unchanged) |
+| `"trash_root":true` | the entry is the root folder itself: label it and give it an icon of its own. Its `remote_id` is the stable key `unidrive:trash`, whatever the folder is called. Absent otherwise |
+
+Every verb that would write answers `{"ok":false,"error":"read_only"}` before anything is touched or queued: `create`,
+`mkdir`, `unlink`, `rmdir`, `rename` (either end, so nothing moves in, out or within), `open_write_begin` and
+`open_write`. A file edited in the namespace behind the engine's back keeps its bytes (a refusal is not a delete); the
+engine uploads nothing for it. `daemon.status` carries a `trash` object while something is in the trash
+([unidrive-daemon-design.md](unidrive-daemon-design.md) section 4.3).
+
+An item that was shown among the live items by an earlier version arrives under the root with the same `remote_id`: it is a
+rename (`view.invalidated` carries it in `moved`), never a delete and a create, and its cache copy follows the row.
+
 ## 5. Cancel
 
 `hydration.cancel {path}` aborts every in-flight submission for the path —
@@ -281,6 +307,7 @@ still leave a remote item; the caller follows with the row-level verb
 | `conflict` | open_write | base_etag no longer matches the row |
 | `invalid_path` | open_write (`cache_path`) | the cache path lies outside the profile's hydration cache folder, or is not a valid local path; refused before anything is queued |
 | `outside_scope` | create, mkdir, rename (both ends), open_write_begin | path outside the profile's sync_path set |
+| `read_only` | create, mkdir, unlink, rmdir, rename (either end), open_write_begin, open_write | the path is the trash root or lies below it (section 4.1); nothing was touched or queued |
 | `busy` | dehydrate, replace-rename | an upload is in flight on that path |
 | `excluded` | completed event | keep-local name, never uploaded |
 | `cancelled` | completed event | upload aborted by hydration.cancel |
@@ -318,7 +345,8 @@ folder from its own authority — it would desync from the rows.
 - Sequences (this document §3), at the SPI level against a real
   `HydrationImpl` + engine: the full write sequence and the safe-save
   replace-rename sequence in `HydrationUploadQueueTest`; scope refusals and
-  the keep-local excluded sequence in `HydrationScopeAndExclusionTest`;
+  the keep-local excluded sequence in `HydrationScopeAndExclusionTest`; the read-only trash
+  in `HydrationReadOnlyTrashTest`;
   cancel, progress, and replay sequences in `HydrationUploadProgressAndCancelTest`
   and `HydrationUploadQueueTest`; the recovery-<n> handle contract in
   `HydrationImplTest`.

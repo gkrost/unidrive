@@ -78,6 +78,20 @@ class ReapGuardsTest {
     }
 
     @Test
+    fun `a folder row has no bytes to lose and its cache directory moving is not an edit`() {
+        // The cache entry of a folder is a directory, and its time moves with whatever is put into it or taken out of it.
+        val folder = cacheRoot.resolve("dir")
+        Files.createDirectories(folder)
+        Files.setLastModifiedTime(folder, FileTime.from(watermark.plusSeconds(60)))
+
+        assertFalse(guards().holdsUnsyncedEdit("/dir", row("/dir").copy(isFolder = true)))
+        assertTrue(
+            guards().holdsUnsyncedEdit("/dir", row("/dir", remoteId = null).copy(isFolder = true)),
+            "a folder that never reached the cloud is still owed to it",
+        )
+    }
+
+    @Test
     fun `no cache copy and no upload under way is not`() {
         assertFalse(guards().holdsUnsyncedEdit("/absent.txt", row("/absent.txt")))
     }

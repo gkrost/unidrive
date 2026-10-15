@@ -397,7 +397,8 @@ class ProfileListCommand : Callable<Int> {
         names = ["--json"],
         description = [
             "Print the profiles as one JSON object: {\"default_profile\":...,\"profiles\":[{name, type, mode, label, " +
-                "sync_root, sync_path, hydration_cache_max_bytes, daemon_poll_seconds, honor_gitignore, ignore_rules, auth}]}. " +
+                "sync_root, sync_path, hydration_cache_max_bytes, daemon_poll_seconds, honor_gitignore, ignore_rules, " +
+                "trash_folder_name, auth}]}. " +
                 "Read-only; unknown values are null, never a made-up default (honor_gitignore and ignore_rules " +
                 "report their effective default, false and [], when unset).",
         ],

@@ -157,6 +157,49 @@ class HydrationIpcHandlerTest {
         assertTrue(reply.contains("\"folder\":true"), "reply was $reply")
     }
 
+    // The trash namespace: `read_only` on the root and everything below it, `trash_root` on the root, both only when true
+    // (additive: a reply for a live item is byte-identical to what it was); the write verbs answer the `read_only` token.
+    @Test
+    fun `list verb names read_only and trash_root on the trash namespace and nothing on a live item`() = runTest {
+        val env = HydrationTestEnv()
+        env.trash.place(
+            listOf(org.krost.unidrive.CloudItem("t1", "a.txt", "/Old/a.txt", 1, false, null, null, null, null, trashed = true)),
+        ) { emptyList() }
+        env.stateDb.insertFolderEntry("/Papierkorb")
+        env.stateDb.insertUnhydratedEntry("/Live.txt", remoteSize = 3)
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val top = handler.handle("conn1", """{"verb":"hydration.list","prefix":"/"}""")
+
+        val root = top.substringAfter("{\"path\":\"/Papierkorb\"").substringBefore("}")
+        val live = top.substringAfter("{\"path\":\"/Live.txt\"").substringBefore("}")
+        assertTrue(root.contains("\"read_only\":true") && root.contains("\"trash_root\":true"), "root: $root")
+        assertFalse(live.contains("read_only") || live.contains("trash_root"), "a live item says nothing: $live")
+    }
+
+    @Test
+    fun `the write verbs answer the read_only token for the trash namespace`() = runTest {
+        val env = HydrationTestEnv()
+        env.trash.place(
+            listOf(org.krost.unidrive.CloudItem("t1", "a.txt", "/Old/a.txt", 1, false, null, null, null, null, trashed = true)),
+        ) { emptyList() }
+        env.stateDb.insertFolderEntry("/Papierkorb")
+        env.stateDb.insertUnhydratedEntry("/Papierkorb/a.txt", remoteSize = 3)
+        val handler = HydrationIpcHandler(env.hydration)
+
+        val replies =
+            listOf(
+                """{"verb":"hydration.mkdir","path":"/Papierkorb/x"}""",
+                """{"verb":"hydration.create","handle_id":"h","path":"/Papierkorb/x.txt"}""",
+                """{"verb":"hydration.unlink","path":"/Papierkorb/a.txt"}""",
+                """{"verb":"hydration.rmdir","path":"/Papierkorb"}""",
+                """{"verb":"hydration.rename","old_path":"/Papierkorb/a.txt","new_path":"/b.txt"}""",
+                """{"verb":"hydration.open_write_begin","path":"/Papierkorb/a.txt"}""",
+            ).map { handler.handle("conn1", it).trim() }
+
+        assertEquals(List(replies.size) { """{"ok":false,"error":"read_only"}""" }, replies)
+    }
+
     @Test
     fun `list verb returns empty array for empty prefix`() = runTest {
         val env = HydrationTestEnv()

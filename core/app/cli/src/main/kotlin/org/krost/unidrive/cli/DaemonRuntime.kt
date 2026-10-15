@@ -11,6 +11,8 @@ import kotlinx.coroutines.withContext
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.authenticateAndLog
+import org.krost.unidrive.engine.ReadOnlyTrashProvider
+import org.krost.unidrive.engine.TrashNamespace
 import org.krost.unidrive.hydration.HydrationEvent
 import org.krost.unidrive.hydration.HydrationImpl
 import org.krost.unidrive.hydration.HydrationIpcHandler
@@ -101,6 +103,9 @@ class DaemonRuntime(
     // #660: the profile's ignore rules (honor_gitignore, ignore_rules). A mount daemon applies them to its uploads and
     // reports them (daemon.status `ignore`, ignore.explain); null = off, the built-in excludes stay plain patterns.
     private val ignoreSettings: IgnoreSettings? = UploadIgnore.settingsFor(honorGitignore = false, accountRules = emptyList()),
+    // The profile's trash_folder_name: the name of the read-only virtual folder that shows the provider's trash. Null =
+    // the default, "Papierkorb".
+    private val trashFolderName: String? = null,
     // How a start that loses the profile lock ends the process (a seam for tests, which cannot exit).
     private val exitProcess: (Int) -> Unit = { code -> System.exit(code) },
     // #678: where the startup replay and the cache sweep run their blocking per-record walks.
@@ -182,7 +187,10 @@ class DaemonRuntime(
             quotaSnapshot = readCachedQuotaSnapshot(db!!)
 
             // 4. Authenticate. NO socket is bound until this succeeds.
-            val provider = providerFactory()
+            // The trash namespace is read-only: this wrapper is the last line of that rule, whichever part of the
+            // engine starts a write (the same namespace is handed to the engine, whose guard and planner ask it too).
+            val trash = TrashNamespace(trashFolderName)
+            val provider = ReadOnlyTrashProvider(providerFactory(), trash)
             try {
                 provider.authenticateAndLog()
             } catch (e: Exception) {
@@ -240,7 +248,7 @@ class DaemonRuntime(
                 // invalidation event originates outside the per-path hydration lifecycle.
                 val engine = SyncEngine(
                     provider, db!!, syncRoot = syncRoot, cacheKey = profileName, syncPaths = syncPaths,
-                    standingScope = syncPaths, excludePatterns = excludePatterns,
+                    standingScope = syncPaths, excludePatterns = excludePatterns, trashNamespace = trash,
                     mountIgnore = ignoreSettings.takeIf { profileMode == ProfileMode.MOUNT },
                     uploadInFlight = hydrationLink::hasUploadSlot,
                     viewInvalidationSink = { changedPaths, full, moved ->
@@ -598,6 +606,10 @@ class DaemonRuntime(
                         // ignore (#660): present where the ignore rules apply (a mount profile); held_back counts the folders
                         // whose uploads wait for a rule file that cannot be read.
                         (engine.uploadIgnore?.let { ",\"ignore\":${ignoreHealthJson(it.heldBack())}" } ?: "") +
+                        // trash: present only while something is in the provider's trash. The read-only folder that shows it,
+                        // by the path it has now, the name it has on disk (suffixed when a live top-level item holds the
+                        // configured name) and the name the profile asks for (trash_folder_name).
+                        (trash.rootPath()?.let { ",\"trash\":${trashStatusJson(it, trash.configuredName)}" } ?: "") +
                         // paused (#778): present only while the daemon is paused; uploads and quota above keep reporting.
                         (pause.current?.let { ",\"paused\":${it.toJson()}" } ?: "") +
                         "}"

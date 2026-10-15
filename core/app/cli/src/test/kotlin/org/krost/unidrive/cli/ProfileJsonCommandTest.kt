@@ -511,6 +511,46 @@ class ProfileJsonCommandTest {
         assertEquals(twoProfiles, config())
     }
 
+    // -- profile set / list: the name of the read-only trash folder --------------------------------
+
+    @Test
+    fun `a profile without a trash folder name lists null, never a made-up default`() {
+        writeConfig(twoProfiles)
+
+        assertEquals(JsonNull, listed("work").getValue("trash_folder_name"))
+    }
+
+    @Test
+    fun `set trash_folder_name sets the name a client chose from its language, reports the old one and leaves the rest byte for byte`() {
+        writeConfig(twoProfiles)
+
+        assertEquals(0, run("profile", "set", "work", "trash_folder_name", "Corbeille", "--json"), stderr())
+        val r = json()
+        assertTrue(r.getValue("ok").jsonPrimitive.boolean)
+        assertEquals("Corbeille", r.getValue("value").jsonPrimitive.content)
+        assertEquals(JsonNull, r.getValue("previous"))
+        assertTrue(r.getValue("restart_required").jsonPrimitive.boolean, "the daemon reads it at start")
+        assertEquals(twoProfiles.replace(withPoll, withPoll + "trash_folder_name = \"Corbeille\"\n"), config())
+        assertEquals("Corbeille", listed("work").getValue("trash_folder_name").jsonPrimitive.content)
+
+        assertEquals(0, run("profile", "set", "work", "trash_folder_name", "  Papelera de reciclaje ", "--json"), stderr())
+        assertEquals("Corbeille", json().getValue("previous").jsonPrimitive.content)
+        assertEquals("Papelera de reciclaje", json().getValue("value").jsonPrimitive.content, "surrounding blanks are not part of the name")
+
+        assertEquals(0, run("profile", "set", "work", "trash_folder_name", "--unset", "--json"), stderr())
+        assertEquals(twoProfiles, config())
+    }
+
+    @Test
+    fun `set trash_folder_name refuses anything that is not one folder name, and changes nothing`() {
+        writeConfig(twoProfiles)
+        for (bad in listOf("", "  ", ".", "..", "a/b", "a\\b", "a:b", "a*b", "a?b", "end.", "x".repeat(101), "tab\there")) {
+            assertEquals(1, run("profile", "set", "work", "trash_folder_name", bad, "--json"), "value '$bad'")
+            assertEquals("invalid_value", json().getValue("error").jsonPrimitive.content, "value '$bad'")
+        }
+        assertEquals(twoProfiles, config())
+    }
+
     @Test
     fun `set ignore_rules reads the lines from stdin, changes them, and clears them on empty input`() {
         writeConfig(twoProfiles)

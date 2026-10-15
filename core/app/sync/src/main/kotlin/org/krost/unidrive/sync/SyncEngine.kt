@@ -164,6 +164,10 @@ open class SyncEngine(
     // records on the same tracker when it tries again after a failure.
     val enumerationTracker: EnumerationTracker = EnumerationTracker(),
     xdgUserDirsOverridesForTest: Map<String, String>? = null,
+    // The trash namespace of the profile (its trash_folder_name): the virtual folder that shows what the provider keeps
+    // in its trash. The caller that wraps the provider in a ReadOnlyTrashProvider hands the same instance in here, so the
+    // wrapper, the guard and this engine's planner all ask one namespace.
+    private val trashNamespace: org.krost.unidrive.engine.TrashNamespace = org.krost.unidrive.engine.TrashNamespace(),
 ) : MountHost,
     EnumerationEntryPoint {
     private val log = LoggerFactory.getLogger(SyncEngine::class.java)
@@ -187,6 +191,8 @@ open class SyncEngine(
         // are in the cloud. Otherwise PlaceholderManager keeps it as a conflict copy, recorded here.
         placeholder.fileInTheWayGuard = CloudCopyProof(db, provider.hashAlgorithm()) { passRemoteChanges }
         placeholder.onFileKeptAside = { path, copy -> recordFileKeptAside(path, copy) }
+        // The trash namespace exists as a row in state.db from an earlier pass: its root is known from the start.
+        trashNamespace.refresh(db)
     }
 
     /**
@@ -234,6 +240,7 @@ open class SyncEngine(
                     ?.maxConcurrentTransfers ?: 4,
             matchesGlob = { path, pattern -> Reconciler.matchesGlob(path, pattern) },
             ignore = uploadIgnore,
+            trash = trashNamespace,
         )
 
     // Remote paths state.db tracks: the standing scope plus any per-run --sync-path,
@@ -401,6 +408,57 @@ open class SyncEngine(
         collisions: Map<String, RemoteGather.CollisionRecord>,
         dryRun: Boolean,
     ): Set<String> = remoteGather.reportCollisions(collisions, dryRun)
+
+    /**
+     * The trash namespace is read-only: an action that would send a write for one of its items to the cloud is dropped
+     * (an upload, a delete, a folder, a move), whatever its source: a local edit, a local delete, a file created there.
+     * The item is matched by its path, which the namespace owns, and by its id, so that an item whose row still sits at
+     * its old place while it moves into the trash does not slip through (a modified file is then moved along by the
+     * rename that the same pass plans, and kept; it is not uploaded). Downloads, placeholders, local deletes of what the
+     * cloud no longer has and local moves are not writes to the cloud and stay.
+     */
+    private fun dropWritesToTrash(actions: List<SyncAction>): List<SyncAction> {
+        val trash = guard.trash
+        if (trash.rootPath() == null) return actions
+        fun held(
+            path: String?,
+            remoteId: String?,
+        ) = (path != null && guard.isReadOnlyPath(path)) || trash.holdsId(remoteId)
+        // The folders around an item that moves into the namespace, which no row tracks: the shell the engine made around a
+        // file it downloaded below a trashed folder. The scan found them as new folders of the user's; they are not.
+        val shells =
+            actions
+                .filterIsInstance<SyncAction.MoveLocal>()
+                .filter { guard.isReadOnlyPath(it.path) }
+                .flatMapTo(HashSet()) { move ->
+                    generateSequence(move.fromPath.substringBeforeLast('/', "")) { it.substringBeforeLast('/', "") }
+                        .takeWhile { it.isNotEmpty() }
+                        .filter { db.getEntry(it) == null }
+                        .toList()
+                }
+        var dropped = 0
+        var first: String? = null
+        val kept =
+            actions.filterNot { a ->
+                val hit =
+                    when (a) {
+                        is SyncAction.Upload -> held(a.path, a.remoteId) || held(a.remoteTarget, null)
+                        is SyncAction.DeleteRemote -> held(a.path, db.getEntry(a.path)?.remoteId)
+                        is SyncAction.CreateRemoteFolder -> held(a.path, null) || held(a.remoteTarget, null) || a.path in shells
+                        is SyncAction.MoveRemote -> held(a.path, a.remoteId) || held(a.fromPath, null) || held(a.remoteTarget, null)
+                        else -> false
+                    }
+                if (hit) {
+                    dropped++
+                    if (first == null) first = a.path
+                }
+                hit
+            }
+        if (dropped > 0) {
+            log.info("{} planned write(s) to the read-only trash dropped, e.g. {}", dropped, first)
+        }
+        return kept
+    }
 
     private suspend fun gatherRemoteChanges(readOnly: Boolean = false): Map<String, CloudItem> = remoteGather.gather(readOnly = readOnly)
 
@@ -1062,6 +1120,7 @@ open class SyncEngine(
                 }.also { kept -> if (kept.size < reconciledActionsAll.size) log.warn("#503: {} planned action(s) under NFC-clashing local names skipped", reconciledActionsAll.size - kept.size) }
             }
         logUnhydratedFolderSkips(dryRun)
+        val reconciledActionsWritable = dropWritesToTrash(reconciledActions)
 
         db.batch {
             updateRemoteEntries(allRemoteChanges.filterKeys { isTracked(it) })
@@ -1081,9 +1140,9 @@ open class SyncEngine(
         // for post-mortem visibility.
         val allActions =
             if (forceDelete) {
-                reconciledActions
+                reconciledActionsWritable
             } else {
-                applyTopLevelHydrationGuard(reconciledActions, dryRun)
+                applyTopLevelHydrationGuard(reconciledActionsWritable, dryRun)
             }
 
         var actions =
@@ -2047,7 +2106,7 @@ open class SyncEngine(
             if (!page.complete) {
                 allComplete = false
             }
-            return page
+            return remoteGather.placeTrashed(page)
         }
 
         fun persistPendingCursor(cursor: String) {
@@ -2773,6 +2832,7 @@ open class SyncEngine(
             }
         }
 
+        if (guard.isReadOnlyPath(action.path)) pruneUntrackedShell(action.fromPath)
         db.deleteEntry(action.fromPath)
         // UD-901d: renamePrefix() must run BEFORE the destination upsert —
         // see applyMoveRemote for the full rationale. Same bug class:
@@ -2797,6 +2857,34 @@ open class SyncEngine(
                 )
             },
         )
+    }
+
+    /**
+     * An item that moved into the trash namespace leaves the folders it was in. Those folders were never rows of
+     * state.db (the engine used to download an item below a trashed folder without a folder item for it, and made
+     * the folders around the file on its own), so once nothing is left in them they are only the shell around a file
+     * that is gone, and the next local scan would take each for a new folder of the user's and plan to create it in the
+     * cloud. An empty folder without a row, from the old place of the item upwards, goes; one with a row or with
+     * anything in it stays.
+     */
+    private fun pruneUntrackedShell(fromPath: String) {
+        var logical = fromPath.substringBeforeLast('/', "")
+        while (logical.isNotEmpty() && db.getEntry(logical) == null) {
+            val dir = placeholder.resolveLocal(logical)
+            val empty =
+                try {
+                    Files.isDirectory(dir, java.nio.file.LinkOption.NOFOLLOW_LINKS) && Files.newDirectoryStream(dir).use { !it.iterator().hasNext() }
+                } catch (_: java.io.IOException) {
+                    false
+                }
+            if (!empty) return
+            try {
+                withEchoSuppression(logical) { Files.delete(dir) }
+            } catch (_: java.io.IOException) {
+                return
+            }
+            logical = logical.substringBeforeLast('/', "")
+        }
     }
 
     /**

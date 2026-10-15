@@ -152,6 +152,13 @@ sealed class ListResult {
         // Why the drive refuses this entry by its name (`similar_name`), or that it waits for a folder above it that
         // it refuses (`blocked_by_parent`). Null for every other row; only serialized on the wire when set.
         val blocked: String? = null,
+        // True for the trash namespace's root folder and everything below it: items the provider keeps in its trash, shown
+        // apart from the live tree. They can be read, hydrated and copied out; every write is refused with `read_only`
+        // (see HydrationError.ReadOnly), so a client refuses the action before it asks. Only serialized on the wire when true.
+        val readOnly: Boolean = false,
+        // True for the root folder of the trash namespace itself (the row with the stable remote id `unidrive:trash`),
+        // for a client that labels it and gives it an icon of its own. Only serialized on the wire when true.
+        val trashRoot: Boolean = false,
     )
 }
 

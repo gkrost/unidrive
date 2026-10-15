@@ -328,9 +328,14 @@ class InternxtFolderMetaTest {
         val (page, warnings) = warningsOf { provider(account.engine).delta(null, null, null) }
 
         assertEquals(
-            setOf("/Docs", "/Docs/a.txt", "/Archive/b.txt", "/Old/e.txt"),
+            setOf("/Docs", "/Docs/a.txt", "/Archive/b.txt", "/Old/e.txt", "/Old"),
             paths(page),
             "everything that could be placed is delivered, the files below the unreadable folder are not guessed at",
+        )
+        assertEquals(
+            setOf("/Old/e.txt", "/Old"),
+            page.items.filter { it.trashed }.map { it.path }.toSet(),
+            "the trashed folder is told by its status (HTTP 200 from the meta), and what hangs below it with it",
         )
         assertFalse(page.complete, "the result says that something stayed unresolved, so no deletion is inferred from it")
         assertEquals(1, account.metaCalls.getValue(ODD).get(), "two files lie below it and it was asked once")

@@ -380,6 +380,8 @@ internal class HydrationTestEnv(
     history: org.krost.unidrive.telemetry.TransferHistory? = null,
     /** #660: the mount's ignore rules (read from this env's cache); null = off. */
     ignore: org.krost.unidrive.sync.ignore.IgnoreSettings? = null,
+    /** The trash namespace of the profile: the read-only folder that shows what the provider keeps in its trash. */
+    val trash: org.krost.unidrive.engine.TrashNamespace = org.krost.unidrive.engine.TrashNamespace(ignoreCase = false),
 ) {
     val cacheRoot: Path = Files.createTempDirectory("unidrive-hydration-cache")
     private val dbPath: Path = Files.createTempDirectory("unidrive-hydration-db").resolve("state.db")
@@ -417,6 +419,7 @@ internal class HydrationTestEnv(
             standingScope = syncPaths,
             excludePatterns = excludePatterns,
             mountIgnore = ignore,
+            trashNamespace = trash,
         )
 
         pause = MountEngine.over(engine).pause

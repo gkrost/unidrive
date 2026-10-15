@@ -10,6 +10,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import org.krost.unidrive.engine.TrashNamespace
 import org.krost.unidrive.sync.ProfileKeyEdit
 import org.krost.unidrive.sync.RawProvider
 import org.krost.unidrive.sync.SyncConfig
@@ -48,6 +49,7 @@ internal object ProfileSettings {
     const val DAEMON_POLL_SECONDS = "daemon_poll_seconds"
     const val HONOR_GITIGNORE = "honor_gitignore"
     const val IGNORE_RULES = "ignore_rules"
+    const val TRASH_FOLDER_NAME = "trash_folder_name"
 
     /** Upper bound of the `ignore_rules` input, in characters; far above any real rule list. */
     const val IGNORE_RULES_MAX_CHARS = 64 * 1024
@@ -111,6 +113,13 @@ internal object ProfileSettings {
                 read = { rp -> JsonArray(rp.ignore_rules.orEmpty().map(::JsonPrimitive)) },
                 fromStdin = true,
             ),
+            Spec(
+                key = TRASH_FOLDER_NAME,
+                description = "name of the read-only folder that shows the provider's trash, one folder name (default Papierkorb)",
+                needsDaemonRestart = true,
+                toToml = { _, raw -> trashFolderNameToml(raw) },
+                read = { rp -> rp.trash_folder_name?.let(::JsonPrimitive) ?: JsonNull },
+            ),
         )
 
     private val byKey = SPECS.associateBy { it.key }
@@ -142,6 +151,17 @@ internal object ProfileSettings {
             throw ProfileCommandError("invalid_value", "$key must be a whole number from 0 to $max, got '$raw'")
         }
         return n
+    }
+
+    private fun trashFolderNameToml(raw: String): String {
+        if (!TrashNamespace.isUsableName(raw)) {
+            throw ProfileCommandError(
+                "invalid_value",
+                "$TRASH_FOLDER_NAME must be one folder name: not empty, at most 100 characters, none of < > : \" / \\ | ? *, " +
+                    "no control character, not . or .., no trailing dot",
+            )
+        }
+        return "\"${escapeTomlValue(raw.trim())}\""
     }
 
     private fun honorGitignoreToml(raw: String): String =
@@ -224,7 +244,7 @@ internal fun writeConfigAtomically(
     name = "set",
     description = [
         "Change one documented key of a profile in config.toml (label, sync_path, hydration_cache_max_bytes, " +
-            "daemon_poll_seconds, honor_gitignore, ignore_rules). ignore_rules takes its rules from standard input, " +
+            "daemon_poll_seconds, honor_gitignore, ignore_rules, trash_folder_name). ignore_rules takes its rules from standard input, " +
             "one per line (an empty input clears them), not from an argument. Credentials and fixed keys (type, mode, sync_root) are refused. " +
             "A running daemon does not reload the config: restart it.",
     ],

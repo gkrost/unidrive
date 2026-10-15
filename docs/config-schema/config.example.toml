@@ -49,3 +49,9 @@ sync_root = "~/Internxt"
 # repository's .git back. exclude_patterns above keep their own syntax and are not overridden by any rule.
 # honor_gitignore = false      # also read .gitignore files
 # ignore_rules = ["node_modules/", "*.log"]
+
+# What the provider keeps in its trash (Internxt: the items below a trashed folder) is shown apart, in a read-only
+# folder at the top of the profile, under the path it came from. This is that folder's name (one folder name, no
+# path); a client sets it from the user's language. Default: Papierkorb. A live top-level item with the same name
+# keeps it, and the folder is shown as "<name> (2)".
+# trash_folder_name = "Papierkorb"

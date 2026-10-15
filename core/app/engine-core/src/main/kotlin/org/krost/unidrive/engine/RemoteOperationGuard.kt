@@ -14,6 +14,8 @@ import org.krost.unidrive.sync.SyncScope
  *   `exclude_patterns` (the old glob, unchanged) and, where the host passes them, the ignore rules ([ignore]).
  * - **Transfer budget**: one per-provider transfer cap shared by the sync pass and
  *   the hydration upload path (UD-263).
+ * - **Trash namespace**: the virtual folder that shows what the provider keeps in its trash, which is read-only
+ *   ([isReadOnlyPath], see [TrashNamespace]).
  *
  * Built once per engine; the instance holds the transfer semaphore, so the mirror
  * engine and the mount operations of one process must share the same instance.
@@ -32,6 +34,9 @@ class RemoteOperationGuard(
     // #660: the ignore rules (rule files, account rules, the overridable content defaults), or null where the
     // host has none. Upload-side only: nothing here hides a remote item or holds a download back.
     private val ignore: UploadIgnoreCheck? = null,
+    // The trash namespace of the profile: its name (profile key trash_folder_name) and, once something is in the trash,
+    // where its root is. One per guard, so the sync pass, the mount verbs and the provider decorator all ask the same one.
+    val trash: TrashNamespace = TrashNamespace(),
 ) {
     /** The normalised tracked scope; empty means the whole drive. */
     val trackScope: List<String> =
@@ -48,6 +53,13 @@ class RemoteOperationGuard(
      * create or move cloud data the mounted view can never show.
      */
     fun isOutOfScope(path: String): Boolean = !SyncScope.contains(path, trackScope)
+
+    /**
+     * True when [path] is in the trash namespace: the root folder or anything below it. The engine never sends a write
+     * for such a path to the cloud and ignores local changes there; the mount verbs that would write refuse it with
+     * `read_only`, and the sync pass drops the actions that would. Reading and copying out are not writes and stay allowed.
+     */
+    fun isReadOnlyPath(path: String): Boolean = trash.contains(path)
 
     /**
      * True when [path] matches the effective exclude patterns (configured

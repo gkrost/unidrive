@@ -114,6 +114,34 @@ A listing returns live items with the uuid of their parent folder; a path needs 
 
 The step is reported in `daemon.status.enumeration` as `phase: resolving_paths` with `paths_done` and `paths_total`; before it existed the status stood on the listing's last item count for as long as the requests took (eight minutes for 949 folders asked for one after the other).
 
+## The trash
+
+Internxt trashes a folder and leaves what is in it as it was: the items below keep reporting `EXISTS`, name the trashed
+folder as their parent, and a listing of the live items carries them at the path of their trashed ancestors, as if they
+were live. A first scan of one account listed 5,536 files and 266 folders that way. They are not live, and the web UI shows
+the trash apart.
+
+**Detection.** A folder is in the trash when its own `status` is not `EXISTS` or when a folder above it is not; an item is
+in the trash when its parent folder is (`TrashChains`). The status is read the same way for a folder the listing returned,
+one of the ancestor-only records of the walk without the status filter, and one fetched by its meta, which answers HTTP 200
+for a trashed folder like for a live one. The provider marks such an item `CloudItem.trashed`, at the path of its own tree,
+and reports the trashed folders that a live item hangs below as trashed folders too, so the engine can show the way to them.
+A tombstone stays one: a file trashed in a live folder, and (in an incremental delta) a folder trashed since the cursor, are
+deletions as before.
+
+**What the engine does with the flag** (provider-neutral, `TrashNamespace`): the item goes under a virtual top-level folder
+(default `Papierkorb`, profile key `trash_folder_name`) at `<folder><original path>`, keeps its id, and is read-only: the
+engine never sends an upload, a delete, a move or a rename for it, ignores local changes there, and reading, hydrating
+and copying out work as everywhere else. `hydration.list` entries carry `read_only` and `trash_root`, `daemon.status` the
+`trash` object (docs/dev/specs/ipc-write-protocol.md section 4.1, unidrive-daemon-design.md section 4.3).
+
+**Scope.** The folders that hold live items below them, and those items. The listings already carry them: no extra request
+is made. Trashed files, and trashed folders with nothing live below them, are not shown. A profile stored by an earlier
+version holds these items at their original paths; the next full listing gives them the new path with the same id, which the
+engine's rename machinery turns into a move of the row (a modified file moves with its bytes and is not uploaded). An
+incremental poll does not re-place items it does not deliver again, so a profile moves at its next full listing (a reset or a
+re-scan).
+
 ## Request-id correlation
 
 Internxt's drive server emits `x-request-id` on every response. `InternxtApiService.extractRequestId` reads it; carried on `ProviderException.requestId` and surfaced in `unidrive.log` as `requestId=…`.

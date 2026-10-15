@@ -70,6 +70,10 @@ class RemoteEnumeration(
             if (uploadInFlight(path)) return true
             if (row == null) return false
             if (row.isPendingUpload) return true
+            // A folder has no bytes to lose: its cache entry is a directory whose time moves with whatever is put into it
+            // or taken out of it (the cache copy of a row that moved, say), and those files are guarded by rows of their
+            // own. Read as an edit it would hold the reap of a folder for good, the trash root of an emptied trash included.
+            if (row.isFolder) return false
             return runCatching {
                 val cachePath = cachePathOf(path)
                 Files.exists(cachePath) && Files.getLastModifiedTime(cachePath).toMillis() > row.lastSynced.toEpochMilli()
@@ -273,6 +277,10 @@ class RemoteEnumeration(
                     RemoteMerge.Move(applyReverseTop(it.from, canonicalToLocalTop), applyReverseTop(it.to, canonicalToLocalTop))
                 }
             }
+        // A row that moved takes its cache copy along. The row keeps its hydration state at the new path, and the copy
+        // is found by path: left behind it would be an orphan, and an edit in it (a file moved into the trash
+        // namespace while it held unsent changes) would no longer belong to any row.
+        for (merge in merges) for (move in merge.moved) carryCacheCopy(move.from, move.to)
         // The reap needs the merge committed and runs as its own transaction; a crash
         // between the chunks and this batch leaves the reap to the next enumeration.
         db.batch {
@@ -352,6 +360,8 @@ class RemoteEnumeration(
         // state (conservative — favors not reaping, since reaping evicts cache + marks
         // deleted).
         deferredMissing = if (complete) nextDeferred else emptySet()
+        // The reap may have removed the trash root's row (nothing is in the trash any more).
+        gather.refreshTrash()
         gather.promotePendingCursor()
         // A complete full listing becomes the estimate for the next one (the gather recorded whether it was full).
         if (complete && db.getSyncState("last_gather_full") == "true") recordFullEnumeration(remoteChanges, listingMs)
@@ -367,6 +377,23 @@ class RemoteEnumeration(
             gather.invalidateView(changedPaths, false, movedView)
         }
         return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
+    }
+
+    // The cache copy of the row that moved from [from] to [to]. A copy already at the destination is never replaced, a
+    // move that fails is logged and leaves the copy where it is: neither loses bytes.
+    private fun carryCacheCopy(
+        from: String,
+        to: String,
+    ) {
+        val source = CachePaths.forRow(from, log, reapGuards.cachePathOf) ?: return
+        val target = CachePaths.forRow(to, log, reapGuards.cachePathOf) ?: return
+        try {
+            if (!Files.exists(source) || Files.exists(target)) return
+            Files.createDirectories(target.parent)
+            Files.move(source, target)
+        } catch (e: java.io.IOException) {
+            log.warn("enumerate: the cache copy of {} could not follow the row to {}: {}", from, to, e.message)
+        }
     }
 
     companion object {
