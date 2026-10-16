@@ -9,6 +9,7 @@ import java.nio.file.Path
  * `META-INF/services/org.krost.unidrive.ProviderFactory`.
  * The CLI and other consumers discover providers at runtime by scanning the classpath.
  */
+@Suppress("TooManyFunctions") // one SPI: each provider-lifecycle hook (create, auth, preflight) is a separate optional default
 interface ProviderFactory {
     /** Provider type identifier (e.g. "sftp", "onedrive"). */
     val id: String
