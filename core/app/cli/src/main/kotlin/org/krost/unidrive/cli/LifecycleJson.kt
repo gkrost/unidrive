@@ -111,7 +111,7 @@ internal fun resolveProfileTarget(
             ?: try {
                 SyncConfig.resolveDefaultProfile(raw)
             } catch (e: NoDefaultProfileException) {
-                throw LifecycleError("no_default_profile", e.message ?: "no default profile")
+                throw LifecycleError("no_default_profile", e.message ?: "no default profile", e)
             }
     if (!isValidProfileName(name)) {
         throw LifecycleError("invalid_profile_name", "'$name' is not a valid profile name")
