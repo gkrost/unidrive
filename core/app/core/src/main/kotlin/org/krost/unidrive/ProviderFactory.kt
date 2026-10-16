@@ -82,6 +82,13 @@ interface ProviderFactory {
     fun credentialPrompts(): List<PromptSpec> = emptyList()
 
     /**
+     * Checks the non-secret values `profile add` was given before the profile is written, without
+     * side effects (nothing is created). Returns the refusal, or null when the values are usable.
+     * Default: nothing to check.
+     */
+    fun preflightAdd(properties: Map<String, String?>): AddRefusal? = null
+
+    /**
      * Mapping of environment-variable name to config-property key for
      * credentials this provider can pick up from the environment.
      *
@@ -129,6 +136,12 @@ interface ProviderFactory {
      */
     suspend fun cancelInteractiveAuth(continuationHandle: String) { /* no-op */ }
 }
+
+/** A stable [token] a front-end switches on and a human [message] (never a secret). */
+data class AddRefusal(
+    val token: String,
+    val message: String,
+)
 
 /** Offline credential health diagnostic (no network calls). */
 sealed class CredentialHealth {

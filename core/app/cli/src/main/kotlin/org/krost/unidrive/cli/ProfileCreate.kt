@@ -118,6 +118,9 @@ internal object ProfileCreator {
         if (conflict != null) throw LifecycleError("sync_root_conflict", conflict)
 
         val creds = credentialsFromOptions(factory.credentialPrompts(), req.options)
+        // #917: an unusable value (a localfs root_path that is a file, a drive root, unreadable...) is
+        // refused here with the provider's token, not when the account first starts. Nothing is created.
+        factory.preflightAdd(creds)?.let { throw LifecycleError(it.token, it.message) }
 
         val profileDir = configDir.resolve(name)
         val createdDir = !Files.exists(profileDir)

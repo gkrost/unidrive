@@ -65,6 +65,11 @@ symbol. Work the tiers **in order**; within a tier the items are file-disjoint a
   - `auth login --email … --password-stdin [--totp …]` for Internxt.
   
   New profile folders and credential files go through the same owner-only permission helpers as the console path.
+  A localfs `root_path` is probed before anything is written, and never created by `profile add`: a missing root
+  passes when its nearest existing ancestor is a writable directory (the folder appears when the account starts).
+  Refusals (`{"ok":false,"error":<token>,...}`, exit 1, nothing written): `root_not_directory` (the path is a file),
+  `root_not_creatable` (missing, and the ancestor is not a writable directory), `root_not_readable`,
+  `root_not_writable`, `root_is_drive_root` (`X:\`, `/`; `allow_drive_root` is not an `--option`, so a drive root cannot be added this way).
 - **PR c:** `profile remove` refuses while a daemon holds the profile (machine-readable `error` token), unless
   `--stop`. It also removes the IPC token files and the socket. The JSON result says what was kept.
 - **`profile default <name> [--json]` / `profile default --clear`:** rewrites only `[general] default_profile` and

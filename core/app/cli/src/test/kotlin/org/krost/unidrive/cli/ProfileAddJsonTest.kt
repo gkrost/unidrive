@@ -73,6 +73,9 @@ class ProfileAddJsonTest {
         dir.toFile().deleteRecursively()
     }
 
+    /** A not-yet-existing folder under the temp dir: creatable, so `profile add` accepts it (and does not create it). */
+    private fun rp(name: String): String = dir.resolve("src-$name").toString()
+
     private val configFile: Path get() = dir.resolve("config.toml")
 
     private fun run(vararg args: String): Int {
@@ -100,7 +103,7 @@ class ProfileAddJsonTest {
     fun `a label with control characters is written escaped and reads back unchanged`() {
         val label = "a\u0001b\u007fc\td"
 
-        val code = run("profile", "add", "--type", "localfs", "--name", "docs", "--mode", "mount", "--label", label, "--option", "root_path=/data/docs", "--json")
+        val code = run("profile", "add", "--type", "localfs", "--name", "docs", "--mode", "mount", "--label", label, "--option", "root_path=" + rp("data-docs"), "--json")
 
         assertEquals(0, code, err.toString())
         val text = Files.readString(configFile)
@@ -113,7 +116,7 @@ class ProfileAddJsonTest {
     fun `adds a mount profile with no console and no prompt`() {
         assertNull0(System.console())
 
-        val code = run("profile", "add", "--type", "localfs", "--name", "docs", "--mode", "mount", "--label", "My \"docs\"", "--option", "root_path=/data/docs", "--json")
+        val code = run("profile", "add", "--type", "localfs", "--name", "docs", "--mode", "mount", "--label", "My \"docs\"", "--option", "root_path=" + rp("data-docs"), "--json")
 
         assertEquals(0, code, err.toString())
         val r = json()
@@ -131,7 +134,7 @@ class ProfileAddJsonTest {
         val raw = SyncConfig.parseRaw(Files.readString(configFile)).providers.getValue("docs")
         assertEquals("localfs", raw.type)
         assertEquals("mount", raw.mode)
-        assertEquals("/data/docs", raw.root_path)
+        assertEquals(rp("data-docs"), raw.root_path)
         assertTrue("label = \"My \\\"docs\\\"\"" in Files.readString(configFile))
         // The mount root is not created; the profile folder is, owner-only.
         assertFalse(Files.exists(dir.resolve("docs").resolve("sync-root")))
@@ -144,7 +147,7 @@ class ProfileAddJsonTest {
     fun `adds a mirror profile with its sync root and makes it the default on request`() {
         val root = dir.resolve("mirror-root").toString()
 
-        assertEquals(0, run("profile", "add", "--type", "localfs", "--mode", "mirror", "--sync-root", root, "--option", "root_path=/data/m", "--make-default", "--json"))
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--mode", "mirror", "--sync-root", root, "--option", "root_path=" + rp("data-m"), "--make-default", "--json"))
 
         val r = json()
         assertEquals("localfs", r.getValue("profile").jsonPrimitive.content, "the name defaults to the type")
@@ -158,7 +161,7 @@ class ProfileAddJsonTest {
     fun `the new profile appends to an existing config and leaves the rest alone`() {
         Files.writeString(configFile, "# mine\n[general]\ndefault_profile = \"a\"\n\n[providers.a]\ntype = \"localfs\"\nmode = \"mirror\"\nroot_path = \"/a\"\nsync_root = \"${dir.resolve("a-root").toString().replace("\\", "/")}\"\n")
 
-        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "b", "--mode", "mount", "--option", "root_path=/b", "--json"))
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "b", "--mode", "mount", "--option", "root_path=" + rp("b"), "--json"))
 
         val text = Files.readString(configFile)
         assertTrue(text.startsWith("# mine\n[general]\ndefault_profile = \"a\"\n"))
@@ -172,7 +175,7 @@ class ProfileAddJsonTest {
         // throw after the new section was appended.
         Files.writeString(configFile, "[providers.a]\ntype = \"localfs\"\nmode = \"mount\"\n")
 
-        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "b", "--mode", "mount", "--option", "root_path=/b", "--make-default", "--json"))
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "b", "--mode", "mount", "--option", "root_path=" + rp("b"), "--make-default", "--json"))
 
         assertEquals("b", json().getValue("default_profile").jsonPrimitive.content)
         val parsed = SyncConfig.parseRaw(Files.readString(configFile))
@@ -184,7 +187,7 @@ class ProfileAddJsonTest {
     fun `an Internxt folder as the mirror root draws a warning, not a refusal`() {
         val root = dir.resolve("InternxtDrive").toString()
 
-        assertEquals(0, run("profile", "add", "--type", "localfs", "--mode", "mirror", "--sync-root", root, "--option", "root_path=/x", "--json"))
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--mode", "mirror", "--sync-root", root, "--option", "root_path=" + rp("x"), "--json"))
 
         assertEquals(1, json().getValue("warnings").jsonArray.size)
     }
@@ -195,15 +198,15 @@ class ProfileAddJsonTest {
         val cases =
             listOf(
                 listOf("--type", "nope", "--mode", "mount") to "unknown_type",
-                listOf("--type", "localfs", "--option", "root_path=/x") to "missing_mode",
-                listOf("--type", "localfs", "--mode", "both", "--option", "root_path=/x") to "invalid_mode",
-                listOf("--type", "localfs", "--mode", "mount", "--name", "a.b", "--option", "root_path=/x") to "invalid_profile_name",
-                listOf("--type", "localfs", "--mode", "mount", "--name", "CON.txt", "--option", "root_path=/x") to "reserved_profile_name",
-                listOf("--type", "localfs", "--mode", "mount", "--sync-root", "/r", "--option", "root_path=/x") to "sync_root_not_allowed",
+                listOf("--type", "localfs", "--option", "root_path=" + rp("x")) to "missing_mode",
+                listOf("--type", "localfs", "--mode", "both", "--option", "root_path=" + rp("x")) to "invalid_mode",
+                listOf("--type", "localfs", "--mode", "mount", "--name", "a.b", "--option", "root_path=" + rp("x")) to "invalid_profile_name",
+                listOf("--type", "localfs", "--mode", "mount", "--name", "CON.txt", "--option", "root_path=" + rp("x")) to "reserved_profile_name",
+                listOf("--type", "localfs", "--mode", "mount", "--sync-root", "/r", "--option", "root_path=" + rp("x")) to "sync_root_not_allowed",
                 listOf("--type", "localfs", "--mode", "mount") to "missing_option",
-                listOf("--type", "localfs", "--mode", "mount", "--option", "root_path=/x", "--option", "colour=blue") to "unknown_option",
+                listOf("--type", "localfs", "--mode", "mount", "--option", "root_path=" + rp("x"), "--option", "colour=blue") to "unknown_option",
                 listOf("--type", "localfs", "--mode", "mount", "--option", "root_path") to "invalid_option",
-                listOf("--type", "localfs", "--mode", "mount", "--option", "root_path=/x", "--option", "root_path=/y") to "duplicate_option",
+                listOf("--type", "localfs", "--mode", "mount", "--option", "root_path=" + rp("x"), "--option", "root_path=" + rp("y")) to "duplicate_option",
             )
         for ((args, token) in cases) {
             assertEquals(1, run(*base, *args.toTypedArray()), "args $args")
@@ -219,13 +222,13 @@ class ProfileAddJsonTest {
 
     @Test
     fun `a name that exists is refused and an overlapping sync root is refused`() {
-        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "one", "--mode", "mirror", "--sync-root", dir.resolve("r").toString(), "--option", "root_path=/x", "--json"))
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "one", "--mode", "mirror", "--sync-root", dir.resolve("r").toString(), "--option", "root_path=" + rp("x"), "--json"))
         val before = Files.readString(configFile)
 
-        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "one", "--mode", "mount", "--option", "root_path=/x", "--json"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "one", "--mode", "mount", "--option", "root_path=" + rp("x"), "--json"))
         assertEquals("profile_exists", errorToken())
 
-        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "two", "--mode", "mirror", "--sync-root", dir.resolve("r").toString(), "--option", "root_path=/y", "--json"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "two", "--mode", "mirror", "--sync-root", dir.resolve("r").toString(), "--option", "root_path=" + rp("y"), "--json"))
         assertEquals("sync_root_conflict", errorToken())
 
         assertEquals(before, Files.readString(configFile))
@@ -234,10 +237,10 @@ class ProfileAddJsonTest {
 
     @Test
     fun `profile names that differ only by case are refused in JSON and console output`() {
-        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "Work", "--mode", "mount", "--option", "root_path=/x", "--json"))
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "Work", "--mode", "mount", "--option", "root_path=" + rp("x"), "--json"))
         val before = Files.readString(configFile)
 
-        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "work", "--mode", "mount", "--option", "root_path=/y", "--json"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "work", "--mode", "mount", "--option", "root_path=" + rp("y"), "--json"))
         assertEquals("profile_exists", errorToken())
         assertEquals(before, Files.readString(configFile))
         assertEquals(
@@ -246,7 +249,7 @@ class ProfileAddJsonTest {
             "the refused profile must not create a second case variant folder",
         )
 
-        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "wORK", "--mode", "mount", "--option", "root_path=/y"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "wORK", "--mode", "mount", "--option", "root_path=" + rp("y")))
         assertEquals("", out.toString())
         assertTrue("already exists" in err.toString(), err.toString())
         assertEquals(before, Files.readString(configFile))
@@ -256,7 +259,7 @@ class ProfileAddJsonTest {
     fun `an unparsable config is refused without quoting it`() {
         Files.writeString(configFile, "[providers.x]\ntype = \"localfs\"\npassword = \"hunter2-secret\"\nbroken = = =\n")
 
-        assertEquals(1, run("profile", "add", "--type", "localfs", "--mode", "mount", "--option", "root_path=/x", "--json"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--mode", "mount", "--option", "root_path=" + rp("x"), "--json"))
 
         assertEquals("config_invalid", errorToken())
         assertFalse("hunter2-secret" in out.toString() + err.toString())
@@ -309,10 +312,10 @@ class ProfileAddJsonTest {
 
     @Test
     fun `plain mode without --json prints a line and refusals go to stderr`() {
-        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "p", "--mode", "mount", "--option", "root_path=/x"))
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--name", "p", "--mode", "mount", "--option", "root_path=" + rp("x")))
         assertTrue("'p' added" in out.toString(), out.toString())
 
-        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "p", "--mode", "mount", "--option", "root_path=/x"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "p", "--mode", "mount", "--option", "root_path=" + rp("x")))
         assertEquals("", out.toString())
         assertTrue("already exists" in err.toString(), err.toString())
     }
@@ -327,4 +330,77 @@ class ProfileAddJsonTest {
     }
 
     private fun assertNull0(value: Any?) = assertEquals(null, value, "this suite runs the way CI does: without a console")
+
+    @Test
+    fun `a root_path that is a file is refused as root_not_directory`() {
+        val file = Files.createFile(dir.resolve("a-file"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--mode", "mount", "--option", "root_path=$file", "--json"))
+        assertEquals("root_not_directory", errorToken())
+        assertFalse(Files.exists(configFile), "a refused add writes nothing")
+    }
+
+    @Test
+    fun `a root_path under a file is refused as root_not_creatable`() {
+        val file = Files.createFile(dir.resolve("a-file"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--mode", "mount", "--option", "root_path=${file.resolve("sub")}", "--json"))
+        assertEquals("root_not_creatable", errorToken())
+        assertFalse(Files.exists(configFile))
+    }
+
+    @Test
+    fun `a drive root is refused as root_is_drive_root`() {
+        val driveRoot = dir.toAbsolutePath().root.toString()
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--mode", "mount", "--option", "root_path=$driveRoot", "--json"))
+        assertEquals("root_is_drive_root", errorToken())
+        assertFalse(Files.exists(configFile))
+    }
+
+    @Test
+    fun `an unreadable root is refused as root_not_readable and an unwritable one as root_not_writable`() {
+        val unreadable = Files.createDirectory(dir.resolve("unreadable"))
+        val unwritable = Files.createDirectory(dir.resolve("unwritable"))
+        LifecycleHooks.factoryFor = { type ->
+            ProviderRegistry.get(type)?.let { real -> ProbeFaking(real, mapOf(unreadable.toString() to "root_not_readable", unwritable.toString() to "root_not_writable")) }
+        }
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "r", "--mode", "mount", "--option", "root_path=$unreadable", "--json"))
+        assertEquals("root_not_readable", errorToken())
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--name", "w", "--mode", "mount", "--option", "root_path=$unwritable", "--json"))
+        assertEquals("root_not_writable", errorToken())
+    }
+
+    @Test
+    fun `a missing but creatable root passes and is not created`() {
+        val missing = dir.resolve("deep").resolve("er")
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--mode", "mount", "--option", "root_path=$missing", "--json"))
+        assertFalse(Files.exists(missing), "profile add must not create the folder")
+    }
+
+    @Test
+    fun `an existing usable root passes`() {
+        val existing = Files.createDirectory(dir.resolve("exists"))
+        assertEquals(0, run("profile", "add", "--type", "localfs", "--mode", "mount", "--option", "root_path=$existing", "--json"))
+    }
+
+    @Test
+    fun `a refused root is a readable message on the console`() {
+        val file = Files.createFile(dir.resolve("a-file"))
+        assertEquals(1, run("profile", "add", "--type", "localfs", "--mode", "mount", "--option", "root_path=$file"))
+        assertTrue(err.toString(Charsets.UTF_8).contains("is not a directory"), err.toString(Charsets.UTF_8))
+    }
+}
+
+/**
+ * The real localfs factory with the access probe answered from a table: an ACL-denied folder cannot be
+ * made portably in a unit test, so the unreadable/unwritable outcomes are injected at the factory seam
+ * and the real tokens-to-refusal path of `profile add` is what is exercised.
+ */
+private class ProbeFaking(
+    private val real: ProviderFactory,
+    private val tokens: Map<String, String>,
+) : ProviderFactory by real {
+    override fun preflightAdd(properties: Map<String, String?>): org.krost.unidrive.AddRefusal? {
+        val root = properties["root_path"]
+        tokens[root]?.let { return org.krost.unidrive.AddRefusal(it, "'$root' is not usable") }
+        return real.preflightAdd(properties)
+    }
 }
