@@ -130,16 +130,27 @@ class RemoteEnumeration(
     private fun isCredentialRejection(e: Throwable): Boolean = e is AuthenticationException
 
     /**
-     * #878: the machine-readable cause of a failed attempt for `last_error_code`. An API error carries its
-     * HTTP status (`http_408`), a rejected authentication is `auth_rejected`, and anything else names its
-     * transport class (`timeout`, `dns`, `tls`, `connect`, `reset`, `io`) through the attempt classifier.
+     * #878/#900: the machine-readable cause of a failed attempt for `last_error_code`. An API error carries its
+     * HTTP status (`http_408`), a rejected authentication is `auth_rejected`, a transport failure names its
+     * class (`timeout`, `dns`, `tls`, `connect`, `reset`, `io`) through the attempt classifier, an answer that
+     * arrived but cannot be read is `decode`, and anything else is `internal`. So `io` only means transport I/O.
      */
-    private fun errorCodeOf(e: Exception): String =
-        when {
-            e is AuthenticationException -> "auth_rejected"
-            e is ProviderException && e.httpStatus != null -> "http_" + e.httpStatus
-            else -> AttemptOutcome.ofFailure(e).wire
+    private fun errorCodeOf(e: Exception): String {
+        if (e is AuthenticationException) return "auth_rejected"
+        if (e is ProviderException && e.httpStatus != null) return "http_" + e.httpStatus
+        val transport = AttemptOutcome.ofFailure(e)
+        if (transport != AttemptOutcome.IO) return transport.wire
+        val chain = generateSequence<Throwable>(e) { it.cause?.takeIf { cause -> cause !== it } }.take(CAUSE_DEPTH).toList()
+        return when {
+            chain.any { it is java.io.IOException } -> transport.wire
+            chain.any { it.isDecodeFailure() } -> "decode"
+            else -> "internal"
         }
+    }
+
+    // kotlinx.serialization is not on this module's classpath: its SerializationException (and the JSON
+    // decoder's subclasses of it) are recognised by name along the superclass chain.
+    private fun Throwable.isDecodeFailure(): Boolean = generateSequence<Class<*>>(javaClass) { it.superclass }.any { it.simpleName == "SerializationException" }
 
     private fun recordEnumerateFailureStreak() {
         val streak = (db.getSyncState(FAILURE_STREAK_KEY)?.toIntOrNull() ?: 0) + 1
@@ -397,6 +408,7 @@ class RemoteEnumeration(
     }
 
     companion object {
+        private const val CAUSE_DEPTH = 8
         // #517 R3: sync_state key counting consecutive enumerations that ended in a
         // provider failure. The daemon's enumerate poller seeds its backoff from it
         // at start, so a restart into a known-bad remote doesn't re-run the doomed

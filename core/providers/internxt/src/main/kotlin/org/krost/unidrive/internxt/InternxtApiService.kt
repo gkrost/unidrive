@@ -1598,7 +1598,7 @@ class InternxtApiException(
     requestId: String? = null,
     val retryAfterMs: Long? = null,
     cause: Throwable? = null,
-) : ProviderException(message, cause = cause, requestId = requestId)
+) : ProviderException(message, cause = cause, requestId = requestId, httpStatus = statusCode.takeIf { it > 0 && cause == null })
 
 /**
  * The server answered with success and a body the model cannot read: a required field missing or null, a value of

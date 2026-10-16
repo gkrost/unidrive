@@ -462,6 +462,36 @@ class RemoteEnumerationTest {
             assertEquals("API error: 408 Request Timeout", s.lastError, "the body is dropped from the reason")
         }
 
+    // Stands in for kotlinx.serialization's class, which this module's classpath does not carry: matched by name.
+    private class SerializationException(message: String) : RuntimeException(message)
+
+    // #900: io means transport I/O only; an unreadable answer is decode, an unexpected exception is internal.
+    private fun codeOf(failure: ProviderException): String? =
+        kotlinx.coroutines.runBlocking {
+            val e = enumeration()
+            provider.failure = failure
+            e.enumerate(reset = false)
+            e.status().lastErrorCode
+        }
+
+    @Test
+    fun `an unreadable answer reports decode, not io`() {
+        val cause = SerializationException("Unexpected JSON token")
+        assertEquals("decode", codeOf(ProviderException("cannot be read", cause = cause)))
+    }
+
+    @Test
+    fun `an unexpected internal failure reports internal`() {
+        assertEquals("internal", codeOf(ProviderException("boom", cause = IllegalStateException("x"))))
+        assertEquals("internal", codeOf(ProviderException("boom")))
+    }
+
+    @Test
+    fun `transport failures keep their transport class`() {
+        assertEquals("io", codeOf(ProviderException("cut", cause = java.io.IOException("disk"))))
+        assertEquals("timeout", codeOf(ProviderException("slow", cause = java.net.SocketTimeoutException("t"))))
+    }
+
     // One page per listing; every cursor names the listing that produced it.
     private class ListingProvider : CloudProvider {
         var items: List<CloudItem> = emptyList()
