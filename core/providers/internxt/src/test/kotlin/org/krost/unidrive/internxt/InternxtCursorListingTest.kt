@@ -923,6 +923,7 @@ class InternxtCursorListingTest {
             val failure = assertFailsWith<InternxtApiException> { provider(drive.engine).delta(null, null, quiet()) }
 
             assertEquals(400, failure.statusCode)
+            assertEquals(400, failure.httpStatus, "the 400 came from the endpoint's response")
             assertTrue(drive.other.none { it.contains("offset=") }, "no offset request: ${drive.other}")
         }
 
