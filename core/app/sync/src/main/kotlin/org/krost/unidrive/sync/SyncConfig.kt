@@ -423,7 +423,7 @@ data class ProfileInfo(
 
 class NoDefaultProfileException(message: String) : IllegalStateException(message)
 
-class SyncConfig(
+data class SyncConfig(
     val syncRoot: Path,
     val pollInterval: Int,
     val minPollInterval: Int = 10,
