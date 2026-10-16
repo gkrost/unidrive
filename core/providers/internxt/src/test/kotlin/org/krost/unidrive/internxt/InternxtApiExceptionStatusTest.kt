@@ -8,7 +8,13 @@ import kotlin.test.assertNull
 class InternxtApiExceptionStatusTest {
     @Test
     fun `an API error passes its status up`() {
-        assertEquals(408, InternxtApiException("API error: 408 Request Timeout", statusCode = 408).httpStatus)
+        assertEquals(408, InternxtApiException("API error: 408 Request Timeout", statusCode = 408, responseReceived = true).httpStatus)
+    }
+
+    @Test
+    fun `a synthesized retry status is not an HTTP response`() {
+        assertNull(InternxtApiException("The cursor did not advance", statusCode = 503).httpStatus)
+        assertNull(InternxtApiException("Conflict retries exhausted", statusCode = 409).httpStatus)
     }
 
     @Test

@@ -141,9 +141,11 @@ class RemoteEnumeration(
         val transport = AttemptOutcome.ofFailure(e)
         if (transport != AttemptOutcome.IO) return transport.wire
         val chain = generateSequence<Throwable>(e) { it.cause?.takeIf { cause -> cause !== it } }.take(CAUSE_DEPTH).toList()
+        val responseStatus = chain.asSequence().drop(1).filterIsInstance<ProviderException>().mapNotNull { it.httpStatus }.firstOrNull()
         return when {
             chain.any { it is java.io.IOException } -> transport.wire
             chain.any { it.isDecodeFailure() } -> "decode"
+            responseStatus != null -> "http_$responseStatus"
             else -> "internal"
         }
     }

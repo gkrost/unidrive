@@ -947,7 +947,7 @@ class InternxtApiService(
             val downloaded =
                 httpClient.prepareGet(downloadUrl).execute { response ->
                     if (!response.status.isSuccess()) {
-                        throw InternxtApiException("Download failed: ${response.status}", response.status.value)
+                        throw InternxtApiException("Download failed: ${response.status}", response.status.value, responseReceived = true)
                     }
 
                     assertNotHtml(response, contextMsg = "Download (encrypted) -> ${destination.fileName}")
@@ -1208,7 +1208,7 @@ class InternxtApiService(
                     }
                 }
             if (!response.status.isSuccess()) {
-                throw InternxtApiException("Shard upload failed: ${response.status}", response.status.value)
+                throw InternxtApiException("Shard upload failed: ${response.status}", response.status.value, responseReceived = true)
             }
             bridgeBudget.recordSuccess()
         } catch (e: InternxtApiException) {
@@ -1448,6 +1448,7 @@ class InternxtApiService(
                 statusCode = response.status.value,
                 requestId = extractRequestId(response),
                 retryAfterMs = parseRetryAfterHeader(response.headers["Retry-After"]),
+                responseReceived = true,
             )
         }
     }
@@ -1598,7 +1599,8 @@ class InternxtApiException(
     requestId: String? = null,
     val retryAfterMs: Long? = null,
     cause: Throwable? = null,
-) : ProviderException(message, cause = cause, requestId = requestId, httpStatus = statusCode.takeIf { it > 0 && cause == null })
+    responseReceived: Boolean = false,
+) : ProviderException(message, cause = cause, requestId = requestId, httpStatus = statusCode.takeIf { responseReceived && it > 0 })
 
 /**
  * The server answered with success and a body the model cannot read: a required field missing or null, a value of

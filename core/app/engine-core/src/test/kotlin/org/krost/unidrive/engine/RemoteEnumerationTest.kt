@@ -462,6 +462,12 @@ class RemoteEnumerationTest {
             assertEquals("API error: 408 Request Timeout", s.lastError, "the body is dropped from the reason")
         }
 
+    @Test
+    fun `a gateway wrapper reports the HTTP status in its cause`() {
+        val response = ProviderException("gateway answered 524", httpStatus = 524)
+        assertEquals("http_524", codeOf(ProviderException("gateway unavailable", cause = response)))
+    }
+
     // Stands in for kotlinx.serialization's class, which this module's classpath does not carry: matched by name.
     private class SerializationException(message: String) : RuntimeException(message)
 

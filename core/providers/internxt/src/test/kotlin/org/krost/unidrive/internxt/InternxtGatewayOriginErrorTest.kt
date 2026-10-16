@@ -17,6 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -72,6 +73,7 @@ class InternxtGatewayOriginErrorTest {
             val failure = assertFailsWith<InternxtApiException> { service.listFiles() }
 
             assertEquals(503, failure.statusCode, "503 is what the /files fallback and the folder skip react to")
+            assertNull(failure.httpStatus, "the fallback's 503 was synthesized after the gateway response")
             assertEquals(120_000L, failure.retryAfterMs, "the gateway's Retry-After stays on the exception for the caller")
             val message = failure.message.orEmpty()
             assertTrue(
@@ -81,6 +83,7 @@ class InternxtGatewayOriginErrorTest {
             assertFalse(message.contains("?"), "no query string in a message: $message")
             val cause = failure.cause as InternxtApiException
             assertEquals(524, cause.statusCode)
+            assertEquals(524, cause.httpStatus, "the cause keeps the status of the actual response")
             assertTrue(cause.message.orEmpty().contains("error-524"), "the gateway's own body is kept in the cause: ${cause.message}")
             assertEquals(1, calls.get(), "one attempt: the same request gets the same 524")
             assertEquals(0L, currentTime, "and no pause before giving up")
