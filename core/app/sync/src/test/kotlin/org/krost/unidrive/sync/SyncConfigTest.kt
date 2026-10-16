@@ -765,171 +765,62 @@ class SyncConfigTest {
         assertNull(raw.providers["onedrive"]?.fast_bootstrap)
     }
 
-    // ── UD-252: resolveDefaultProfile shared between CLI and MCP ────────────────
+    // ── resolveDefaultProfile: default_profile, else the only profile, else a refusal ─────
 
-    // UD-012: assertions migrated from the literal `"onedrive"` to
-    // `ProviderRegistry.defaultProvider()`. The invariant being protected is
-    // "resolveDefaultProfile falls back to the registry's default when the
-    // config is silent" — not "it returns the historical onedrive string."
-    // Test names retain `UD-252` because they pin UD-252's CLI/MCP-parity
-    // contract; the implementation of that contract just moved from a
-    // hardcoded literal to a registry-driven choice.
+    private fun writeConfig(toml: String) = Files.writeString(tmpDir.resolve("config.toml"), toml)
+
+    private val twoProfiles =
+        """
+        [providers.ds418play]
+        type = "sftp"
+        host = "ds418play.local"
+        user = "backup"
+
+        [providers.internxt-3]
+        type = "internxt"
+        """.trimIndent()
 
     @Test
-    fun `UD-252 resolveDefaultProfile returns registry default when config is missing`() {
-        // Fresh tmpDir with no config.toml at all.
-        assertEquals(
-            org.krost.unidrive.ProviderRegistry.defaultProvider(),
-            SyncConfig.resolveDefaultProfile(tmpDir),
-        )
+    fun `resolveDefaultProfile refuses with no config file and says no profile is configured`() {
+        val e = assertFailsWith<NoDefaultProfileException> { SyncConfig.resolveDefaultProfile(tmpDir) }
+        assertTrue("No profile configured" in e.message!!, e.message)
     }
 
     @Test
-    fun `UD-252 resolveDefaultProfile returns registry default when default_profile is unset`() {
-        // The pre-UD-252 bug: MCP used to return "ds418play" here (alphabetically
-        // first provider key); CLI used to return a hardcoded literal via
-        // picocli defaultValue. Shared resolver must pick the registry default
-        // for parity — see UD-012 for the migration from literal to registry.
-        val toml =
-            """
-            [providers.ds418play]
-            type = "sftp"
-            host = "ds418play.local"
-            user = "backup"
-
-            [providers.onedrive]
-            type = "onedrive"
-            """.trimIndent()
-        Files.writeString(tmpDir.resolve("config.toml"), toml)
-
-        assertEquals(
-            org.krost.unidrive.ProviderRegistry.defaultProvider(),
-            SyncConfig.resolveDefaultProfile(tmpDir),
-        )
+    fun `resolveDefaultProfile uses the only configured profile without a default_profile`() {
+        writeConfig("[providers.internxt-3]\ntype = \"internxt\"\n")
+        assertEquals("internxt-3", SyncConfig.resolveDefaultProfile(tmpDir))
     }
 
     @Test
-    fun `UD-252 resolveDefaultProfile honours general default_profile`() {
-        val toml =
-            """
-            [general]
-            default_profile = "ds418play"
+    fun `resolveDefaultProfile never falls back to localfs when the only profile is another type`() {
+        // #920: the old fallback was the registry default "localfs", which resolved to a profile
+        // with no section and failed with a localfs-only message.
+        writeConfig("[providers.onedrive]\ntype = \"onedrive\"\n")
+        assertEquals("onedrive", SyncConfig.resolveDefaultProfile(tmpDir))
+    }
 
-            [providers.ds418play]
-            type = "sftp"
-            host = "ds418play.local"
-            user = "backup"
+    @Test
+    fun `resolveDefaultProfile refuses several profiles and lists them with their types`() {
+        writeConfig(twoProfiles)
+        val e = assertFailsWith<NoDefaultProfileException> { SyncConfig.resolveDefaultProfile(tmpDir) }
+        val msg = e.message!!
+        assertTrue("ds418play (sftp)" in msg && "internxt-3 (internxt)" in msg, msg)
+        assertTrue("-p <name>" in msg, msg)
+    }
 
-            [providers.onedrive]
-            type = "onedrive"
-            """.trimIndent()
-        Files.writeString(tmpDir.resolve("config.toml"), toml)
-
+    @Test
+    fun `resolveDefaultProfile honours general default_profile`() {
+        writeConfig("[general]\ndefault_profile = \"ds418play\"\n\n$twoProfiles")
         assertEquals("ds418play", SyncConfig.resolveDefaultProfile(tmpDir))
     }
 
     @Test
-    fun `UD-252 resolveDefaultProfile treats blank default_profile as unset`() {
-        val toml =
-            """
-            [general]
-            default_profile = ""
-
-            [providers.ds418play]
-            type = "sftp"
-            host = "ds418play.local"
-            user = "backup"
-            """.trimIndent()
-        Files.writeString(tmpDir.resolve("config.toml"), toml)
-
-        assertEquals(
-            org.krost.unidrive.ProviderRegistry.defaultProvider(),
-            SyncConfig.resolveDefaultProfile(tmpDir),
-        )
-    }
-
-    @Test
-    fun `UD-252 resolveDefaultProfile falls back to registry default on unparseable config`() {
-        // Corrupt TOML: bare key with no value. Must not crash — downstream callers
-        // will see a readable parse error from resolveProfile() once they try to
-        // load the full config. Startup should stay alive.
-        Files.writeString(tmpDir.resolve("config.toml"), "this is = = not toml\n[[[")
-
-        assertEquals(
-            org.krost.unidrive.ProviderRegistry.defaultProvider(),
-            SyncConfig.resolveDefaultProfile(tmpDir),
-        )
-    }
-
-    @Test
-    fun `UD-252 CLI and MCP resolvers agree on every config shape`() {
-        // The CLI call path: `provider ?: SyncConfig.resolveDefaultProfile(dir)`.
-        // The MCP call path: `parsed.profile ?: SyncConfig.resolveDefaultProfile(dir)`.
-        // Both collapse to the same function when -p is omitted, so a table-driven
-        // check against resolveDefaultProfile covers both invocation surfaces.
-        //
-        // Regression guard: if anyone re-introduces divergent logic (e.g. copies a
-        // `raw.providers.keys.firstOrNull()` branch into either jar), this test
-        // fails loudly against the real-world multi-profile config shape from the
-        // UD-252 repro.
-        data class Case(
-            val name: String,
-            val toml: String,
-            val expected: String,
-        )
-        // UD-012: the two "config silent on default_profile" cases below expect
-        // the registry default rather than the historical "onedrive" literal.
-        val registryDefault = org.krost.unidrive.ProviderRegistry.defaultProvider()
-        val cases =
-            listOf(
-                Case("empty general", "[general]\n", registryDefault),
-                Case(
-                    "multi profile no default_profile",
-                    """
-                    [providers.ds418play]
-                    type = "sftp"
-                    host = "h"
-                    user = "u"
-
-                    [providers.onedrive]
-                    type = "onedrive"
-                    """.trimIndent(),
-                    registryDefault,
-                ),
-                Case(
-                    "multi profile with default_profile",
-                    """
-                    [general]
-                    default_profile = "work-sftp"
-
-                    [providers.work-sftp]
-                    type = "sftp"
-                    host = "h"
-                    user = "u"
-
-                    [providers.onedrive]
-                    type = "onedrive"
-                    """.trimIndent(),
-                    "work-sftp",
-                ),
-            )
-
-        for (case in cases) {
-            val caseDir = Files.createTempDirectory("ud252-${case.name.replace(' ', '-')}")
-            Files.writeString(caseDir.resolve("config.toml"), case.toml)
-
-            // CLI path: when no -p flag, Main.resolveCurrentProfile() now computes
-            // `provider ?: SyncConfig.resolveDefaultProfile(baseConfigDir)`.
-            val cliResolved = null as String? ?: SyncConfig.resolveDefaultProfile(caseDir)
-
-            // MCP path: when no -p flag, mcp.Main computes
-            // `parsed.profile ?: SyncConfig.resolveDefaultProfile(configDir)`.
-            val mcpResolved = null as String? ?: SyncConfig.resolveDefaultProfile(caseDir)
-
-            assertEquals(case.expected, cliResolved, "CLI resolver for '${case.name}'")
-            assertEquals(case.expected, mcpResolved, "MCP resolver for '${case.name}'")
-            assertEquals(cliResolved, mcpResolved, "CLI/MCP divergence for '${case.name}'")
-        }
+    fun `resolveDefaultProfile treats blank default_profile as unset`() {
+        writeConfig("[general]\ndefault_profile = \"\"\n\n[providers.ds418play]\ntype = \"sftp\"\nhost = \"h\"\nuser = \"u\"\n")
+        assertEquals("ds418play", SyncConfig.resolveDefaultProfile(tmpDir))
+        writeConfig("[general]\ndefault_profile = \"\"\n\n$twoProfiles")
+        assertFailsWith<NoDefaultProfileException> { SyncConfig.resolveDefaultProfile(tmpDir) }
     }
 
     // ------------------------------------------------------------------
