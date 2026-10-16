@@ -19,9 +19,19 @@ import java.nio.file.Path
 internal object RootAccess {
     private val log = LoggerFactory.getLogger(RootAccess::class.java)
 
-    /** Returns a refusal token when [root] is not usable as a sync root, null when it is. */
-    fun validate(root: Path): String? {
+    /**
+     * Returns a refusal token when [root] is not usable as a sync root, null when it is.
+     *
+     * With [create] false (profile add: a typo must not leave a folder behind) a missing root is not
+     * created; it passes when it could be, i.e. its nearest existing ancestor is a directory this user
+     * can write to, and is refused with `root_not_creatable` otherwise.
+     */
+    fun validate(
+        root: Path,
+        create: Boolean = true,
+    ): String? {
         if (Files.exists(root) && !Files.isDirectory(root)) return "root_not_directory"
+        if (!create && !Files.exists(root)) return creatableUnder(root)
         try {
             Files.createDirectories(root)
         } catch (e: IOException) {
@@ -42,5 +52,18 @@ internal object RootAccess {
             return "root_not_writable"
         }
         return null
+    }
+
+    private fun creatableUnder(root: Path): String? {
+        var ancestor: Path? = root.parent
+        while (ancestor != null && !Files.exists(ancestor)) ancestor = ancestor.parent
+        if (ancestor == null || !Files.isDirectory(ancestor)) return "root_not_creatable"
+        return try {
+            Files.deleteIfExists(Files.createTempFile(ancestor, ".unidrive-write-probe", null))
+            null
+        } catch (e: IOException) {
+            log.warn("localfs root probe: cannot create {} under {}: {}", root, ancestor, e.message)
+            "root_not_creatable"
+        }
     }
 }

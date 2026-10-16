@@ -1,5 +1,6 @@
 package org.krost.unidrive.localfs
 
+import org.krost.unidrive.AddRefusal
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.ConfigurationException
 import org.krost.unidrive.ProviderFactory
@@ -51,35 +52,48 @@ class LocalFsProviderFactory : ProviderFactory {
                     "missing required 'root_path' (the local directory to treat as the remote)",
                 )
         val root = Paths.get(expandTilde(rootRaw)).toAbsolutePath().normalize()
-        // #910: a filesystem/drive root (X:\, /) holds the system folders and, for a two-way
-        // mirror, everything else on the volume — refuse it unless the profile says otherwise.
-        if (root.parent == null && properties["allow_drive_root"] != "true") {
-            throw ConfigurationException(
-                id,
-                "root_is_drive_root: '$rootRaw' is a drive/filesystem root. A two-way mirror would pull in the " +
-                    "system folders and everything else on the volume. Point root_path at a dedicated folder, " +
-                    "or set allow_drive_root=true to accept it anyway.",
-            )
-        }
-        // #910: refuse an unusable root at add time with a token the wizard can map, instead of
-        // accepting the profile and failing on the first scan.
-        when (val token = RootAccess.validate(root)) {
-            "root_not_creatable" ->
-                throw ConfigurationException(id, "root_not_creatable: '$rootRaw' does not exist and cannot be created")
-            "root_not_directory" ->
-                throw ConfigurationException(id, "root_not_directory: '$rootRaw' exists but is not a directory")
-            "root_not_readable" ->
-                throw ConfigurationException(id, "root_not_readable: '$rootRaw' cannot be read by this user")
-            "root_not_writable" ->
-                throw ConfigurationException(id, "root_not_writable: '$rootRaw' cannot be written to by this user (the localfs account is a two-way mirror)")
-            else ->
-                if (token != null) throw ConfigurationException(id, "$token: '$rootRaw' is not usable as a sync root")
+        rootRefusal(rootRaw, root, properties["allow_drive_root"] == "true", create = true)?.let {
+            throw ConfigurationException(id, "${it.token}: ${it.message}")
         }
         if (root.parent == null) {
             LoggerFactory.getLogger(LocalFsProviderFactory::class.java)
                 .warn("localfs: allow_drive_root is set; syncing the filesystem root '{}', system folders excluded by the walk", root)
         }
         return LocalFsProvider(root)
+    }
+
+    // #917: `profile add` refuses an unusable root with the same tokens, without creating the folder.
+    override fun preflightAdd(properties: Map<String, String?>): AddRefusal? {
+        val rootRaw = properties["root_path"]?.takeIf { it.isNotBlank() } ?: return null
+        val root = Paths.get(expandTilde(rootRaw)).toAbsolutePath().normalize()
+        return rootRefusal(rootRaw, root, properties["allow_drive_root"] == "true", create = false)
+    }
+
+    private fun rootRefusal(
+        rootRaw: String,
+        root: Path,
+        allowDriveRoot: Boolean,
+        create: Boolean,
+    ): AddRefusal? {
+        // #910: a filesystem/drive root (X:\, /) holds the system folders and, for a two-way
+        // mirror, everything else on the volume — refuse it unless the profile says otherwise.
+        if (root.parent == null && !allowDriveRoot) {
+            return AddRefusal(
+                "root_is_drive_root",
+                "'$rootRaw' is a drive/filesystem root. A two-way mirror would pull in the " +
+                    "system folders and everything else on the volume. Point root_path at a dedicated folder, " +
+                    "or set allow_drive_root=true to accept it anyway.",
+            )
+        }
+        return when (val token = RootAccess.validate(root, create)) {
+            null -> null
+            "root_not_creatable" -> AddRefusal(token, "'$rootRaw' does not exist and cannot be created")
+            "root_not_directory" -> AddRefusal(token, "'$rootRaw' exists but is not a directory")
+            "root_not_readable" -> AddRefusal(token, "'$rootRaw' cannot be read by this user")
+            "root_not_writable" ->
+                AddRefusal(token, "'$rootRaw' cannot be written to by this user (the localfs account is a two-way mirror)")
+            else -> AddRefusal(token, "'$rootRaw' is not usable as a sync root")
+        }
     }
 
     /** localfs has no credentials, but it's only usable once root_path is configured. */
