@@ -436,20 +436,7 @@ class StatusCommand : Runnable {
                 println("Sync scope: invalid: ${e.message}")
                 return
             }
-        val stateDbPath = configDir.resolve("state.db")
-        val persisted =
-            if (Files.exists(stateDbPath)) {
-                val db = StateDatabase(stateDbPath, readOnly = true)
-                try {
-                    db.initialize()
-                    db.getSyncState("effective_scope").orEmpty().split("\t").filter { it.isNotEmpty() }
-                } finally {
-                    db.close()
-                }
-            } else {
-                emptyList()
-            }
-        scopeStatusLine(configured, persisted)?.let { println(it) }
+        scopeStatusLine(configured, persistedScope(configDir))?.let { println(it) }
         if (configured.isNotEmpty()) {
             val excludes = SyncConfig.DEFAULT_EXCLUDE_PATTERNS + profile.rawProvider?.exclude_patterns.orEmpty()
             val outside =
@@ -483,6 +470,9 @@ class StatusCommand : Runnable {
                 }.sortedBy { it.displayName }
 
         renderTable(groups, ansi)
+        // #395: the table has no room for a scope column, and a scoped profile must not look
+        // like a whole-drive one: name each scoped profile under the table.
+        scopeLinesForProfiles(profiles, baseDir).forEach { println(it) }
     }
 
     private fun showCredentialHealthReport() {
@@ -1296,6 +1286,37 @@ internal fun resolvesSingleProfileViaConfig(
     return false
 }
 
+// The persisted scope history (effective_scope) of the profile at [configDir]; empty when
+// there is no state.db yet.
+internal fun persistedScope(configDir: Path): List<String> {
+    val stateDbPath = configDir.resolve("state.db")
+    if (!Files.exists(stateDbPath)) return emptyList()
+    val db = StateDatabase(stateDbPath, readOnly = true)
+    return try {
+        db.initialize()
+        db.getSyncState("effective_scope").orEmpty().split("\t").filter { it.isNotEmpty() }
+    } finally {
+        db.close()
+    }
+}
+
+// One scope line per profile that is scoped, has scoped history, or has an invalid
+// sync_path; silent for whole-drive profiles and for orphans (no config section to read).
+internal fun scopeLinesForProfiles(
+    profiles: List<ProfileInfo>,
+    baseDir: Path,
+): List<String> =
+    profiles.filter { !it.isOrphan }.sortedBy { it.name }.mapNotNull { profile ->
+        val configured =
+            try {
+                SyncScope.fromConfig(profile.rawProvider?.sync_path, profile.name)
+            } catch (e: IllegalArgumentException) {
+                return@mapNotNull "Sync scope (${profile.name}): invalid: ${e.message}"
+            }
+        val persisted = runCatching { persistedScope(baseDir.resolve(profile.name)) }.getOrDefault(emptyList())
+        scopeStatusLine(configured, persisted, profile.name)
+    }
+
 internal fun outOfScopeLine(outside: List<String>): String? {
     if (outside.isEmpty()) return null
     val shown = outside.take(5).joinToString(", ")
@@ -1306,11 +1327,14 @@ internal fun outOfScopeLine(outside: List<String>): String? {
 internal fun scopeStatusLine(
     configured: List<String>,
     persisted: List<String>,
-): String? =
-    when {
-        configured.isNotEmpty() -> "Sync scope: ${configured.joinToString(", ")}"
+    profileName: String? = null,
+): String? {
+    val label = if (profileName == null) "Sync scope" else "Sync scope ($profileName)"
+    return when {
+        configured.isNotEmpty() -> "$label: ${configured.joinToString(", ")}"
         persisted.isNotEmpty() ->
-            "Sync scope: whole drive, but this profile has scoped history (${persisted.joinToString(", ")}); " +
+            "$label: whole drive, but this profile has scoped history (${persisted.joinToString(", ")}); " +
                 "bare bidirectional sync is refused unless --full-tree is passed."
         else -> null
     }
+}

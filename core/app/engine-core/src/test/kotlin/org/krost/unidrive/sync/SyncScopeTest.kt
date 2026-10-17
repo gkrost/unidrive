@@ -47,6 +47,16 @@ class SyncScopeTest {
     }
 
     @Test
+    fun `a root typed with decomposed characters equals its composed form and matches composed paths`() {
+        val nfd = "/A\u0308rzte/Bru\u0308cke"
+        val nfc = "/\u00C4rzte/Br\u00FCcke"
+        assertEquals(nfc, SyncScope.normalizePath(nfd))
+        assertEquals(listOf(nfc), SyncScope.normalize(listOf(nfd, nfc)))
+        assertTrue(SyncScope.contains("$nfc/file.txt", SyncScope.normalize(listOf(nfd))))
+        assertEquals(listOf(nfc), SyncScope.fromConfig(listOf(nfd), "p"))
+    }
+
+    @Test
     fun `normalize drops empty entries duplicates and nested roots`() {
         assertEquals(
             listOf("/a", "/b"),
@@ -85,6 +95,14 @@ class SyncScopeTest {
     fun `outOfScopeLocal enters folders leading to a nested root`() {
         val root = tree("a/b/x.txt", "a/c/y.txt", "z/w.txt")
         assertEquals(listOf("/a/c", "/z"), SyncScope.outOfScopeLocal(root, listOf("/a/b")))
+    }
+
+    @Test
+    fun `outOfScopeLocal matches decomposed local names under normalized roots`() {
+        val root = tree("A\u0308rzte/Bru\u0308cke/x.txt", "other/y.txt")
+        val roots = SyncScope.normalize(listOf("/A\u0308rzte/Bru\u0308cke"))
+
+        assertEquals(listOf("/other"), SyncScope.outOfScopeLocal(root, roots))
     }
 
     @Test

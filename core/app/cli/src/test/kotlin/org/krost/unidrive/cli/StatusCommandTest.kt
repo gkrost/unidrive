@@ -1,6 +1,9 @@
 package org.krost.unidrive.cli
 
 import org.krost.unidrive.CredentialHealth
+import org.krost.unidrive.sync.ProfileInfo
+import org.krost.unidrive.sync.RawProvider
+import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.model.SyncEntry
 import picocli.CommandLine
@@ -825,6 +828,76 @@ class StatusCommandTest {
     @Test
     fun `scope status line is silent for an unscoped profile`() {
         assertNull(scopeStatusLine(configured = emptyList(), persisted = emptyList()))
+    }
+
+    @Test
+    fun `scope status line names the profile when asked to`() {
+        assertEquals("Sync scope (work): /a", scopeStatusLine(listOf("/a"), emptyList(), "work"))
+        assertTrue(scopeStatusLine(emptyList(), listOf("/old"), "work")!!.startsWith("Sync scope (work): whole drive"))
+        assertNull(scopeStatusLine(emptyList(), emptyList(), "work"))
+    }
+
+    // #395: the multi-profile view names a scoped profile; whole-drive profiles stay silent.
+    @Test
+    fun `multi-profile scope lines list scoped profiles and skip whole-drive ones`() {
+        val baseDir = Files.createTempDirectory("status-scope-test-")
+        fun profile(
+            name: String,
+            syncPath: List<String>?,
+        ) = ProfileInfo(name, "localfs", baseDir.resolve("root-$name"), RawProvider(type = "localfs", sync_path = syncPath))
+
+        val history = baseDir.resolve("past")
+        Files.createDirectories(history)
+        StateDatabase(history.resolve("state.db")).also {
+            it.initialize()
+            it.setSyncState("effective_scope", "/old\t/older")
+            it.close()
+        }
+        val lines =
+            scopeLinesForProfiles(
+                listOf(
+                    profile("whole", null),
+                    profile("scoped", listOf("/_INBOX", "/b")),
+                    profile("past", null),
+                    profile("broken", listOf("relative")),
+                    ProfileInfo("orphan", "localfs", baseDir.resolve("root-orphan"), null, isOrphan = true),
+                ),
+                baseDir,
+            )
+        assertEquals(3, lines.size, "got: $lines")
+        assertTrue(lines.any { it == "Sync scope (scoped): /_INBOX, /b" }, "got: $lines")
+        assertTrue(lines.any { it.startsWith("Sync scope (past): whole drive") && "/old, /older" in it }, "got: $lines")
+        assertTrue(lines.any { it.startsWith("Sync scope (broken): invalid:") }, "got: $lines")
+    }
+
+    @Test
+    fun `status --all prints the scope of a scoped profile under the table`() {
+        val dir = Files.createTempDirectory("status-scope-all-")
+        val originalOut = System.out
+        try {
+            val bs = Char(92)
+            val root = dir.resolve("root").toString().replace(bs, '/')
+            Files.writeString(
+                dir.resolve("config.toml"),
+                listOf(
+                    "[providers.lf]",
+                    "type = \"localfs\"",
+                    "mode = \"mirror\"",
+                    "sync_root = \"$root\"",
+                    "sync_path = [\"/_INBOX\"]",
+                ).joinToString("\n", postfix = "\n"),
+            )
+            val captured = java.io.ByteArrayOutputStream()
+            System.setOut(java.io.PrintStream(captured, true, "UTF-8"))
+            val exit = CommandLine(Main()).execute("-c", dir.toString(), "status", "--all")
+            System.setOut(originalOut)
+            val out = captured.toString("UTF-8")
+            assertEquals(0, exit, out)
+            assertTrue("Sync scope (lf): /_INBOX" in out, "the scoped profile must be named: $out")
+        } finally {
+            System.setOut(originalOut)
+            dir.toFile().deleteRecursively()
+        }
     }
 
     @Test
