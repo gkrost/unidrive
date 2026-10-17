@@ -144,7 +144,7 @@ class RequestMetricsRecorder internal constructor(
             prune()
             var running = true
             while (running) {
-                val first = queue.poll(POLL_MS, TimeUnit.MILLISECONDS)
+                val first = queue.poll(idleWaitMs(nextDueInNs()), TimeUnit.MILLISECONDS)
                 if (first != null) {
                     batch.add(first)
                     queue.drainTo(batch, config.batchSize - 1)
@@ -246,8 +246,15 @@ class RequestMetricsRecorder internal constructor(
 
     private fun rollUpIfDue() {
         if (dirtyMinutes.isEmpty()) return
-        if (System.nanoTime() - lastRollupNanos >= TimeUnit.MILLISECONDS.toNanos(config.rollupIntervalMs)) rollUp()
+        if (rollupDueInNs() <= 0) rollUp()
     }
+
+    private fun rollupDueInNs(): Long = TimeUnit.MILLISECONDS.toNanos(config.rollupIntervalMs) - (System.nanoTime() - lastRollupNanos)
+
+    private fun pruneDueInNs(): Long = TimeUnit.MILLISECONDS.toNanos(config.pruneIntervalMs) - (System.nanoTime() - lastPruneNanos)
+
+    // What an idle writer waits for: the retention, and the roll-up while minutes are waiting for one.
+    private fun nextDueInNs(): Long = if (dirtyMinutes.isEmpty()) pruneDueInNs() else minOf(pruneDueInNs(), rollupDueInNs())
 
     @Suppress("TooGenericExceptionCaught")
     private fun rollUp() {
@@ -265,7 +272,7 @@ class RequestMetricsRecorder internal constructor(
     }
 
     private fun pruneIfDue() {
-        if (System.nanoTime() - lastPruneNanos >= TimeUnit.MILLISECONDS.toNanos(config.pruneIntervalMs)) prune()
+        if (pruneDueInNs() <= 0) prune()
     }
 
     @Suppress("TooGenericExceptionCaught")
@@ -289,7 +296,6 @@ class RequestMetricsRecorder internal constructor(
         const val DEFAULT_WAIT_MS = 10_000L
         private const val QUERY_WAIT_MS = 2_000L
         private const val JOIN_TIMEOUT_MS = 10_000L
-        private const val POLL_MS = 500L
         private val WARN_EVERY_NANOS = TimeUnit.MINUTES.toNanos(1)
     }
 }
