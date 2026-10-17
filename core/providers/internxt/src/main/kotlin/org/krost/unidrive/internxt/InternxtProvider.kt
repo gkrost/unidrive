@@ -501,8 +501,11 @@ class InternxtProvider(
                 }
             } catch (e: RemoteIncompleteDownloadException) {
                 // The stored object cannot produce a whole file; say so with the
-                // path before the typed failure quarantines the row (#536).
-                log.warn("download of {} refused: {}", remotePath, e.message)
+                // path before the typed failure quarantines the row (#536). DEBUG here: the
+                // caller owns the WARN, once per object (the mount's MountEngine; the sync
+                // engine's quarantine line), because this provider does not know whether it
+                // is the first refusal of the object.
+                log.debug("download of {} refused: {}", remotePath, e.message)
                 throw e
             }
         // Completeness guard (the second line, for a stream whose length was not known in
@@ -515,7 +518,7 @@ class InternxtProvider(
             withContext(Dispatchers.IO) {
                 Files.deleteIfExists(destination)
             }
-            log.warn(
+            log.debug(
                 "download of {} is incomplete: got {} of {} bytes; removed the partial copy",
                 remotePath,
                 downloaded.bytesWritten,

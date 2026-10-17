@@ -13,6 +13,7 @@ import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.model.SyncEntry
@@ -183,10 +184,34 @@ internal class MinimalFakeProvider(
         return content.size.toLong()
     }
 
+    // Every downloadById call, including the ones that are refused (downloadCount counts the ones that got to the bytes).
+    var downloadAttempts: Int = 0
+        private set
+
+    // Remote ids of cloud objects whose stored copy is shorter than the declared size: every download of one fails
+    // typed, the way the Internxt provider refuses at the response headers. value = (stored, declared) bytes.
+    private val truncatedObjects = ConcurrentHashMap<String, Pair<Long, Long>>()
+
+    fun truncateRemote(remoteId: String, storedBytes: Long, declaredBytes: Long) {
+        truncatedObjects[remoteId] = storedBytes to declaredBytes
+    }
+
+    fun repairRemote(remoteId: String) {
+        truncatedObjects.remove(remoteId)
+    }
+
     override suspend fun downloadById(remoteId: String, remotePath: String, destination: Path): Long {
+        downloadAttempts++
         nextThrowable?.also {
             nextThrowable = null
             throw it
+        }
+        truncatedObjects[remoteId]?.let { (stored, declared) ->
+            throw RemoteIncompleteDownloadException(
+                "Stored object for $remotePath is short: $stored of $declared bytes",
+                storedBytes = stored,
+                declaredBytes = declared,
+            )
         }
         downloadCount++
         return download(remotePath, destination)
@@ -447,14 +472,16 @@ internal class HydrationTestEnv(
             remoteSize: Long,
             isFolder: Boolean = false,
             remoteId: String? = "id-$path",
+            remoteHash: String? = "hash-$path",
+            remoteModified: Instant? = Instant.parse("2026-03-28T12:00:00Z"),
         ) {
             db.upsertEntry(
                 SyncEntry(
                     path = path,
                     remoteId = remoteId,
-                    remoteHash = "hash-$path",
+                    remoteHash = remoteHash,
                     remoteSize = remoteSize,
-                    remoteModified = Instant.parse("2026-03-28T12:00:00Z"),
+                    remoteModified = remoteModified,
                     localMtime = null,
                     localSize = null,
                     isFolder = isFolder,
@@ -695,6 +722,16 @@ internal class HydrationTestEnv(
 
         /** Number of times downloadById has been called on the fake provider. */
         fun downloadCount(): Int = fakeProvider.downloadCount
+
+        /** Number of downloadById calls the fake provider received, refused ones included. */
+        fun downloadAttempts(): Int = fakeProvider.downloadAttempts
+
+        /** Make the cloud object [remoteId] a truncated one: every download of it is refused (stored < declared). */
+        fun truncateRemote(remoteId: String, storedBytes: Long, declaredBytes: Long) =
+            fakeProvider.truncateRemote(remoteId, storedBytes, declaredBytes)
+
+        /** The cloud object [remoteId] is whole again. */
+        fun repairRemote(remoteId: String) = fakeProvider.repairRemote(remoteId)
 
         /**
          * Install a gate on the fake provider's upload method: the next (and every

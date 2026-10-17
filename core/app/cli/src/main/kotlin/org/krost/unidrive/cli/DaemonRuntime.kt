@@ -610,6 +610,8 @@ class DaemonRuntime(
                         // by the path it has now, the name it has on disk (suffixed when a live top-level item holds the
                         // configured name) and the name the profile asks for (trash_folder_name).
                         (trash.rootPath()?.let { ",\"trash\":${trashStatusJson(it, trash.configuredName)}" } ?: "") +
+                        // remote_incomplete: present only while a truncated cloud object is remembered (count only, no names).
+                        (mount.remoteIncompleteCount().takeIf { it > 0 }?.let { ",\"remote_incomplete\":${remoteIncompleteJson(it)}" } ?: "") +
                         // paused (#778): present only while the daemon is paused; uploads and quota above keep reporting.
                         (pause.current?.let { ",\"paused\":${it.toJson()}" } ?: "") +
                         "}"

@@ -1,5 +1,8 @@
 package org.krost.unidrive.internxt
 
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.MockRequestHandleScope
@@ -18,6 +21,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import org.slf4j.LoggerFactory
 
 /**
  * #536: a stored object shorter than the size the drive reports (a multipart upload another client
@@ -188,16 +192,27 @@ class InternxtRemoteIncompleteDownloadTest {
         shardContentLength = null
         bridgeInfoJson = bridgeInfoJsonWith(listOf(shardUrl1))
         val provider = newProvider()
+        val logger = LoggerFactory.getLogger(InternxtProvider::class.java) as ch.qos.logback.classic.Logger
+        val appender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(appender)
 
-        val e =
+        val e = try {
             assertFailsWith<RemoteIncompleteDownloadException> {
                 kotlinx.coroutines.test.runTest {
                     provider.downloadById(fileUuid, "/truncated.7z", destination)
                 }
             }
+        } finally {
+            logger.detachAppender(appender)
+            appender.stop()
+        }
 
         assertEquals(11L, e.storedBytes)
         assertEquals(23L, e.declaredBytes)
+        assertTrue(
+            appender.list.none { it.level == Level.WARN && it.formattedMessage.contains("incomplete") },
+            "the caller owns the once-per-object incomplete-download WARN",
+        )
         assertEquals(
             1,
             requestLog.count { it.contains("shard-host.invalid") },

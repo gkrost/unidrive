@@ -11,6 +11,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.NameRefusedException
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.PermanentUploadFailureException
+import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.engine.AuditSink
 import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.EnumerationEntryPoint
@@ -206,6 +207,39 @@ class MountEngine private constructor(
     // of distinct paths ever hydrated.
     private val hydrateMutexes = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
 
+    // Cloud objects found truncated, remembered so a repeated read or pin is refused without asking the provider.
+    internal val remoteIncomplete = RemoteIncompleteMemory()
+
+    private fun refuseIfRemembered(
+        path: String,
+        entry: SyncEntry,
+    ) {
+        val remembered = remoteIncomplete.recall(entry) ?: return
+        log.debug("download of {} refused from memory: {}", path, remembered.message)
+        throw remembered
+    }
+
+    // Runs a download; the provider's refusal of a truncated object is recorded (WARN the first time per object and
+    // run, DEBUG after) and passed on unchanged.
+    private suspend fun <T> rememberingRemoteIncomplete(
+        path: String,
+        entry: SyncEntry,
+        download: suspend () -> T,
+    ): T =
+        try {
+            download()
+        } catch (e: RemoteIncompleteDownloadException) {
+            if (remoteIncomplete.remember(entry, e)) {
+                log.warn("download of {} refused: {}", path, e.message)
+            } else {
+                log.debug("download of {} refused again: {}", path, e.message)
+            }
+            throw e
+        }
+
+    /** How many cloud objects are remembered as truncated; `daemon.status.remote_incomplete.count` reports it. */
+    fun remoteIncompleteCount(): Int = remoteIncomplete.count
+
     /**
      * Hydrate a single remote path into the local hydration cache. Idempotent —
      * if the path is already hydrated and the cache file exists, returns the
@@ -272,6 +306,9 @@ class MountEngine private constructor(
         // remote to compare against", and isHydrated here carries the warm-trust
         // meaning, so the split check is intentional.
         if (servesFromLocalCopy(entry, cachePath)) return cachePath
+        // The cloud object was found truncated and the row still describes that same version: refuse again
+        // without asking the provider (see [RemoteIncompleteMemory]).
+        refuseIfRemembered(path, entry)
         // Construct a minimal CloudItem so downloadByIdOrPath can route by id
         // (fast path) or fall back to path-based (when remoteId is null).
         val remoteItem = CloudItem(
@@ -301,13 +338,16 @@ class MountEngine private constructor(
             // #778: a download starts only while the daemon is not paused; one running when a pause begins is
             // judged on the bytes the staging file holds so far.
             val downloadedSize =
-                pause.track(path) { transfer ->
-                    transfer.begin()
-                    // #652: a cold download is a transfer from here on (a warm serve and a refusal for a pause never get here).
-                    history?.started()
-                    transfer.measuredBy(entry.remoteSize) { runCatching { Files.size(staged) }.getOrDefault(0L) }
-                    watchingCredentials { Transfers.downloadByIdOrPath(provider, remoteItem, remotePathOf(path, entry), staged) }
+                rememberingRemoteIncomplete(path, entry) {
+                    pause.track(path) { transfer ->
+                        transfer.begin()
+                        // #652: a cold download is a transfer from here on (a warm serve and a refusal for a pause never get here).
+                        history?.started()
+                        transfer.measuredBy(entry.remoteSize) { runCatching { Files.size(staged) }.getOrDefault(0L) }
+                        watchingCredentials { Transfers.downloadByIdOrPath(provider, remoteItem, remotePathOf(path, entry), staged) }
+                    }
                 }
+            remoteIncomplete.forget(entry)
             if (options.verifyIntegrity) {
                 val verified = HashVerifier.verify(staged, entry.remoteHash, algorithm = provider.hashAlgorithm())
                 if (!verified) {

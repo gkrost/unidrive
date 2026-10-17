@@ -65,6 +65,17 @@ internal fun providerHealthJson(lastContactMs: Long?): JsonObject =
     }
 
 /**
+ * `remote_incomplete` in `daemon.status`: present only while the daemon remembers a cloud object whose stored copy is
+ * shorter than the size the drive reports (reads of it are refused with `remote_incomplete`). `count` is how many it
+ * remembers in this run, without names; an object is forgotten when a read finds it whole or its cloud version
+ * (size, hash, modification time) changes, so after a restart the count starts at 0 until a read meets one again.
+ */
+internal fun remoteIncompleteJson(count: Int): JsonObject =
+    buildJsonObject {
+        put("count", count)
+    }
+
+/**
  * `paused` (#778): present only while the daemon is paused. `since_ms` is epoch ms of the first request of the
  * pause; `auto` says whether a rule of the client (true) or a person (false) paused; `until_ms` (epoch ms at which
  * the daemon resumes by itself) is present only for a timed pause. The same object is the reply of

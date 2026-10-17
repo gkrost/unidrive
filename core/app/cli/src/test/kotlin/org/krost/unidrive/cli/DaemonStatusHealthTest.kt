@@ -17,6 +17,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.hydration.HydrationImpl
 import org.krost.unidrive.sync.IpcAuth
 import org.krost.unidrive.sync.IpcAuthClient
@@ -74,7 +75,18 @@ class DaemonStatusHealthTest {
 
         override suspend fun getMetadata(path: String): CloudItem = error("not used")
 
-        override suspend fun download(remotePath: String, destination: Path): Long = error("not used")
+        // Set: the stored copy of every object is shorter than the size listed (counts the attempts that reach the provider).
+        @Volatile
+        var truncated = false
+        val downloadAttempts = java.util.concurrent.atomic.AtomicInteger(0)
+
+        override suspend fun download(remotePath: String, destination: Path): Long {
+            downloadAttempts.incrementAndGet()
+            if (truncated) {
+                throw RemoteIncompleteDownloadException("Stored object is short: 100 of 500 bytes", storedBytes = 100, declaredBytes = 500)
+            }
+            error("not used")
+        }
 
         override suspend fun upload(
             localPath: Path,
@@ -317,6 +329,35 @@ class DaemonStatusHealthTest {
             assertEquals("/Corbeille", trash.getValue("root_path").jsonPrimitive.content)
             assertEquals("Corbeille", trash.getValue("folder_name").jsonPrimitive.content)
             assertEquals("Corbeille", trash.getValue("configured_name").jsonPrimitive.content)
+        } finally {
+            runtime.close()
+            daemonJob.join()
+        }
+    }
+
+    @Test
+    fun `a truncated cloud object shows in the status once a read has met it, and is asked about once`() = runBlocking {
+        val provider =
+            FlakyProvider().apply {
+                truncated = true
+                items = listOf(CloudItem("o1", "big.bin", "/big.bin", 500, false, null, null, null, null))
+            }
+        val runtime = runtime(provider)
+        val daemonJob = launch { runtime.start() }
+        awaitDaemonSocket(socketPath, daemonJob)
+        try {
+            send("""{"verb":"sync.enumerate"}""")
+            awaitStatus("the first listing") { it.getValue("enumeration").jsonObject["last_success_at_ms"] != null }
+            assertFalse("remote_incomplete" in status(), "nothing truncated is known before a read met it: the key is absent")
+
+            send("""{"verb":"hydration.open_read","handle_id":"h1","path":"/big.bin"}""")
+            send("""{"verb":"hydration.open_read","handle_id":"h2","path":"/big.bin"}""")
+
+            val s = awaitStatus("a remembered truncated object") { "remote_incomplete" in it }
+            val remembered = s.getValue("remote_incomplete").jsonObject
+            assertEquals(setOf("count"), remembered.keys, "a count only, no names")
+            assertEquals(1, remembered.getValue("count").jsonPrimitive.long)
+            assertEquals(1, provider.downloadAttempts.get(), "the second read was refused from memory")
         } finally {
             runtime.close()
             daemonJob.join()
