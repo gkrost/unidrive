@@ -16,6 +16,7 @@ import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
 import org.krost.unidrive.internxt.model.tryParseInternxtInstant
+import org.krost.unidrive.io.withLocalIoRetry
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
@@ -765,7 +766,7 @@ class InternxtProvider(
         try {
             fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
             localMtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toInstant() }
-            contentFingerprint = withContext(Dispatchers.IO) { UploadTombstoneStore.contentFingerprint(localPath) }
+            contentFingerprint = withContext(Dispatchers.IO) { withLocalIoRetry { UploadTombstoneStore.contentFingerprint(localPath) } }
         } catch (e: java.nio.file.NoSuchFileException) {
             withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
             throw e
@@ -931,7 +932,7 @@ class InternxtProvider(
             try {
                 withContext(Dispatchers.IO) {
                     Files.createDirectories(tempFile.parent)
-                    javax.crypto.CipherInputStream(Files.newInputStream(localPath), encCipher).use { cipherIn ->
+                    javax.crypto.CipherInputStream(withLocalIoRetry { Files.newInputStream(localPath) }, encCipher).use { cipherIn ->
                         Files.newOutputStream(tempFile).use { out ->
                             val buf = ByteArray(8192)
                             var n: Int
@@ -2768,11 +2769,15 @@ class InternxtProvider(
         // listing that still finishes on a large drive — takes the gather over. The whole 5xx family: live,
         // the gateway answers Cloudflare 524 at its own cap (about 125 s) at the same deep page of the
         // folder stream on every run — a deterministic wall, not a blip the next gather dodges, which is
-        // why this is wider than SERVER_UNAVAILABLE_STATUSES. Status 0 is a connection that never formed; a
-        // cut before the answer surfaces as 503. 429 stays out: the retry ladder honoured it already, and
-        // walking a throttled server is the wrong move. A client error (401, a 404 on a later page) is a
-        // request-shape problem a walk cannot fix: it ends the attempt with the marker intact.
-        private fun isServerSideListingFailure(statusCode: Int): Boolean = statusCode >= 500 || statusCode == 0
+        // why this is wider than SERVER_UNAVAILABLE_STATUSES. A cut before the answer surfaces as 503.
+        // Status 0 is a connection that never formed (#693): the enumeration has already waited out its
+        // outage window, and a walk would meet the same dead network. It would also open the 30-minute window
+        // and replace the cursor marker with a tree marker, so the next gather would start from item 0
+        // instead of continuing the cursors. It ends the attempt with the marker intact, like a client error.
+        // 429 stays out: the retry ladder honoured it already, and walking a throttled server is the wrong
+        // move. A client error (401, a 404 on a later page) is a request-shape problem a walk cannot fix: it
+        // ends the attempt with the marker intact.
+        private fun isServerSideListingFailure(statusCode: Int): Boolean = statusCode >= 500
 
         // #517 R3: how long a full gather remembers an unavailable account-wide listing
         // before it pays one attempt to re-learn. The live account cycled the doomed
