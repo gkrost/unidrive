@@ -710,6 +710,43 @@ class RemoteGather(
         }
     }
 
+    /**
+     * The one decision about the recovery latch ([INCOMPLETE_ENUMERATION_KEY]), made by every caller that has just
+     * gathered: the mirror's sync pass and the mount's enumeration. A gather that ended incomplete sets the latch, and
+     * while it is set each gather lists the whole drive from zero instead of continuing from the delta cursor, because
+     * the cursor of an incomplete pass cannot prove that an absent path is truly absent. Only a trusted inventory ends
+     * that, and it is judged here, in one place, so that neither caller can clear it on weaker grounds than the other
+     * (a mount daemon never runs the sync pass, and used to keep the latch for ever):
+     * - the gather was a full listing (`last_gather_full`, or [fullListingFallback] when the gather did not record it);
+     * - it was not [scoped] to a part of the drive;
+     * - it ended complete (`pending_cursor_complete`);
+     * - the remote-shrink guard did not fire ([shrinkWarning], see [remoteShrinkWarningOrNull]);
+     * - [reapsDeferred] is false: a pass whose deletions were held back (the enumeration's bulk-disappearance
+     *   corroboration) is no trusted inventory yet, and the corroboration needs the NEXT pass to be a full listing too.
+     * Returns whether the inventory was trusted; the latch is written "false" then.
+     */
+    fun settleRecoveryLatch(
+        scoped: Boolean,
+        shrinkWarning: String?,
+        reapsDeferred: Boolean = false,
+        fullListingFallback: Boolean = false,
+    ): Boolean {
+        val fullListing = db.getSyncState("last_gather_full")?.toBooleanStrictOrNull() ?: fullListingFallback
+        val trusted =
+            fullListing && !scoped && !reapsDeferred && shrinkWarning == null &&
+                db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() == true
+        if (trusted) {
+            val current = db.getSyncState(INCOMPLETE_ENUMERATION_KEY)
+            if (current != "false") {
+                db.setSyncState(INCOMPLETE_ENUMERATION_KEY, "false")
+                if (current?.equals("true", ignoreCase = true) == true) {
+                    log.info("A complete full listing ended the recovery: later gathers continue from the delta cursor")
+                }
+            }
+        }
+        return trusted
+    }
+
     fun resolveItemPath(item: CloudItem): CloudItem? {
         // #171: canonicalize the remote path to NFC so it matches the NFC local key
         // in the reconciler (copy only when the form actually changes).
@@ -1014,6 +1051,40 @@ class RemoteGather(
     companion object {
         /** A provider gather was incomplete; the next run must recover from a full listing. */
         const val INCOMPLETE_ENUMERATION_KEY = "incomplete_enumeration_recovery_required"
+
+        // Remote-shrink trust gate. A *full* enumeration is trusted as complete
+        // only if it observed at least ENUM_TRUST_MIN_FRACTION of the tracked
+        // baseline; a silently-partial provider walk (transient errors swallowed
+        // upstream, short pages) can report complete=true while having dropped
+        // whole subtrees, and trusting it would let detectMissingAfterFullSync
+        // synthesize a mass-delete cascade for every unobserved row. Accounts
+        // below ENUM_TRUST_MIN_BASELINE rows are exempt so a legitimately small or
+        // near-empty drive is never pinned incomplete by the gate.
+        const val ENUM_TRUST_MIN_FRACTION: Double = 0.5
+        const val ENUM_TRUST_MIN_BASELINE: Int = 50
+
+        /**
+         * Remote-shrink trust gate. Returns an operator-facing warning when a FULL
+         * enumeration observed implausibly few live remote items ([observedAlive])
+         * versus the tracked [baseline] — the signature of a silently-partial walk
+         * masquerading as complete — otherwise null. Accounts below
+         * [ENUM_TRUST_MIN_BASELINE] rows are exempt so a legitimately small or
+         * near-empty drive is never blocked. Pure function of the two counts so the
+         * threshold is unit-testable without a live gather.
+         */
+        fun remoteShrinkWarningOrNull(
+            observedAlive: Int,
+            baseline: Int,
+        ): String? {
+            if (baseline < ENUM_TRUST_MIN_BASELINE) return null
+            if (observedAlive >= baseline * ENUM_TRUST_MIN_FRACTION) return null
+            return "Remote enumeration looks partial: a full scan observed only $observedAlive " +
+                "live remote item(s) vs $baseline previously-tracked " +
+                "(< ${(ENUM_TRUST_MIN_FRACTION * 100).toInt()}%). Refusing to reconcile to avoid " +
+                "spurious mass uploads/deletes from an incomplete listing. Do NOT use " +
+                "--force-delete (it would apply the bad plan). Re-run when the connection is " +
+                "healthy; if you really removed most remote files, rebuild with --reset."
+        }
 
         @JvmField
         val RECENT_UPLOAD_REAP_GRACE: java.time.Duration = java.time.Duration.ofSeconds(120)

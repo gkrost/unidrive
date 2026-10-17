@@ -469,6 +469,21 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `a sync-path run keeps the recovery latch even when its listing is complete`() =
+        runTest {
+            provider.deltaItems = listOf(cloudItem("/a", isFolder = true))
+            provider.deltaComplete = false
+            engine.syncOnce()
+            assertEquals("true", db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY))
+
+            // A listing of a part of the drive is no inventory of the drive: only an unscoped run may end the recovery.
+            provider.deltaComplete = true
+            engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce()
+
+            assertEquals("true", db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY))
+        }
+
+    @Test
     fun `delta cursor advances even when some downloads fail`() =
         runTest {
             // Regression for the 2026-05-20 first-sync loop: when transferFailures > 0
