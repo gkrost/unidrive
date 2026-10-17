@@ -517,7 +517,7 @@ class InternxtProvider(
             withContext(Dispatchers.IO) {
                 Files.deleteIfExists(destination)
             }
-            log.warn(
+            log.debug(
                 "download of {} is incomplete: got {} of {} bytes; removed the partial copy",
                 remotePath,
                 downloaded.bytesWritten,
