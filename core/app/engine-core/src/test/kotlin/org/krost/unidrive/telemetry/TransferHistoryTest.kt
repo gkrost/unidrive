@@ -1,9 +1,6 @@
 package org.krost.unidrive.telemetry
 
-import org.junit.experimental.categories.Category
 import org.krost.unidrive.io.OwnerOnly
-import org.krost.unidrive.testing.Flaky
-import org.krost.unidrive.testing.FlakyTests
 import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.Connection
@@ -203,9 +200,6 @@ class TransferHistoryTest {
     }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 832, reason = "history.flush() times out on a loaded Windows runner (writer thread too slow)",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38284021448/job/114927958874")
     fun `retention prunes the oldest rows when the file is over the size limit`() {
         val cap = 256L * 1024
         val history = open(HistoryConfig(maxBytes = cap, batchSize = 200))
@@ -217,10 +211,12 @@ class TransferHistoryTest {
                 it.finish(TransferResult.SUCCESS, bytesDone = 1)
             }
         }
-        assertTrue(history.flush())
+        assertTrue(history.flush(WRITER_BUDGET_MS), "the writer has the fixture")
         assertTrue(history.fileBytes() > cap, "the fixture must exceed the cap first")
 
+        // pruneNow gives up waiting after 10 s but leaves its request queued: the barrier behind it is what is awaited.
         history.pruneNow()
+        assertTrue(history.flush(WRITER_BUDGET_MS), "the writer has done the retention")
         assertTrue(history.fileBytes() <= cap, "file is ${history.fileBytes()} bytes, cap $cap")
         val paths = history.rows().map { it.path }
         assertTrue(paths.isNotEmpty())
@@ -256,9 +252,6 @@ class TransferHistoryTest {
     }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 832, reason = "writer thread too slow for 50000 SQLite rows on a loaded Windows runner",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38284021448/job/114927958874")
     fun `a burst of 50000 rows goes through the queue without dropping`() {
         val total = 50_000
         val history = open(HistoryConfig(queueCapacity = 4 * total, batchSize = 1000))
@@ -271,7 +264,7 @@ class TransferHistoryTest {
         val produceMs = (System.nanoTime() - produceStart) / 1_000_000
         val drainStart = System.nanoTime()
         awaitDrained(history)
-        assertTrue(history.flush(60_000), "the writer answers once the queue is empty")
+        assertTrue(history.flush(WRITER_BUDGET_MS), "the writer answers once the queue is empty")
         val drainMs = (System.nanoTime() - drainStart) / 1_000_000
 
         println("BURST rows=$total produce_ms=$produceMs drain_ms=$drainMs written=${history.stats.written}")
@@ -284,17 +277,23 @@ class TransferHistoryTest {
     /**
      * Waits for the writer to take everything queued. How long that is depends on the disk (a CI runner's can be
      * ten times slower than a laptop's), so the test does not budget the time; it fails when the writer stops making
-     * progress, which is the case it exists to catch.
+     * progress, which is the case it exists to catch. The stall is measured in time this test thread was running: when
+     * the process itself was not (a starved or suspended runner), the writer was not either, and the pause is credited
+     * back, the way the upload watchdog does it, instead of reading as a writer that stopped.
      */
     private fun awaitDrained(
         history: TransferHistory,
-        stallMs: Long = 30_000,
+        stallMs: Long = 60_000,
     ) {
         var lastWritten = -1L
         var lastProgress = System.nanoTime()
+        var lastPoll = lastProgress
         while (history.stats.queued > 0) {
             val written = history.stats.written
             val now = System.nanoTime()
+            val gap = now - lastPoll
+            lastPoll = now
+            if (gap > TimeUnit.MILLISECONDS.toNanos(POLL_PAUSE_MS)) lastProgress += gap
             if (written != lastWritten) {
                 lastWritten = written
                 lastProgress = now
@@ -393,5 +392,13 @@ class TransferHistoryTest {
         assertTrue(Files.isRegularFile(db))
         assertFalse(Files.exists(dir.resolve("state.db")))
         assertEquals(OwnerOnly.Outcome.Unchanged, OwnerOnly.restrictFile(db))
+    }
+
+    private companion object {
+        /** The ceiling for the writer to answer a barrier; a healthy writer answers in well under a second. */
+        const val WRITER_BUDGET_MS = 120_000L
+
+        /** A poll of the 20 ms loop that comes later than this was not run: the process was paused. */
+        const val POLL_PAUSE_MS = 1_000L
     }
 }
