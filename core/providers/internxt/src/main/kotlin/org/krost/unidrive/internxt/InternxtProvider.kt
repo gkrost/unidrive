@@ -2011,7 +2011,9 @@ class InternxtProvider(
         val seenMax =
             (allFiles.mapNotNull { it.updatedAt } + allFolders.mapNotNull { it.updatedAt })
                 .maxOrNull()
-        return assembleFullDelta(allFiles, allFolders, advanceCursor(seenMax, cursor), onProgress = onProgress, listing = ScanProgress.LISTING_ACCOUNT)
+        // Only an incremental delta believes the engine's rows: a full listing is what runs when it cannot.
+        val tracked = scanContext?.trackedRow.takeIf { cursor != null }
+        return assembleFullDelta(allFiles, allFolders, advanceCursor(seenMax, cursor), onProgress = onProgress, listing = ScanProgress.LISTING_ACCOUNT, tracked = tracked)
     }
 
     // The DeltaPage of a full gather: the folder graph from the folders, a path for every item, the items
@@ -2023,6 +2025,10 @@ class InternxtProvider(
     // one is resolved from its row, and only the folders neither the listing nor [ancestorRows] hold are asked for.
     // Those requests are made before any path is built, a few at a time, and reported through [onProgress] (named
     // [listing]) as the step that follows the listing.
+    //
+    // [tracked] is the engine's state.db (ScanContext.trackedRow), given for an incremental delta: a poll re-delivers the
+    // items of the rewound window, and the unchanged folders above them used to be asked for on every poll. Its rows
+    // answer the paths too, where [trackedAncestorRows] finds them believable.
     private suspend fun assembleFullDelta(
         allFiles: Collection<InternxtFile>,
         allFolders: Collection<InternxtFolder>,
@@ -2030,6 +2036,7 @@ class InternxtProvider(
         ancestorRows: Map<String, InternxtFolder> = emptyMap(),
         onProgress: ((ScanProgress) -> Unit)? = null,
         listing: String? = null,
+        tracked: ((String) -> CloudItem?)? = null,
     ): DeltaPage {
         val creds = authService.getValidCredentials()
         // Mutable so the self-healing ancestor re-fetch can splice missing
@@ -2085,11 +2092,15 @@ class InternxtProvider(
         // ancestor-only rows answer most, the rest is fetched a few at a time instead of one request after the other
         // as the first item below each of them was met.
         val gathered = allFiles.size + allFolders.size
+        // The folders above the items that the engine tracks and nothing in this pass contradicts are rows like the ones
+        // the listing saw: they answer the paths and are not asked for.
+        val trackedRows = tracked?.let { trackedAncestorRows(allFiles, allFolders, folderMap, ancestorRows, creds.rootFolderId, it) }.orEmpty()
+        val rowsSeen = if (trackedRows.isEmpty()) ancestorRows else trackedRows + ancestorRows
         val resolution =
             resolveAncestors(
                 parents = allFiles.asSequence().map { it.folderUuid } + allFolders.asSequence().map { it.parentUuid },
                 folderMap = folderMap,
-                ancestors = ancestorRows,
+                ancestors = rowsSeen,
                 rootUuid = creds.rootFolderId,
                 unfetchable = unfetchableAncestors,
                 fetchFolder = fetchAncestor,
@@ -2098,18 +2109,19 @@ class InternxtProvider(
             }
         if (resolution.needed > 0) {
             log.info(
-                "Resolved the paths of {} items: {} folders were not in the listing, {} came from rows it saw, {} were fetched, {} could not be",
+                "Resolved the paths of {} items: {} folders were not in the listing, {} came from rows it saw ({} of them rows state.db tracks), {} were fetched, {} could not be",
                 gathered,
                 resolution.needed,
                 resolution.fromRows,
+                trackedRows.keys.count { it in folderMap },
                 resolution.fetched,
                 resolution.unfetchable,
             )
         }
         val rawFiles =
-            allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor) }
+            allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, rowsSeen, nameDecryptor) }
         val rawFolders =
-            allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor) }
+            allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, rowsSeen, nameDecryptor) }
         // Why each item left out was left out: a folder above it is gone for good (the item is unreachable), or one could
         // not be asked and the item may be placeable next pass (a drop that keeps the pass incomplete).
         val unreachable = UnreachableItems()
@@ -2117,12 +2129,12 @@ class InternxtProvider(
         var foldersDropped = 0
         allFiles.zip(rawFiles).forEach { (file, item) ->
             if (item != null) return@forEach
-            val gone = goneAncestorOf(file.folderUuid, folderMap, ancestorRows, creds.rootFolderId, unfetchableAncestors, goneAncestors)
+            val gone = goneAncestorOf(file.folderUuid, folderMap, rowsSeen, creds.rootFolderId, unfetchableAncestors, goneAncestors)
             if (gone != null) unreachable.add(file.uuid, gone, isFolder = false) else filesDropped++
         }
         allFolders.zip(rawFolders).forEach { (folder, item) ->
             if (item != null) return@forEach
-            val gone = goneAncestorOf(folder.parentUuid, folderMap, ancestorRows, creds.rootFolderId, unfetchableAncestors, goneAncestors)
+            val gone = goneAncestorOf(folder.parentUuid, folderMap, rowsSeen, creds.rootFolderId, unfetchableAncestors, goneAncestors)
             if (gone != null) unreachable.add(folder.uuid, gone, isFolder = true) else foldersDropped++
         }
         val trashed = TrashChains(folderMap, creds.rootFolderId)
@@ -2130,7 +2142,7 @@ class InternxtProvider(
             allFiles.zip(rawFiles).mapNotNull { (file, item) -> item?.markIfTrashed(trashed, file.folderUuid) } +
                 allFolders.zip(rawFolders).mapNotNull { (folder, item) -> item?.markIfTrashed(trashed, folder.parentUuid) } +
                 trashedFolderItems(trashed, allFolders.mapTo(HashSet()) { it.uuid }) { folder ->
-                    folder.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor)
+                    folder.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, rowsSeen, nameDecryptor)
                 }
 
         val inTrash = items.count { it.trashed }
@@ -3440,6 +3452,58 @@ class InternxtProvider(
             folderMap: MutableMap<String, InternxtFolder>,
             ancestors: Map<String, InternxtFolder>,
         ): InternxtFolder? = folderMap[uuid] ?: ancestors[uuid]?.also { folderMap[uuid] = it }
+
+        // The folders above the delivered items that state.db tracks, as rows for the pass to use in place of a request.
+        // [files] and [folders] are the items the pass delivered, each with its parent folder; [folderMap] and [ancestors]
+        // hold what the pass already knows for certain, and they win over a row. A row is taken only along an edge that
+        // state.db itself confirms: the item is tracked under that very parent. An item the engine has not seen, or has
+        // seen under another folder (it was moved), says nothing about the row of its new parent, and that folder is
+        // asked for, as is a delivered folder's parent that differs from the tracked one. The same goes for each step up:
+        // from a folder the pass delivered it is made only where the tracked parent is the delivered one. A folder that
+        // is asked for stays out of the result even when another edge confirmed it, so what the remote says of it
+        // (moved, gone) is never overruled by a row. A row that is not a folder, or that the engine cannot vouch for
+        // (ScanContext.trackedRow answers null), ends the climb: that folder is asked for.
+        internal fun trackedAncestorRows(
+            files: Collection<InternxtFile>,
+            folders: Collection<InternxtFolder>,
+            folderMap: Map<String, InternxtFolder>,
+            ancestors: Map<String, InternxtFolder>,
+            rootUuid: String,
+            tracked: (String) -> CloudItem?,
+        ): Map<String, InternxtFolder> {
+            val rows = HashMap<String, CloudItem?>()
+
+            fun row(id: String): CloudItem? = if (id in rows) rows[id] else tracked(id).also { rows[id] = it }
+            val found = LinkedHashMap<String, InternxtFolder>()
+            val ask = HashSet<String>()
+            val climbed = HashSet<String>()
+
+            fun climb(
+                item: String,
+                parent: String?,
+            ) {
+                var below = item
+                var uuid = parent
+                while (uuid != null && uuid != rootUuid) {
+                    val certain = folderMap[uuid] ?: ancestors[uuid]
+                    val confirmed = certain != null || row(below)?.parentId == uuid
+                    if (!confirmed) ask.add(uuid)
+                    val folder =
+                        certain
+                            ?: found[uuid].takeIf { confirmed }
+                            ?: row(uuid)?.takeIf { confirmed && it.isFolder }?.toTrackedFolder()?.also { found[uuid] = it }
+                    if (folder == null || !climbed.add(uuid)) return
+                    below = uuid
+                    uuid = folder.parentUuid
+                }
+            }
+            files.forEach { climb(it.uuid, it.folderUuid) }
+            folders.forEach { climb(it.uuid, it.parentUuid) }
+            found.keys.removeAll(ask)
+            return found
+        }
+
+        private fun CloudItem.toTrackedFolder(): InternxtFolder = toResumedFolder().let { if (trashed) it.copy(status = "TRASHED") else it }
 
         /** How [resolveAncestors] found the folders that the listing did not return: [fromRows] of the ancestor-only rows, [fetched] by request, [unfetchable] not at all. */
         internal class AncestorResolution(

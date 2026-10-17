@@ -180,6 +180,38 @@ class RemoteEnumerationTrashTest {
             assertNull(trash.rootPath())
         }
 
+    // ---- the rows a provider may ask for -------------------------------------------------------------------------
+
+    @Test
+    fun `the tracked row a provider asks for is the alive row with its name and the folder above it, and none the engine cannot vouch for`() =
+        runTest {
+            provider.items =
+                listedNow() +
+                    item("d1", "/Docs", isFolder = true) +
+                    item("k", "/Docs/k.txt") +
+                    item("t2", "/OldStuff/Deep", isFolder = true, trashed = true, parentId = "t1")
+            enumeration.enumerate(reset = false)
+            val tracked = assertNotNull(provider.lastContext?.trackedRow, "the gather offers its rows to the provider")
+
+            val folder = assertNotNull(tracked("d1"))
+            assertTrue(folder.isFolder && !folder.trashed)
+            assertEquals("Docs", folder.name)
+            assertNull(folder.parentId, "at the top of the drive")
+            assertEquals("d1", assertNotNull(tracked("k")).parentId)
+
+            val deep = assertNotNull(tracked("t2"), "a trashed folder below another is tracked with the folder above it")
+            assertTrue(deep.trashed && deep.isFolder)
+            assertEquals("Deep", deep.name)
+            assertEquals("t1", deep.parentId)
+            assertEquals("t1", assertNotNull(tracked("ph")).parentId)
+            assertTrue(assertNotNull(tracked("ph")).trashed)
+
+            assertNull(tracked("t1"), "the folder above a top-level item of the trash namespace is the namespace root")
+            assertNull(tracked("keep"), "no row for /Live: nothing to vouch for")
+            assertNull(tracked("unknown"))
+            assertNull(tracked(TrashNamespace.ROOT_ID), "the namespace root is not an item of the provider")
+        }
+
     // ---- the migration -------------------------------------------------------------------------------------------
 
     @Test
@@ -333,6 +365,7 @@ class RemoteEnumerationTrashTest {
     private class ListingProvider : CloudProvider {
         var items: List<CloudItem> = emptyList()
         var writes = 0
+        var lastContext: ScanContext? = null
         private var listings = 0
 
         override val id = "test"
@@ -349,6 +382,7 @@ class RemoteEnumerationTrashTest {
             scanContext: ScanContext?,
         ): DeltaPage {
             listings++
+            lastContext = scanContext
             return DeltaPage(items = items, cursor = "c$listings", hasMore = false)
         }
 
