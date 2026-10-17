@@ -19,6 +19,9 @@ import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.onedrive.model.FileSystemInfo
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -340,6 +343,78 @@ class GraphWriteThrottleTest {
 
             assertEquals(2, seen.count { it.url.host == "upload.example" }, "the throttled chunk must be sent again")
             assertTrue(currentTime - start >= 15_000, "the chunk must wait out the circuit (12s) and the hinted 3s, waited ${currentTime - start}ms")
+            service.close()
+        }
+
+    // A Retry-After in the HTTP date form (RFC 9110 section 10.2.3) is waited out like the seconds form, at each of the
+    // three places the Graph client reads the header. The date is whole seconds, so a wait of 6 s ahead lands in 5 to 6 s.
+    private fun httpDateAhead(seconds: Long) = DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC).plusSeconds(seconds))
+
+    @Test
+    fun `a 429 with Retry-After as an HTTP date waits until that date for every write`() =
+        runTest {
+            eachWrite { write ->
+                val seen = mutableListOf<HttpRequestData>()
+                val failure = Failure(HttpStatusCode.TooManyRequests, headersOf("Retry-After", httpDateAhead(6)))
+                val service = serviceOver(engine(write, listOf(failure), seen), budget())
+                val start = currentTime
+
+                write.call(service, localFile)
+
+                assertEquals(2, seen.countFor(write), "${write.name}: the throttled request must be sent again")
+                assertTrue(currentTime - start in 4_500..6_500, "${write.name}: must wait until the date, waited ${currentTime - start}ms")
+                service.close()
+            }
+        }
+
+    @Test
+    fun `a throttled upload chunk with Retry-After as an HTTP date waits until that date`() =
+        runTest {
+            var chunkAttempts = 0
+            val engine =
+                MockEngine { request ->
+                    if (request.url.host == "upload.example" && chunkAttempts++ == 0) {
+                        respond("{}", HttpStatusCode.TooManyRequests, headersOf("Retry-After", httpDateAhead(6)))
+                    } else {
+                        success(request)
+                    }
+                }
+            val service = serviceOver(engine, budget())
+            val start = currentTime
+
+            service.uploadLargeFile(localFile, "/big.bin")
+
+            assertEquals(2, chunkAttempts, "the throttled chunk must be sent again")
+            assertTrue(currentTime - start in 4_500..6_500, "must wait until the date, waited ${currentTime - start}ms")
+            service.close()
+        }
+
+    @Test
+    fun `a throttled download with Retry-After as an HTTP date waits until that date`() =
+        runTest {
+            var contentGets = 0
+            val engine =
+                MockEngine { request ->
+                    when {
+                        request.url.host == "cdn.example" && contentGets++ == 0 ->
+                            respond("{}", HttpStatusCode.TooManyRequests, headersOf("Retry-After", httpDateAhead(6)))
+                        request.url.host == "cdn.example" ->
+                            respond("bytes", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/octet-stream"))
+                        else ->
+                            respond(
+                                """{"id":"item-1","name":"x","size":5,"file":{"mimeType":"application/octet-stream"},"@microsoft.graph.downloadUrl":"https://cdn.example/f"}""",
+                                HttpStatusCode.OK,
+                                jsonHeaders(),
+                            )
+                    }
+                }
+            val service = serviceOver(engine, budget())
+            val start = currentTime
+
+            service.downloadFile("item-1", tokenDir.resolve("out.bin"))
+
+            assertEquals(2, contentGets, "the throttled download must be sent again")
+            assertTrue(currentTime - start in 4_500..6_500, "must wait until the date, waited ${currentTime - start}ms")
             service.close()
         }
 }
