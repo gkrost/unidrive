@@ -14,6 +14,9 @@ import org.krost.unidrive.ScanContext
 import java.nio.file.Files
 import java.nio.file.attribute.FileTime
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.util.ServiceLoader
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -36,6 +39,8 @@ class S3ProviderTest {
         S3Config("b", "us-east-1", endpoint, "AK", "SK", dir, multipartThreshold = threshold, minPartSize = minPart),
         fake.engine,
     )
+
+    private fun httpDateAhead(seconds: Long) = DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC).plusSeconds(seconds))
 
     private fun local(
         name: String,
@@ -285,6 +290,23 @@ class S3ProviderTest {
 
             assertEquals("/a.txt", provider(fake).getMetadata("/a.txt").path)
             assertEquals(2, fake.count { it.method == HttpMethod.Head })
+        }
+
+    @Test
+    fun `a 503 is waited out for the Retry-After in either form`() =
+        runTest {
+            for ((header, expectedMs) in listOf("2" to 2_000L..3_000L, httpDateAhead(6) to 4_500L..6_500L)) {
+                val fake = FakeS3()
+                fake.put("a.txt", "x")
+                fake.failures += Triple({ r: FakeS3.Request -> r.method == HttpMethod.Head }, 503, "SlowDown")
+                fake.failureRetryAfter = header
+                val started = testScheduler.currentTime
+
+                provider(fake).getMetadata("/a.txt")
+
+                val waited = testScheduler.currentTime - started
+                assertTrue(waited in expectedMs, "Retry-After '$header': waited $waited ms")
+            }
         }
 
     @Test

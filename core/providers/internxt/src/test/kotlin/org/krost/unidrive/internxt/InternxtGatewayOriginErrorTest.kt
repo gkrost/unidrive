@@ -164,6 +164,30 @@ class InternxtGatewayOriginErrorTest {
         }
 
     @Test
+    fun `an expired Retry-After date leaves the JSON body hint available`() =
+        runTest {
+            val calls = AtomicInteger(0)
+            val (code, headers) = answer(429, retryAfter = "Wed, 21 Oct 2020 07:28:00 GMT")
+            val service =
+                serviceOn(
+                    MockEngine {
+                        if (calls.incrementAndGet() == 1) {
+                            respond("""{"retry_after":30}""", code, headers)
+                        } else {
+                            respond("[]", HttpStatusCode.OK, json)
+                        }
+                    },
+                )
+            val before = currentTime
+
+            assertEquals(emptyList(), service.listFiles())
+
+            assertEquals(2, calls.get())
+            assertEquals(30_000L, currentTime - before, "the stale header must not suppress the body hint")
+            service.close()
+        }
+
+    @Test
     fun `a 522 that clears on the second attempt is used`() =
         runTest {
             val calls = AtomicInteger(0)

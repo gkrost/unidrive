@@ -16,6 +16,9 @@ import org.krost.unidrive.dropbox.FakeDropbox.Companion.folder
 import java.nio.file.Files
 import java.nio.file.attribute.FileTime
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -290,6 +293,21 @@ class DropboxWriteTest {
             // At least Dropbox's wait; the shared budget may pace the retry a little more.
             val waited = testScheduler.currentTime - started
             assertTrue(waited in 2_000..5_000, "waited $waited ms")
+            assertEquals(2, fake.callsTo("files/get_metadata").size)
+        }
+
+    @Test
+    fun `a 429 with Retry-After in the HTTP date form waits until that date`() =
+        runTest {
+            val date = DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC).plusSeconds(6))
+            fake.on("files/get_metadata") { Answer(429, """{"error_summary":"too_many_requests/.."}""", headers = mapOf("Retry-After" to date)) }
+            fake.on("files/get_metadata") { Answer(body = file("/a.txt", "id:1")) }
+
+            val started = testScheduler.currentTime
+            provider.getMetadata("/a.txt")
+
+            val waited = testScheduler.currentTime - started
+            assertTrue(waited in 4_500..7_000, "waited $waited ms")
             assertEquals(2, fake.callsTo("files/get_metadata").size)
         }
 
