@@ -484,6 +484,59 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `an item the provider reports unreachable keeps its row and its file through a complete full sync`() =
+        runTest { unreachableItemSurvivesFullSync(engine) }
+
+    @Test
+    fun `the streaming gather keeps the row and the file of an unreachable item as well`() =
+        runTest {
+            unreachableItemSurvivesFullSync(
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    streamingReconciliation = true,
+                ),
+            )
+        }
+
+    private suspend fun unreachableItemSurvivesFullSync(syncing: SyncEngine) {
+        provider.files["/gone/doc.txt"] = "precious".toByteArray()
+        provider.files["/other.txt"] = ByteArray(3)
+        provider.deltaItems =
+            listOf(
+                cloudItem("/gone", isFolder = true),
+                cloudItem("/gone/doc.txt", size = "precious".length.toLong()),
+                cloudItem("/other.txt", size = 3),
+            )
+        syncing.syncOnce()
+        assertTrue(Files.exists(syncRoot.resolve("gone/doc.txt")))
+        val rowBefore = db.getEntry("/gone/doc.txt")
+        val folderBefore = db.getEntry("/gone")
+
+        // The next full listing no longer places doc.txt: the folder above it is gone for good, so the provider names
+        // the item instead of listing it, and the pass is complete. other.txt really disappeared.
+        db.setSyncState("delta_cursor", "")
+        provider.deltaItems = emptyList()
+        provider.deltaUnreachableIds = setOf("id-/gone/doc.txt")
+        provider.deltaCursor = "cursor-2"
+        syncing.syncOnce()
+
+        assertEquals("true", db.getSyncState("pending_cursor_complete"), "the pass is complete")
+        assertEquals("cursor-2", db.getSyncState("delta_cursor"), "the cursor advanced")
+        assertEquals("precious", Files.readString(syncRoot.resolve("gone/doc.txt")), "the file is not deleted")
+        assertEquals(rowBefore, db.getEntry("/gone/doc.txt"), "its row is exactly as it was")
+        assertEquals(folderBefore, db.getEntry("/gone"), "and so is the folder row above it")
+        assertTrue(Files.isDirectory(syncRoot.resolve("gone")))
+        assertFalse("/gone/doc.txt" in provider.uploadedPaths, "it is not uploaded again as a new file")
+        assertTrue(provider.deletedPaths.isEmpty(), "and nothing is deleted on the remote either: ${provider.deletedPaths}")
+        assertFalse(Files.exists(syncRoot.resolve("other.txt")), "an item that really disappeared is deleted as before")
+        assertEquals("1", db.getSyncState(RemoteGather.UNREACHABLE_ITEMS_KEY))
+    }
+
+    @Test
     fun `delta cursor advances even when some downloads fail`() =
         runTest {
             // Regression for the 2026-05-20 first-sync loop: when transferFailures > 0

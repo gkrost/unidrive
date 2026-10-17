@@ -338,6 +338,7 @@ class InternxtFolderMetaTest {
             "the trashed folder is told by its status (HTTP 200 from the meta), and what hangs below it with it",
         )
         assertFalse(page.complete, "the result says that something stayed unresolved, so no deletion is inferred from it")
+        assertTrue(page.unreachableIds.isEmpty(), "a body that cannot be read is no proof that the folder is gone")
         assertEquals(1, account.metaCalls.getValue(ODD).get(), "two files lie below it and it was asked once")
         val unreadable = warnings.filter { ODD in it && "srv-odd" in it }
         assertEquals(1, unreadable.size, "logged once, with the folder uuid and the server request id: $warnings")
@@ -354,6 +355,7 @@ class InternxtFolderMetaTest {
 
         assertEquals(setOf("/Docs", "/Docs/a.txt", "/Archive/b.txt"), paths(page))
         assertFalse(page.complete)
+        assertTrue(page.unreachableIds.isEmpty(), "unavailable is not gone: the item may be placeable on the next pass")
         assertEquals(3, account.metaCalls.getValue(ODD).get(), "a transport-level failure is retried by the call, not given up on the first answer")
         assertTrue(warnings.any { "unfetchable (503)" in it && ODD in it }, "$warnings")
     }

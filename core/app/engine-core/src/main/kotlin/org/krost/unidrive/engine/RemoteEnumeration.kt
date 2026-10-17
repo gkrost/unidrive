@@ -189,6 +189,7 @@ class RemoteEnumeration(
             status.copy(
                 first = db.getSyncState("delta_cursor").isNullOrEmpty(),
                 lastScanComplete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull(),
+                unreachableItems = db.getSyncState(RemoteGather.UNREACHABLE_ITEMS_KEY)?.toIntOrNull()?.takeIf { it > 0 },
                 lastSuccessAtMs =
                     status.lastSuccessAtMs
                         ?: db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },

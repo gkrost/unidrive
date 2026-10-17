@@ -100,7 +100,8 @@ private fun fakeFileJson(row: FakeFile) =
 /**
  * The drive. [wall]: a folders request with the status filter after the cursor of this uuid is answered 408, however
  * often it comes (the unfiltered form of the query answers). [metaDelayMs]: each folder meta takes this long.
- * [metaGone]: folders whose meta answers 404. [metaOnly]: folders that only their meta answers.
+ * [metaGone]: folders whose meta answers 404. [metaStatus]: folders whose meta answers this HTTP status instead (410 for a
+ * folder that is gone, 503 for one that is unavailable). [metaOnly]: folders that only their meta answers.
  */
 internal class FakeDrive(
     val folders: List<FakeFolder>,
@@ -109,6 +110,7 @@ internal class FakeDrive(
     val wall: String? = null,
     val metaDelayMs: Long = 0,
     val metaGone: Set<String> = emptySet(),
+    val metaStatus: Map<String, Int> = emptyMap(),
     // Folders that only their meta knows: the listings do not return them (an unchanged ancestor of an incremental delta).
     val metaOnly: List<FakeFolder> = emptyList(),
 ) {
@@ -203,6 +205,9 @@ internal class FakeDrive(
                     }
                     // A trashed folder is answered with its row and HTTP 200, as the live server does.
                     val row = (folders + metaOnly).lastOrNull { it.uuid == uuid }
+                    metaStatus[uuid]?.let { code ->
+                        return@MockEngine respond("""{"statusCode":$code}""", HttpStatusCode.fromValue(code), fakeJsonHeaders)
+                    }
                     if (row == null || uuid in metaGone) respond("""{"statusCode":404}""", HttpStatusCode.NotFound, fakeJsonHeaders) else respondJson(fakeFolderJson(row))
                 }
                 else -> error("unexpected request: ${request.url}")

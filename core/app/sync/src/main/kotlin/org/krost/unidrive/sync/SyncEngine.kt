@@ -472,7 +472,8 @@ open class SyncEngine(
         remoteChanges: MutableMap<String, CloudItem>,
         admittedLoserIds: Set<String> = emptySet(),
         gatherStartedAt: Instant,
-    ) = remoteGather.detectMissingAfterFullSync(remoteChanges, admittedLoserIds, gatherStartedAt)
+        unreachableIds: Set<String> = emptySet(),
+    ) = remoteGather.detectMissingAfterFullSync(remoteChanges, admittedLoserIds, gatherStartedAt, unreachableIds)
 
     // #401: a path-addressed mutation on a collided path could hit either twin and
     // the action carries no remote id to aim it with. Skip; the action re-plans
@@ -2069,6 +2070,9 @@ open class SyncEngine(
         }
 
         var allComplete = true
+        // Items the provider listed but could not place below a permanently gone folder
+        // (DeltaPage.unreachableIds): the absence sweep treats them as present.
+        val unreachable = HashSet<String>()
         val activeScan = db.getActiveScan(staleThreshold = java.time.Duration.ofHours(SCAN_CHECKPOINT_STALE_HOURS))
         val resumedItems: List<CloudItem> =
             if (activeScan != null) db.loadStagedItems(activeScan.scanId) else emptyList()
@@ -2105,6 +2109,7 @@ open class SyncEngine(
             if (!page.complete) {
                 allComplete = false
             }
+            unreachable.addAll(page.unreachableIds)
             return remoteGather.placeTrashed(page)
         }
 
@@ -2425,7 +2430,7 @@ open class SyncEngine(
         val collisionLoserIds = reportGatheredCollisions(collisions, dryRun = false)
 
         if (isFullSync && allComplete) {
-            detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt)
+            detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt, unreachable)
         } else if (isFullSync) {
             val msg =
                 "UD-360: at least one delta page returned complete=false; " +
@@ -2434,6 +2439,7 @@ open class SyncEngine(
             log.warn(msg)
             reporter.onWarning(msg)
         }
+        remoteGather.recordUnreachable(unreachable, isFullSync)
         // Record the gather's full-enumeration verdict (see gatherRemoteChanges).
         db.setSyncState("last_gather_full", isFullSync.toString())
         if (!allComplete) {

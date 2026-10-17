@@ -438,6 +438,11 @@ class RemoteGather(
         // DeleteLocal actions for every file under that subtree.
         var allComplete = true
 
+        // The remote ids the provider listed but could not place because a folder above them is
+        // permanently gone (DeltaPage.unreachableIds). The pass is complete without them; the
+        // absence sweep must not read their silence as a deletion.
+        val unreachable = HashSet<String>()
+
         // Resumable-scan lifecycle: a non-null activeScanId means this gather
         // pass either resumes a prior daemon's interrupted scan or has just
         // started a fresh one. The scanContext threads the engine's staging
@@ -484,6 +489,7 @@ class RemoteGather(
             if (!page.complete) {
                 allComplete = false
             }
+            unreachable.addAll(page.unreachableIds)
             return placeTrashed(page)
         }
 
@@ -571,12 +577,14 @@ class RemoteGather(
                     }
                 log.debug("Delta (recovery): {} items, hasMore={}", p.items.size, p.hasMore)
                 if (!p.complete) allComplete = false
+                unreachable.addAll(p.unreachableIds)
                 return placeTrashed(p)
             }
             // Reset all mutable accumulation state for the recovery pass.
             changes = mutableMapOf()
             keyToPath.clear()
             collisions.clear()
+            unreachable.clear()
             allComplete = true
             isFullSync = true
             // Recovery: full enumeration from null cursor. Any ProviderException here
@@ -631,7 +639,7 @@ class RemoteGather(
         val collisionLoserIds = reportCollisions(collisions, readOnly)
 
         if (isFullSync && allComplete) {
-            detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt)
+            detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt, unreachable)
         } else if (isFullSync) {
             val msg =
                 "UD-360: at least one delta page returned complete=false; " +
@@ -640,6 +648,7 @@ class RemoteGather(
             log.warn(msg)
             listener.onWarning(msg)
         }
+        recordUnreachable(unreachable, isFullSync)
         // Record the gather's ACTUAL full-enumeration verdict (a 410 recovery above
         // can upgrade an incremental pass to full) so the sync-path remote-shrink
         // guard judges the real mode, not just the pre-gather cursor state.
@@ -747,6 +756,39 @@ class RemoteGather(
         return trusted
     }
 
+    /**
+     * How many items the last FULL listing could not place because a folder above them is permanently gone (see
+     * [DeltaPage.unreachableIds]); what `daemon.status` reports. An incremental pass sees only what changed, so it
+     * leaves the figure of the last full listing alone.
+     */
+    fun recordUnreachable(
+        unreachableIds: Set<String>,
+        fullListing: Boolean,
+    ) {
+        if (!fullListing) return
+        val value = unreachableIds.size.toString()
+        if (db.getSyncState(UNREACHABLE_ITEMS_KEY) != value) db.setSyncState(UNREACHABLE_ITEMS_KEY, value)
+    }
+
+    // The paths of the rows above the rows of [unreachableIds]. The tree in state.db stays whole: the folder a held row
+    // hangs below is held with it, even if the provider reports that very folder as gone (it is what the unreachable
+    // items hang below), so the sweep neither orphans the held rows nor takes a local folder with their files out from
+    // under them. When nothing is listed below the folder any more, it and the rows below it are swept as before.
+    private fun pathsAboveUnreachable(
+        rows: List<SyncEntry>,
+        unreachableIds: Set<String>,
+    ): Set<String> {
+        if (unreachableIds.isEmpty()) return emptySet()
+        val above = HashSet<String>()
+        for (row in rows) {
+            val id = row.remoteId ?: continue
+            if (id !in unreachableIds) continue
+            var parent = row.path.substringBeforeLast('/', "")
+            while (parent.isNotEmpty() && above.add(parent)) parent = parent.substringBeforeLast('/', "")
+        }
+        return above
+    }
+
     fun resolveItemPath(item: CloudItem): CloudItem? {
         // #171: canonicalize the remote path to NFC so it matches the NFC local key
         // in the reconciler (copy only when the form actually changes).
@@ -784,6 +826,7 @@ class RemoteGather(
         remoteChanges: MutableMap<String, CloudItem>,
         admittedLoserIds: Set<String> = emptySet(),
         gatherStartedAt: Instant,
+        unreachableIds: Set<String> = emptySet(),
     ) {
         val seenRemoteIds = remoteChanges.values.mapTo(mutableSetOf()) { it.id }
         // #401: a twin suppressed by the gather collision winner-rule keeps its DB row
@@ -791,15 +834,26 @@ class RemoteGather(
         // and the sweep would synthesize a path-addressed DeleteRemote for it — the
         // wrong-twin delete #402 closed. Suppressed ≠ deleted.
         seenRemoteIds.addAll(admittedLoserIds)
+        // The same for an item the provider listed but could not place, because a folder
+        // above it is permanently gone: it has no path this pass, the server still holds
+        // it. Unreachable ≠ deleted — its row is not reaped, not turned into a local
+        // delete, and a hydrated file or an edit below it is not touched.
+        seenRemoteIds.addAll(unreachableIds)
         pruneRecentlyUploaded()
         // One boundary for the whole sweep: a stamp past this instant is a write that
         // landed after the sweep began (the next full gather judges it), never one the
         // walk could have seen.
         val sweptAt = Instant.now()
 
-        for (entry in db.getAllEntries()) {
+        val rows = db.getAllEntries()
+        val heldAbove = pathsAboveUnreachable(rows, unreachableIds)
+        for (entry in rows) {
             if (entry.remoteId == null) continue
             if (entry.remoteId in seenRemoteIds) continue
+            if (entry.path in heldAbove) {
+                log.debug("Full sync: DB entry {} (remoteId={}) not in delta but unreachable rows hang below it; keeping it", entry.path, entry.remoteId)
+                continue
+            }
             // #115: the delta and the recently-uploaded marks live in the REMOTE
             // namespace, so test against the row's effective remote path
             // (`remotePath ?: path`). For a non-aliased row this is just
@@ -1051,6 +1105,9 @@ class RemoteGather(
     companion object {
         /** A provider gather was incomplete; the next run must recover from a full listing. */
         const val INCOMPLETE_ENUMERATION_KEY = "incomplete_enumeration_recovery_required"
+
+        /** sync_state key: items of the last full listing that sit below a permanently gone folder ([recordUnreachable]). */
+        const val UNREACHABLE_ITEMS_KEY = "unreachable_items"
 
         // Remote-shrink trust gate. A *full* enumeration is trusted as complete
         // only if it observed at least ENUM_TRUST_MIN_FRACTION of the tracked

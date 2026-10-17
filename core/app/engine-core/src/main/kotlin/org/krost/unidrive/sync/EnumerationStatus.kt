@@ -43,6 +43,12 @@ data class EnumerationStatus(
      * pending_cursor_complete once a gather ends; the tracker leaves it null while running.
      */
     val lastScanComplete: Boolean? = null,
+    /**
+     * The items of the last full listing that the provider could not place, because a folder above them is permanently
+     * gone: unreachable, not deleted. Null when there are none (or the figure is unknown); set by the engine from
+     * sync_state, never by the tracker.
+     */
+    val unreachableItems: Int? = null,
     /** One sanitised line: no paths, at most [EnumerationTracker.ERROR_MAX_CHARS] characters. */
     val lastError: String? = null,
     // #878: a machine-readable cause for the failure (`http_408`, `timeout`, `auth_rejected`); absent when unknown.

@@ -20,6 +20,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 class InternxtProvider(
@@ -2039,10 +2040,16 @@ class InternxtProvider(
         // of distinct missing ancestors (not the count of orphaned leaves) —
         // mandatory at ~196k-file / deep-tree scale.
         val unfetchableAncestors = mutableSetOf<String>()
-        // 404 / trashed / gone (or any non-fatal API error) degrades to null:
-        // the ancestor can't be resolved, the item is dropped + counted, and
-        // complete=false stands for the pass. Never throws out of delta().
-        // A meta the model cannot read does the same: asking again gets the same
+        // The folders whose meta the server answered with 404 or 410: gone for good, not merely out of reach. A subset of
+        // [unfetchableAncestors], filled from the concurrent fetches of resolveAncestors. Nothing is asked twice: both
+        // sets are consulted before a request, so a gone folder costs one request however many items hang below it.
+        val goneAncestors: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        // The ancestor can't be resolved (404 / 410, any other non-fatal API error): it degrades to null, the items
+        // below it are left out and counted, and never throws out of delta(). What the pass says about them depends on
+        // why: a folder that is GONE (404 / 410: deleted or purged, it will not come back) leaves them unreachable, and
+        // the pass is still complete; any other failure (5xx, a refused request, ...) may be over by the next pass and
+        // keeps complete=false. One log line per gone folder at DEBUG, the pass reports them in one line below.
+        // A meta the model cannot read is the second kind: asking again gets the same
         // body, so one odd folder (out of the hundreds fetched on a large first
         // scan) is logged once, with the server's request id, and leaves the rest
         // of the pass alone. A transport failure was retried by the call itself.
@@ -2050,7 +2057,12 @@ class InternxtProvider(
             try {
                 api.getFolderMeta(uuid)
             } catch (e: InternxtApiException) {
-                log.warn("Ancestor folder {} unfetchable ({}); dropping its descendants this pass", uuid, e.statusCode)
+                if (e.statusCode in PERMANENT_ABSENCE_STATUSES) {
+                    goneAncestors.add(uuid)
+                    log.debug("Ancestor folder {} is gone ({}); its descendants are unreachable this pass", uuid, e.statusCode)
+                } else {
+                    log.warn("Ancestor folder {} unfetchable ({}); dropping its descendants this pass", uuid, e.statusCode)
+                }
                 null
             } catch (e: InternxtUnreadableResponse) {
                 log.warn("{} (server request id {}); dropping its descendants this pass", e.message, e.requestId ?: "not sent")
@@ -2060,9 +2072,10 @@ class InternxtProvider(
         // Folders last so that path collisions in gatherRemoteChanges resolve in favour of folders.
         // toDeltaCloudItem returns null when an ancestor uuid is absent from folderMap AND
         // unfetchable (the /folders delta returned a changed leaf without its unchanged
-        // ancestors and the ancestor is genuinely gone). Such drops are counted so
-        // `complete` reflects the residual gap and the engine skips
-        // detectMissingAfterFullSync + leaves the cursor un-advanced.
+        // ancestors and the ancestor is gone or could not be asked). A drop below a folder that is
+        // gone is reported as unreachable; any other drop is counted so `complete` reflects
+        // the residual gap and the engine skips detectMissingAfterFullSync + leaves the
+        // cursor un-advanced.
         val nameDecryptor = mnemonicOrNull()
         // The folders every path runs through, all found before the first path is built: the listing and the
         // ancestor-only rows answer most, the rest is fetched a few at a time instead of one request after the other
@@ -2093,8 +2106,21 @@ class InternxtProvider(
             allFiles.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor) }
         val rawFolders =
             allFolders.map { it.toDeltaCloudItem(folderMap, creds.rootFolderId, unfetchableAncestors, fetchAncestor, ancestorRows, nameDecryptor) }
-        val filesDropped = rawFiles.count { it == null }
-        val foldersDropped = rawFolders.count { it == null }
+        // Why each item left out was left out: a folder above it is gone for good (the item is unreachable), or one could
+        // not be asked and the item may be placeable next pass (a drop that keeps the pass incomplete).
+        val unreachable = UnreachableItems()
+        var filesDropped = 0
+        var foldersDropped = 0
+        allFiles.zip(rawFiles).forEach { (file, item) ->
+            if (item != null) return@forEach
+            val gone = goneAncestorOf(file.folderUuid, folderMap, ancestorRows, creds.rootFolderId, unfetchableAncestors, goneAncestors)
+            if (gone != null) unreachable.add(file.uuid, gone, isFolder = false) else filesDropped++
+        }
+        allFolders.zip(rawFolders).forEach { (folder, item) ->
+            if (item != null) return@forEach
+            val gone = goneAncestorOf(folder.parentUuid, folderMap, ancestorRows, creds.rootFolderId, unfetchableAncestors, goneAncestors)
+            if (gone != null) unreachable.add(folder.uuid, gone, isFolder = true) else foldersDropped++
+        }
         val trashed = TrashChains(folderMap, creds.rootFolderId)
         val items =
             allFiles.zip(rawFiles).mapNotNull { (file, item) -> item?.markIfTrashed(trashed, file.folderUuid) } +
@@ -2120,11 +2146,23 @@ class InternxtProvider(
             log.warn(
                 "Internxt delta gather dropped {} item(s) ({} file(s), {} folder(s)) " +
                     "whose ancestor folder could not be resolved even after re-fetch " +
-                    "(404 / trashed / gone / unreadable); returning DeltaPage(complete=false). " +
-                    "Dropped items recover when their ancestors reappear or via --reset.",
+                    "(unavailable / unreadable); returning DeltaPage(complete=false). " +
+                    "Dropped items recover when their ancestors answer again or via --reset.",
                 ancestorDrops,
                 filesDropped,
                 foldersDropped,
+            )
+        }
+        // One line for the unreachable items, not one per gone folder. They are not deleted: the server still lists them,
+        // under folders it no longer has. The pass is complete without them, and the engine leaves their rows as they are.
+        if (unreachable.count > 0) {
+            log.info(
+                "Internxt delta gather: {} item(s) ({} file(s), {} folder(s)) sit below {} folder(s) that no longer exist " +
+                    "(HTTP 404 / 410); they are unreachable, not deleted, and the pass is complete without them.",
+                unreachable.count,
+                unreachable.files,
+                unreachable.folders,
+                unreachable.goneFolders.size,
             )
         }
 
@@ -2133,7 +2171,29 @@ class InternxtProvider(
             cursor = cursor,
             hasMore = false,
             complete = skipped == 0 && ancestorDrops == 0,
+            unreachableIds = unreachable.ids,
         )
+    }
+
+    // The items of a pass that sit below a folder which is gone for good: their remote ids, how many of them are files
+    // and folders, and the distinct gone folders they hang below.
+    private class UnreachableItems {
+        val ids = HashSet<String>()
+        val goneFolders = HashSet<String>()
+        var files = 0
+        var folders = 0
+        val count: Int get() = files + folders
+
+        fun add(
+            uuid: String,
+            goneFolder: String,
+            isFolder: Boolean,
+        ) {
+            if (ids.add(uuid)) {
+                if (isFolder) folders++ else files++
+            }
+            goneFolders.add(goneFolder)
+        }
     }
 
     // A live item whose parent folder is in the trash (see [TrashChains]) keeps the path of the provider's own tree and is
@@ -2698,6 +2758,11 @@ class InternxtProvider(
         // (gateway timing issues) should not trigger fallback — they should
         // honour Retry-After and retry the same call.
         private val SERVER_UNAVAILABLE_STATUSES = setOf(500, 503)
+
+        // The statuses by which the server says a folder is gone for good (deleted or purged): asking again gets the
+        // same answer, so the items below it are unreachable rather than the pass incomplete. 404 and 410 are never
+        // synthesised by this client (a connection that failed is status 0, a cut one 503), so they are the server's.
+        private val PERMANENT_ABSENCE_STATUSES = setOf(404, 410)
 
         // Whether a cursor listing's failure is the server's to answer for, and the tree walk — the one
         // listing that still finishes on a large drive — takes the gather over. The whole 5xx family: live,
@@ -3291,7 +3356,7 @@ class InternxtProvider(
         // Memoisation, bounded to one fetch per missing uuid per pass:
         //  - a successful fetch is written into [folderMap], so any later item
         //    under the same ancestor finds it already present (no re-fetch);
-        //  - an unfetchable uuid (404 / trashed / gone → [fetchFolder] returns
+        //  - an unfetchable uuid (404 / gone / unavailable → [fetchFolder] returns
         //    null) is recorded in [unfetchable], so a known-gone ancestor is
         //    never re-requested.
         // Both maps are shared across the whole delta() pass; at ~196k-file
@@ -3302,8 +3367,9 @@ class InternxtProvider(
         // not return as items. A row found there is spliced into [folderMap] like a fetched one, so it is read once.
         //
         // Returns null exactly as [buildFolderPath] does when an ancestor
-        // cannot be resolved — the caller drops the item, counts it, and lets
-        // `complete=false` stand for the pass.
+        // cannot be resolved — the caller drops the item and counts it: below a
+        // folder that is gone for good it is unreachable ([goneAncestorOf]),
+        // otherwise `complete=false` stands for the pass.
         internal suspend fun buildFolderPathFetching(
             uuid: String,
             folderMap: MutableMap<String, InternxtFolder>,
@@ -3333,6 +3399,30 @@ class InternxtProvider(
                 }
             val name = sanitizeName(folder.plainName ?: folder.name ?: "")
             return "$parentPath/$name"
+        }
+
+        // The folder that is gone for good and that stopped the path of an item whose parent is [parentUuid]: walking up from
+        // the parent, the first folder the pass could not resolve ([unfetchable]) decides. It is returned when it is one of
+        // [gone] (the server answered 404 / 410 for it); null when it was unavailable for another reason, which may be
+        // over by the next pass, or when nothing on the way is unresolved. An item dropped below a gone folder is
+        // unreachable; any other drop keeps the pass incomplete.
+        internal fun goneAncestorOf(
+            parentUuid: String?,
+            folderMap: Map<String, InternxtFolder>,
+            ancestors: Map<String, InternxtFolder>,
+            rootUuid: String,
+            unfetchable: Set<String>,
+            gone: Set<String>,
+        ): String? {
+            var uuid = parentUuid
+            // A parent chain that comes back to itself is damage; it is not walked twice.
+            val seen = HashSet<String>()
+            while (uuid != null && uuid != rootUuid && seen.add(uuid)) {
+                if (uuid in unfetchable) return uuid.takeIf { it in gone }
+                val folder = folderMap[uuid] ?: ancestors[uuid] ?: return null
+                uuid = folder.parentUuid
+            }
+            return null
         }
 
         // The folder a path runs through, from what the listing already holds: the folders it returned, then the
