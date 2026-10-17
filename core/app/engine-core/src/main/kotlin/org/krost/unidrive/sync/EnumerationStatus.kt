@@ -49,6 +49,17 @@ data class EnumerationStatus(
      * sync_state, never by the tracker.
      */
     val unreachableItems: Int? = null,
+    /**
+     * True while the running attempt lists the drive again because the previous scan ended incomplete (the recovery
+     * latch was set when it started). False otherwise, and always false when no attempt runs; set by the tracker.
+     */
+    val recovery: Boolean = false,
+    /**
+     * The tracked items the last full listing did not return, because it ended incomplete; null when there are none.
+     * Set by the engine from sync_state, never by the tracker. Once two listings in a row left out the same items they
+     * are accepted (the recovery ends); the figure stays until a complete full listing.
+     */
+    val droppedItems: Int? = null,
     /** One sanitised line: no paths, at most [EnumerationTracker.ERROR_MAX_CHARS] characters. */
     val lastError: String? = null,
     // #878: a machine-readable cause for the failure (`http_408`, `timeout`, `auth_rejected`); absent when unknown.

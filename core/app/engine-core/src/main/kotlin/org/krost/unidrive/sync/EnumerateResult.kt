@@ -10,4 +10,7 @@ data class EnumerateResult(
     // in-flight pass; callers treat this as success and need not retry.
     val skipped: Boolean = false,
     val error: String? = null,
+    // True when the recovery latch is still set after this pass: the next pass lists the whole drive again. The daemon's
+    // poller backs off on it like on a failure instead of starting that listing one plain interval later.
+    val recoveryPending: Boolean = false,
 )

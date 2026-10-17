@@ -46,6 +46,7 @@ class EnumerationTracker(
     private var attempt = 0
     private var first = true
     private var expected: Expected? = null
+    private var recovery = false
     private var startedAtMs: Long? = null
     private var listing: String? = null
     private var items = 0
@@ -90,14 +91,19 @@ class EnumerationTracker(
         }
     }
 
-    /** What the running attempt starts from: whether it is the first one, and the previous complete run if any. */
+    /**
+     * What the running attempt starts from: whether it is the first one, and the previous complete run if any.
+     * [recovery]: the attempt lists the drive again because the previous scan ended incomplete.
+     */
     fun baseline(
         first: Boolean,
         expected: Expected?,
+        recovery: Boolean = false,
     ) {
         synchronized(lock) {
             this.first = first
             this.expected = expected
+            this.recovery = recovery
         }
     }
 
@@ -228,6 +234,7 @@ class EnumerationTracker(
                 foldersSkipped = if (progressShown) foldersSkipped else null,
                 pathsDone = if (progressShown) pathsDone else null,
                 pathsTotal = if (progressShown) pathsTotal else null,
+                recovery = running && recovery,
                 ratePerS = rate,
                 etaS = eta?.first,
                 etaKind = eta?.second,
@@ -245,6 +252,7 @@ class EnumerationTracker(
             (phase == EnumerationStatus.Phase.LISTING || phase == EnumerationStatus.Phase.RESOLVING_PATHS)
 
     private fun clearProgress() {
+        recovery = false
         listing = null
         items = 0
         providerReported = false

@@ -117,6 +117,40 @@ class RemoteGather(
     private fun liveTopLevelNames(): List<String> =
         db.listDirectChildren("").filter { it.remoteId != TrashNamespace.ROOT_ID }.map { it.path.removePrefix("/") }
 
+    /**
+     * What state.db tracks for [remoteId], for a provider that would otherwise ask the remote for a folder this pass did
+     * not change (ScanContext.trackedRow). The parent is the row the folder above holds at the path the row is kept
+     * under, not the `parent_uuid` column: the gather does not write that column, and a rename moves the path. Null
+     * parent: the top of the drive. No row at all for what the engine cannot vouch for: the folder above is not tracked,
+     * or is the root of the trash namespace, which has no counterpart at the provider.
+     */
+    internal fun trackedRow(remoteId: String): CloudItem? {
+        if (remoteId == TrashNamespace.ROOT_ID) return null
+        val entry = db.getEntryByRemoteId(remoteId) ?: return null
+        val path = entry.remotePath ?: entry.path
+        val parentPath = path.substringBeforeLast('/')
+        val parentId =
+            if (parentPath.isEmpty()) {
+                null
+            } else {
+                val parent = db.getEntryByRemotePath(parentPath)?.takeIf { it.isFolder } ?: return null
+                parent.remoteId?.takeIf { it != TrashNamespace.ROOT_ID } ?: return null
+            }
+        return CloudItem(
+            id = remoteId,
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = entry.remoteSize,
+            isFolder = entry.isFolder,
+            modified = entry.remoteModified,
+            created = null,
+            hash = null,
+            mimeType = null,
+            parentId = parentId,
+            trashed = guard.trash.contains(entry.path),
+        )
+    }
+
     /** Reads the place of the trash root from state.db again: its row has appeared, moved or been reaped. */
     fun refreshTrash() = guard.trash.refresh(db)
 
@@ -471,6 +505,7 @@ class RemoteGather(
                 scopeRoots = guard.trackScope,
                 readOnly = readOnly,
                 onProgress = providerProgress,
+                trackedRow = ::trackedRow,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {
@@ -564,6 +599,7 @@ class RemoteGather(
                     scopeRoots = guard.trackScope,
                     readOnly = readOnly,
                     onProgress = providerProgress,
+                    trackedRow = ::trackedRow,
                 )
             suspend fun nextPageRecovery(c: String?): DeltaPage {
                 val p =
@@ -754,6 +790,82 @@ class RemoteGather(
             }
         }
         return trusted
+    }
+
+    /**
+     * Bounds the recovery ([INCOMPLETE_ENUMERATION_KEY]) when it cannot succeed: a full listing that ends incomplete
+     * again and again with the same items missing would list the drive from zero for ever. The engine cannot see why a
+     * provider left items out, but it can see which tracked rows the listing did not return (the dropped set). When two
+     * consecutive full listings end incomplete with the same, non-empty dropped set, the cause is no passing failure:
+     * the set is accepted, the latch is written "false" and later gathers continue from the delta cursor. The rows of
+     * the dropped items stay as they are (the sweep is skipped on an incomplete pass, nothing is reaped), and the count
+     * stays in `daemon.status` as `dropped_items` until a complete full listing; a reset lists the drive again.
+     *
+     * Call it after the cursor was promoted and [settleRecoveryLatch] ran, with the live items of the gather.
+     * [gatherStartedAt]: a row written after it (an upload through the mount) is not judged, the listing predates it.
+     * A complete full listing forgets the figures; an incremental pass leaves them alone. Returns whether the dropped
+     * set was accepted by this call.
+     */
+    fun boundIncompleteRecovery(
+        remoteChanges: Map<String, CloudItem>,
+        gatherStartedAt: Instant,
+    ): Boolean {
+        if (db.getSyncState("last_gather_full")?.toBooleanStrictOrNull() != true) return false
+        if (db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() == true) {
+            forgetDropped()
+            return false
+        }
+        val seen = remoteChanges.values.filterNot { it.deleted }.mapTo(HashSet()) { it.id }
+        val dropped = ArrayList<String>()
+        for (row in db.getAllEntries()) {
+            val id = row.remoteId ?: continue
+            if (id in seen) continue
+            if (!guard.isTracked(row.remotePath ?: row.path)) continue
+            if (row.lastSynced.isAfter(gatherStartedAt)) continue
+            dropped.add(id)
+        }
+        if (db.getSyncState(DROPPED_ITEMS_KEY) != dropped.size.toString()) db.setSyncState(DROPPED_ITEMS_KEY, dropped.size.toString())
+        if (dropped.isEmpty()) {
+            // Nothing tracked is missing: there is nothing to compare, and nothing a repeat would show.
+            clearDroppedFingerprint()
+            return false
+        }
+        val fingerprint = droppedFingerprint(dropped)
+        if (db.getSyncState(DROPPED_FINGERPRINT_KEY) != fingerprint) {
+            db.setSyncState(DROPPED_FINGERPRINT_KEY, fingerprint)
+            log.warn("The full listing is incomplete: {} tracked item(s) were not returned; a second listing with the same result ends the recovery", dropped.size)
+            return false
+        }
+        clearDroppedFingerprint()
+        db.setSyncState(INCOMPLETE_ENUMERATION_KEY, "false")
+        // The staged slice of the incomplete scan would be resumed by the next gather: it belongs to the listing that ended here.
+        db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID)?.let(db::completeScan)
+        log.warn(
+            "Two consecutive full listings ended incomplete with the same {} tracked item(s) missing: accepting that set. " +
+                "Later gathers continue from the delta cursor, the rows of those items stay as they are (a reset lists the drive again)",
+            dropped.size,
+        )
+        return true
+    }
+
+    // An empty value is "none": the state table has no delete.
+    private fun clearDroppedFingerprint() {
+        if (!db.getSyncState(DROPPED_FINGERPRINT_KEY).isNullOrEmpty()) db.setSyncState(DROPPED_FINGERPRINT_KEY, "")
+    }
+
+    private fun forgetDropped() {
+        clearDroppedFingerprint()
+        if (db.getSyncState(DROPPED_ITEMS_KEY).let { it != null && it != "0" }) db.setSyncState(DROPPED_ITEMS_KEY, "0")
+    }
+
+    // Order-independent: the same set of remote ids gives the same text, whatever order the rows came in.
+    private fun droppedFingerprint(ids: List<String>): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        for (id in ids.sorted()) {
+            digest.update(id.toByteArray(Charsets.UTF_8))
+            digest.update(0)
+        }
+        return ids.size.toString() + ":" + digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     /**
@@ -1108,6 +1220,12 @@ class RemoteGather(
 
         /** sync_state key: items of the last full listing that sit below a permanently gone folder ([recordUnreachable]). */
         const val UNREACHABLE_ITEMS_KEY = "unreachable_items"
+
+        /** sync_state key: tracked items the last FULL listing did not return ([boundIncompleteRecovery]); `daemon.status` `dropped_items`. */
+        const val DROPPED_ITEMS_KEY = "dropped_items"
+
+        /** sync_state key: size and digest of the dropped set of the last full listing that ended incomplete. */
+        const val DROPPED_FINGERPRINT_KEY = "recovery_dropped_fingerprint"
 
         // Remote-shrink trust gate. A *full* enumeration is trusted as complete
         // only if it observed at least ENUM_TRUST_MIN_FRACTION of the tracked

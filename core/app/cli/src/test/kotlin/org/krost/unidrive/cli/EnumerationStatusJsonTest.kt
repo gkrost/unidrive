@@ -50,6 +50,8 @@ class EnumerationStatusJsonTest {
                     etaS = 905,
                     etaKind = EnumerationStatus.EtaKind.LOWER_BOUND,
                     lastSuccessAtMs = 1_699_999_000_000,
+                    recovery = true,
+                    droppedItems = 14_591,
                     lastError = "connection closed",
                     nextAttemptAtMs = null,
                 ),
@@ -58,7 +60,8 @@ class EnumerationStatusJsonTest {
         assertEquals(
             setOf(
                 "state", "first", "attempt", "phase", "listing", "started_at_ms", "elapsed_ms", "items", "folders_done",
-                "folders_known", "folders_skipped", "rate_per_s", "eta_s", "eta_kind", "last_success_at_ms", "last_error",
+                "folders_known", "folders_skipped", "rate_per_s", "eta_s", "eta_kind", "last_success_at_ms", "dropped_items", "recovery",
+                "last_error",
             ),
             json.keys,
             "next_attempt_at_ms is unknown and therefore absent",
@@ -78,6 +81,8 @@ class EnumerationStatusJsonTest {
         assertEquals(905L, json.getValue("eta_s").jsonPrimitive.long)
         assertEquals("lower_bound", json.getValue("eta_kind").jsonPrimitive.content)
         assertEquals(1_699_999_000_000L, json.getValue("last_success_at_ms").jsonPrimitive.long)
+        assertTrue(json.getValue("recovery").jsonPrimitive.boolean)
+        assertEquals(14_591, json.getValue("dropped_items").jsonPrimitive.int)
         assertEquals("connection closed", json.getValue("last_error").jsonPrimitive.content)
     }
 
@@ -131,6 +136,25 @@ class EnumerationStatusJsonTest {
 
         assertEquals(14_591, some.getValue("unreachable_items").jsonPrimitive.int)
         assertFalse("unreachable_items" in none.keys, "none means absent: $none")
+    }
+
+    // #926: a running attempt that lists again because the last scan was incomplete says so; the items the last full
+    // listing did not return stay as a count after it. Both are absent (never false or 0) otherwise.
+    @Test
+    fun `recovery is true only while it runs and dropped_items is absent when there are none`() {
+        val running =
+            wire(EnumerationStatus(state = EnumerationStatus.State.RUNNING, first = false, attempt = 1, recovery = true, listing = "cursor", items = 12))
+        val plain = wire(EnumerationStatus(state = EnumerationStatus.State.RUNNING, first = false, attempt = 1, listing = "cursor", items = 12))
+        val after =
+            wire(EnumerationStatus(state = EnumerationStatus.State.IDLE, first = false, attempt = 0, lastScanComplete = false, droppedItems = 14_591))
+        val clean = wire(EnumerationStatus(state = EnumerationStatus.State.IDLE, first = false, attempt = 0, lastScanComplete = true))
+
+        assertTrue(running.getValue("recovery").jsonPrimitive.boolean)
+        assertFalse("recovery" in plain.keys, "not a recovery means absent: $plain")
+        assertFalse("recovery" in after.keys, "$after")
+        assertEquals(14_591, after.getValue("dropped_items").jsonPrimitive.int)
+        assertFalse("dropped_items" in clean.keys, "none means absent: $clean")
+        assertFalse("dropped_items" in running.keys, "$running")
     }
 
     // The step after the listing: its phase and its own counts, absent (never null) outside it.

@@ -710,6 +710,145 @@ class RemoteEnumerationTest {
             }
         }
 
+    // ---- #926: a recovery that cannot succeed is bounded: the same dropped set twice is accepted --------------------------------
+
+    private val a get() = file("1", "/a.txt")
+    private val b get() = file("2", "/b.txt")
+    private val c get() = file("3", "/c.txt")
+
+    // Three tracked files, then an incomplete incremental pass that sets the latch: the next listing is a recovery listing.
+    private suspend fun RemoteEnumeration.armedRecovery() {
+        provider.fullListing = false
+        provider.items = listOf(a, b, c)
+        enumerate(reset = false)
+        provider.items = listOf(a)
+        provider.complete = false
+        enumerate(reset = false)
+        assertEquals("true", latch(), "the incomplete incremental pass sets the latch")
+        assertEquals(listOf<String?>(null, "c1"), provider.cursors)
+    }
+
+    private fun dropped(): Int? = db.getSyncState(RemoteGather.DROPPED_ITEMS_KEY)?.toIntOrNull()
+
+    @Test
+    fun `two full listings that end incomplete with the same dropped set are accepted, and the pass after continues from the cursor`() =
+        runTest {
+            val enumeration = enumeration()
+            enumeration.armedRecovery()
+
+            val first = enumeration.enumerate(reset = false)
+            assertEquals("true", latch(), "the first listing with this dropped set is not enough")
+            assertTrue(first.recoveryPending, "the next pass would list the drive again: the poller backs off on it")
+            assertEquals(2, dropped())
+            assertEquals(2, enumeration.status().droppedItems)
+
+            val second = enumeration.enumerate(reset = false)
+            assertEquals("false", latch(), "the same dropped set twice ends the recovery")
+            assertFalse(second.recoveryPending)
+            assertFalse(second.complete, "the pass itself stays incomplete: the sweep did not run")
+            assertEquals(2, enumeration.status().droppedItems, "the count stays in the status")
+            assertNotNull(db.getEntry("/b.txt"), "the rows of the dropped items stay as they are")
+            assertNotNull(db.getEntry("/c.txt"))
+
+            provider.complete = true
+            enumeration.enumerate(reset = false)
+            assertEquals(listOf<String?>(null, "c1", null, null, "c4"), provider.cursors, "the pass after the acceptance is incremental")
+        }
+
+    @Test
+    fun `a dropped set that differs from the last one is not accepted until it repeats`() =
+        runTest {
+            val enumeration = enumeration()
+            enumeration.armedRecovery()
+
+            enumeration.enumerate(reset = false) // dropped: b, c
+            provider.items = listOf(a, b)
+            enumeration.enumerate(reset = false) // dropped: c
+            assertEquals("true", latch(), "another set is a new observation, not a repeat")
+            assertEquals(1, dropped())
+
+            enumeration.enumerate(reset = false) // dropped: c, again
+            assertEquals("false", latch())
+        }
+
+    @Test
+    fun `a complete full listing forgets the dropped set, so the next incomplete one starts counting again`() =
+        runTest {
+            val enumeration = enumeration()
+            enumeration.armedRecovery()
+            enumeration.enumerate(reset = false) // dropped: b, c
+            assertEquals(2, dropped())
+
+            provider.items = listOf(a, b, c)
+            provider.complete = true
+            enumeration.enumerate(reset = false)
+            assertEquals("false", latch())
+            assertNull(enumeration.status().droppedItems, "a complete listing leaves nothing dropped")
+
+            provider.items = listOf(a)
+            provider.complete = false
+            enumeration.enumerate(reset = true) // a full listing again, dropped: b, c
+            assertEquals("true", latch(), "the earlier observation was forgotten: one listing is not enough")
+            enumeration.enumerate(reset = false)
+            assertEquals("false", latch())
+        }
+
+    @Test
+    fun `a row written after the listing began is not part of the dropped set`() =
+        runTest {
+            val enumeration = enumeration()
+            enumeration.armedRecovery()
+            // An upload through the mount lands while each listing runs: the listing cannot have seen it.
+            provider.onDelta = {
+                db.upsertEntry(
+                    org.krost.unidrive.sync.model.SyncEntry(
+                        path = "/up.txt", remoteId = "up", remoteHash = null, remoteSize = 1, remoteModified = null, localMtime = null,
+                        localSize = null, isFolder = false, isPinned = false, isHydrated = false, lastSynced = Instant.now().plusSeconds(60),
+                    ),
+                )
+            }
+
+            enumeration.enumerate(reset = false)
+            assertEquals(2, dropped(), "b and c, not the upload")
+            enumeration.enumerate(reset = false)
+            assertEquals("false", latch(), "the set is the same twice because the upload is left out")
+        }
+
+    @Test
+    fun `an incomplete listing that misses nothing tracked is never accepted, however often it repeats`() =
+        runTest {
+            provider.fullListing = false
+            provider.items = listOf(a)
+            provider.complete = false
+            val enumeration = enumeration()
+
+            repeat(3) { enumeration.enumerate(reset = false) }
+
+            assertEquals("true", latch(), "there is no dropped set to compare: the first scan stays in recovery")
+            assertNull(enumeration.status().droppedItems)
+            assertEquals(listOf<String?>(null, null, null), provider.cursors)
+        }
+
+    @Test
+    fun `a pass says it lists again because of the recovery while it runs, not before and not after`() =
+        runTest {
+            val enumeration = enumeration()
+            enumeration.armedRecovery()
+            val during = mutableListOf<Boolean>()
+            provider.onDelta = { during += enumeration.status().recovery }
+
+            assertFalse(enumeration.status().recovery, "before")
+            enumeration.enumerate(reset = false)
+            assertEquals(listOf(true), during)
+            assertFalse(enumeration.status().recovery, "after")
+
+            provider.complete = true
+            provider.items = listOf(a, b, c)
+            enumeration.enumerate(reset = false) // still latched: a recovery pass, and a complete one
+            enumeration.enumerate(reset = false) // the latch is gone: incremental
+            assertEquals(listOf(true, true, false), during)
+        }
+
     // One page per listing; every cursor names the listing that produced it.
     private class ListingProvider : CloudProvider {
         var items: List<CloudItem> = emptyList()
@@ -724,6 +863,9 @@ class RemoteEnumerationTest {
 
         // The cursor of every delta() call, to tell a full listing (null) from an incremental one.
         val cursors = mutableListOf<String?>()
+
+        // Runs inside every delta() call: what a test observes or does while a listing is in flight.
+        var onDelta: (() -> Unit)? = null
         private var listings = 0
 
         override val id = "test"
@@ -740,6 +882,7 @@ class RemoteEnumerationTest {
             scanContext: ScanContext?,
         ): DeltaPage {
             failure?.let { throw it }
+            onDelta?.invoke()
             listings++
             cursors += cursor
             // A full listing whatever the cursor unless fullListing is off: deltaIsFullListing below.

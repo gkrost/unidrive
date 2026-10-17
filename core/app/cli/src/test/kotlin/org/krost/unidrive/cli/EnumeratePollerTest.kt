@@ -97,6 +97,46 @@ class EnumeratePollerTest {
         scope.cancel()
     }
 
+    // #926: a pass that worked but leaves the recovery latch set is followed by a full listing of the drive again; that
+    // listing must not start one plain interval later, again and again. It backs off like a failure, and the pass that
+    // ends the recovery brings the plain interval back.
+    @Test
+    fun `a pass that leaves the recovery pending backs off to the cap and a pass that ends it returns to the plain interval`() = runTest {
+        val scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val sleeps = mutableListOf<Long>()
+        val engine = RecordingEngine(enumerateResult = EnumerateResult(ok = true, complete = false, recoveryPending = true))
+        val handler = EnumerateRpcHandler(engine, scope, emit = {})
+        val nextAttempts = mutableListOf<Long?>()
+        val poller =
+            EnumeratePoller(
+                handler = handler,
+                intervalMs = intervalMs,
+                scope = scope,
+                firstPollDelayMs = intervalMs,
+                jitter = { base ->
+                    sleeps.add(base)
+                    base
+                },
+                onNextAttempt = { nextAttempts += it },
+            )
+        poller.start()
+
+        // Ticks at 60 s, 300 s (60 + 240) and 900 s (300 + 600): one step of x4, then the cap.
+        advanceTimeBy(900_001L)
+        runCurrent()
+        assertEquals(listOf(60_000L, 240_000L, 600_000L), sleeps.take(3), "240 s once, then the cap, not 60 s again")
+        assertEquals(3, engine.enumerateCount.get())
+        assertTrue(nextAttempts.all { it == null }, "no failure schedule is reported: the pass did not fail: $nextAttempts")
+
+        // The next pass ends the recovery: the sleep after it is the plain interval.
+        engine.enumerateResult = EnumerateResult(ok = true, complete = true)
+        advanceTimeBy(600_000L)
+        runCurrent()
+        assertEquals(4, engine.enumerateCount.get())
+        assertEquals(listOf(60_000L, 240_000L, 600_000L, 600_000L, 60_000L), sleeps.take(5))
+        scope.cancel()
+    }
+
     // The status a client polls says when the poller tries again after a failure: the sleep it really takes
     // (with its jitter), recorded when it begins, and gone as soon as the next run starts.
     @Test

@@ -190,6 +190,7 @@ class RemoteEnumeration(
                 first = db.getSyncState("delta_cursor").isNullOrEmpty(),
                 lastScanComplete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull(),
                 unreachableItems = db.getSyncState(RemoteGather.UNREACHABLE_ITEMS_KEY)?.toIntOrNull()?.takeIf { it > 0 },
+                droppedItems = db.getSyncState(RemoteGather.DROPPED_ITEMS_KEY)?.toIntOrNull()?.takeIf { it > 0 },
                 lastSuccessAtMs =
                     status.lastSuccessAtMs
                         ?: db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
@@ -226,10 +227,14 @@ class RemoteEnumeration(
         // Only a full listing is measured against a previous one; a delta of a few items must not
         // inherit the total of the whole drive.
         val cursorEmpty = db.getSyncState("delta_cursor").isNullOrEmpty()
+        // The recovery latch as the pass starts: while it is set, this pass lists the whole drive because the last scan was incomplete.
+        val recoveryPass = db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY)?.equals("true", ignoreCase = true) == true
         tracker.baseline(
             first = cursorEmpty,
             expected = if (cursorEmpty || gather.deltaIsFullListing) previousFullEnumeration() else null,
+            recovery = recoveryPass,
         )
+        val gatherStartedAt = Instant.now()
         // The tracked rows before the gather: what a full listing is measured against for the recovery latch (see below).
         val preGatherTrackedRows = db.getEntryCount()
         val remoteChanges: Map<String, CloudItem> =
@@ -385,6 +390,8 @@ class RemoteEnumeration(
         // Last, after the merge, the reap and the cursor: a crash before this point leaves the latch set, and the next
         // pass lists the drive again.
         settleRecoveryLatch(remoteChanges, preGatherTrackedRows, reapsDeferred)
+        // Two full listings in a row that end incomplete with the same tracked items missing: accept them, do not list again.
+        gather.boundIncompleteRecovery(remoteChanges, gatherStartedAt)
         // A complete full listing becomes the estimate for the next one (the gather recorded whether it was full).
         if (complete && db.getSyncState("last_gather_full") == "true") recordFullEnumeration(remoteChanges, listingMs)
         // Notify the view-invalidation sink once, with all paths that changed in state.db
@@ -398,7 +405,8 @@ class RemoteEnumeration(
             val changedPaths: Set<String> = upsertedViewPaths + reapedViewPaths
             gather.invalidateView(changedPaths, false, movedView)
         }
-        return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
+        val recoveryPending = db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY)?.equals("true", ignoreCase = true) == true
+        return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete, recoveryPending = recoveryPending)
     }
 
     // The recovery latch (RemoteGather.INCOMPLETE_ENUMERATION_KEY). A gather that ends incomplete sets it, and while it is
