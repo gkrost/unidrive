@@ -6,9 +6,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import org.junit.experimental.categories.Category
-import org.krost.unidrive.testing.Flaky
-import org.krost.unidrive.testing.FlakyTests
 import java.net.StandardProtocolFamily
 import java.net.UnixDomainSocketAddress
 import java.nio.ByteBuffer
@@ -53,8 +50,18 @@ class IpcServerConnectionLimitsTest {
     }
 
     // A small cap keeps the tests that fill it fast; the default cap has a test of its own.
-    private fun newServer(idleTimeoutMs: Long, maxClients: Int = SMALL_CAP): IpcServer =
-        IpcServer(socketPath, maxClients = maxClients, idleTimeoutMs = idleTimeoutMs, clock = { now.get() }).also {
+    private fun newServer(
+        idleTimeoutMs: Long,
+        maxClients: Int = SMALL_CAP,
+        refusalLingerMs: Long = IpcServer.REFUSAL_LINGER_MS,
+    ): IpcServer =
+        IpcServer(
+            socketPath,
+            maxClients = maxClients,
+            idleTimeoutMs = idleTimeoutMs,
+            clock = { now.get() },
+            refusalLingerMs = refusalLingerMs,
+        ).also {
             server = it
             it.registerHandler("ping") { _, _ -> """{"ok":true}""" }
         }
@@ -103,13 +110,17 @@ class IpcServerConnectionLimitsTest {
     // looked once, or after it would have closed. Closing a socket with unread input can reset the
     // connection, and a reset can discard the reason the client has not read yet (seen on Windows).
     // The client below reads late, after the reset would have landed, so a reset shows as a lost line.
+    //
+    // A refused connection is kept open for REFUSAL_LINGER_MS (200 ms) and then closed whether or not its peer has
+    // sent: a request that arrives after that is outside what the server promises. This client's timeline (up to 100 ms
+    // before it sends, 40 ms after) is wall-clock, and on a runner that stalls it for 100 ms it ran past that window
+    // and lost its reason to the reset of the closed socket (#905, round 3, request after 60 ms). So the test widens the
+    // window for itself: the server still must not close early, which is what the reset exposes, but how fast the
+    // runner schedules this client is no longer part of the outcome.
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 905, reason = "refused client can lose its reason to a TCP reset on Windows; may be a server bug",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38463948710/job/115526609335")
     fun `a refused client still reads the reason whenever its request arrives`() =
         runBlocking(Dispatchers.IO) {
-            val srv = newServer(idleTimeoutMs = 0)
+            val srv = newServer(idleTimeoutMs = 0, refusalLingerMs = WIDE_REFUSAL_LINGER_MS)
             srv.start(serverScope)
             fillToTheLimit(srv, SMALL_CAP)
 
@@ -348,5 +359,8 @@ class IpcServerConnectionLimitsTest {
     private companion object {
         const val TOO_MANY_CLIENTS = """{"ok":false,"error":"too_many_clients"}"""
         const val SMALL_CAP = 3
+
+        // Far beyond the client timeline of the late-request test; a lingering refusal ends at its peer's close.
+        const val WIDE_REFUSAL_LINGER_MS = 10_000L
     }
 }
