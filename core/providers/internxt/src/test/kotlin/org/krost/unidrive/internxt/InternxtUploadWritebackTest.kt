@@ -1,10 +1,15 @@
 package org.krost.unidrive.internxt
 
+import com.sun.nio.file.ExtendedOpenOption
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
+import org.junit.Assume.assumeTrue
+import java.nio.channels.FileChannel
+import java.nio.file.FileSystemException
+import java.nio.file.StandardOpenOption
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -445,6 +450,135 @@ class InternxtUploadWritebackTest {
                     provider.close()
                 }
             } finally {
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    // ---------------------------------------------------------------------------
+    // Windows only (#802): another process (antivirus, indexer) holds the upload
+    // source open without read sharing. Files.newInputStream throws a sharing
+    // violation; the encrypt step must wait it out (withLocalIoRetry) and carry on
+    // into the upload instead of failing the whole sync cycle. If the wrapper is
+    // removed, the first test fails with the raw sharing violation.
+    private fun lockedSourceFixture(block: suspend (java.nio.file.Path, java.nio.file.Path, FileChannel) -> Unit) =
+        runTest {
+            assumeTrue(System.getProperty("os.name").lowercase().contains("windows"))
+            val tmp = java.nio.file.Files.createTempDirectory("ud-lock-")
+            val local = java.nio.file.Files.createTempFile(tmp, "deb-", ".deb")
+            java.nio.file.Files.write(local, ByteArray(200) { i -> i.toByte() })
+            val channel = FileChannel.open(local, StandardOpenOption.READ, ExtendedOpenOption.NOSHARE_READ)
+            try {
+                assertFailsWith<FileSystemException>("the fixture must really block readers") {
+                    java.nio.file.Files.newInputStream(local).close()
+                }
+                block(tmp, local, channel)
+            } finally {
+                runCatching { channel.close() }
+                tmp.toFile().deleteRecursively()
+            }
+        }
+
+    @Test
+    fun `upload waits for a source file held open briefly and then completes`() =
+        lockedSourceFixture { tmp, local, channel ->
+            val finishPosts = AtomicInteger(0)
+            val folderGets = AtomicInteger(0)
+            val createPosts = AtomicInteger(0)
+            val landed =
+                """{"children":[],"files":[{
+                    "uuid":"intermediate-uuid",
+                    "fileId":"$localFileId",
+                    "plainName":"deb-x","type":"deb","size":"200",
+                    "bucket":"6928426c1a2316b856c9ab81",
+                    "folderUuid":"root-folder-uuid","status":"EXISTS",
+                    "creationTime":"${java.time.Instant.now()}"
+                }]}"""
+            val provider = newProviderRooted(tmp)
+            val releaser =
+                Thread {
+                    Thread.sleep(300)
+                    channel.close()
+                }
+            try {
+                installMockClientOnProvider(
+                    provider,
+                    engineWithLostFinish(finishPosts, folderGets, createPosts, landed, "real-drive-uuid"),
+                )
+                releaser.start()
+                val result = provider.upload(local, "/deb-x.deb", existingRemoteId = null, onProgress = null)
+
+                assertEquals("real-drive-uuid", result.id)
+                assertTrue(finishPosts.get() > 0, "the upload must get past the source open and reach the bridge")
+            } finally {
+                releaser.join(2_000)
+                provider.close()
+            }
+        }
+
+    @Test
+    fun `upload of a source file that stays locked fails with the lock named instead of hanging`() =
+        lockedSourceFixture { tmp, local, _ ->
+            val finishPosts = AtomicInteger(0)
+            val provider = newProviderRooted(tmp)
+            try {
+                installMockClientOnProvider(
+                    provider,
+                    engineWithLostFinish(finishPosts, AtomicInteger(0), AtomicInteger(0), """{"children":[],"files":[]}""", "x"),
+                )
+                val e =
+                    assertFailsWith<FileSystemException> {
+                        provider.upload(local, "/deb-x.deb", existingRemoteId = null, onProgress = null)
+                    }
+                assertTrue(e.message.orEmpty().contains("locked by another process"), "message was: ${e.message}")
+                assertEquals(0, finishPosts.get(), "nothing may be committed when the source could not be read")
+            } finally {
+                provider.close()
+            }
+        }
+
+    // The encrypt step's own open: the lock is taken only after the fingerprint read (the first onProgress
+    // call comes between the two), so only the withLocalIoRetry around Files.newInputStream can save it.
+    @Test
+    fun `encrypt step waits for a source file locked after the fingerprint read`() =
+        runTest {
+            assumeTrue(System.getProperty("os.name").lowercase().contains("windows"))
+            val tmp = java.nio.file.Files.createTempDirectory("ud-lock-enc-")
+            val local = java.nio.file.Files.createTempFile(tmp, "deb-", ".deb")
+            java.nio.file.Files.write(local, ByteArray(200) { i -> i.toByte() })
+            val finishPosts = AtomicInteger(0)
+            val landed =
+                """{"children":[],"files":[{
+                    "uuid":"intermediate-uuid",
+                    "fileId":"$localFileId",
+                    "plainName":"deb-x","type":"deb","size":"200",
+                    "bucket":"6928426c1a2316b856c9ab81",
+                    "folderUuid":"root-folder-uuid","status":"EXISTS",
+                    "creationTime":"${java.time.Instant.now()}"
+                }]}"""
+            val provider = newProviderRooted(tmp)
+            val locked = AtomicInteger(0)
+            var channel: FileChannel? = null
+            var releaser: Thread? = null
+            try {
+                installMockClientOnProvider(
+                    provider,
+                    engineWithLostFinish(finishPosts, AtomicInteger(0), AtomicInteger(0), landed, "real-drive-uuid"),
+                )
+                val result =
+                    provider.upload(local, "/deb-x.deb", existingRemoteId = null) { _, _ ->
+                        if (locked.getAndIncrement() == 0) {
+                            val ch = FileChannel.open(local, StandardOpenOption.READ, ExtendedOpenOption.NOSHARE_READ)
+                            channel = ch
+                            releaser = Thread { Thread.sleep(300); ch.close() }.also { it.start() }
+                        }
+                    }
+                assertEquals("real-drive-uuid", result.id)
+                assertTrue(locked.get() > 0 && channel != null, "the lock must have been taken between fingerprint and encrypt")
+                assertTrue(finishPosts.get() > 0, "the upload must get past the encrypt step's open and reach the bridge")
+            } finally {
+                releaser?.join(2_000)
+                runCatching { channel?.close() }
+                provider.close()
                 tmp.toFile().deleteRecursively()
             }
         }
