@@ -7,12 +7,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import org.junit.experimental.categories.Category
 import org.krost.unidrive.http.UploadProgress
 import org.krost.unidrive.http.UploadWatchdogException
 import org.krost.unidrive.http.UploadWatchdogLimits
-import org.krost.unidrive.testing.Flaky
-import org.krost.unidrive.testing.FlakyTests
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
@@ -54,12 +51,23 @@ class InternxtShardPutWatchdogTest {
 
     private fun file(size: Int): Path = Files.createTempFile("shard", ".bin").also { Files.write(it, bytes(size)); files.add(it) }
 
-    // The watchdog's limits in these tests, in wall-clock milliseconds.
+    // The watchdog's limits in these tests, in wall-clock milliseconds. Where the watchdog must cut, the idle window is
+    // short: such a test only waits for it.
     private val idleWindowMs = 3_000L
     private val responseWaitMs = 3_000L
 
-    // The engine's own socket timer where the upload must outlive it: half the idle window.
-    private val shortSocketTimeoutMs = idleWindowMs / 2
+    // Where the watchdog must NOT cut an upload that keeps moving, both windows are wide. A runner that stalls the
+    // server's reader or the client's writer for seconds (three seconds were seen on CI, #904) makes an upload that
+    // moves look idle to a 3 s window; the property under test is that a moving upload is never cut, whatever its
+    // duration. The response wait is wide for a second reason: the client's writes complete when the bytes sit in the
+    // channel and socket buffers (ten MiB and more), and the server, which reads at the pace of a slow uplink, still
+    // needs backlog / pace seconds to read them before it can answer. That is the time the response wait must cover,
+    // and under load the pace falls while a fixed 3 s window does not.
+    private val steadyIdleWindowMs = 8_000L
+    private val steadyResponseWaitMs = 60_000L
+
+    // The engine's own socket timer where the upload must outlive it.
+    private val shortSocketTimeoutMs = 1_500L
 
     // The engine's socket timer where only the watchdog may cut: far beyond every budget below.
     private val outerSocketTimeoutMs = 30_000L
@@ -71,7 +79,10 @@ class InternxtShardPutWatchdogTest {
     private val cancelSettleBudgetMs = 10_000L
     private val connectionEndBudgetMs = 15_000L
 
-    private fun limits() = UploadWatchdogLimits(idleWindowMs = idleWindowMs, responseWaitFloorMs = responseWaitMs, tickMs = 50)
+    private fun limits(
+        idleMs: Long = idleWindowMs,
+        responseWaitMs: Long = this.responseWaitMs,
+    ) = UploadWatchdogLimits(idleWindowMs = idleMs, responseWaitFloorMs = responseWaitMs, tickMs = 50)
 
     private fun assertWithinBudget(
         step: String,
@@ -108,22 +119,23 @@ class InternxtShardPutWatchdogTest {
         }
     }
 
-    // 24 MiB read at ~3.5 MB/s takes ~7 s: more than twice the idle window, so the upload outlives every limit
-    // the watchdog has — the shape of the live case, where the body needed longer than the size-derived timeout.
+    // 40 MiB read at ~1.3 MB/s: the channel and the socket buffers take the first ten or so MiB at once, the rest
+    // takes more than twice the (wide) idle window, so the upload outlives every limit the watchdog has — the shape of
+    // the live case, where the body needed longer than the size-derived timeout.
     private fun slowButSteady(body: Body) =
         runBlocking {
-            val size = 24 * 1024 * 1024
+            val size = 40 * 1024 * 1024
             val upload = uploadOf(body, size)
             val received = AtomicLong(0)
             LoopbackServer(tls = true) { exchange ->
                 exchange.readRequestLine()
-                received.set(exchange.readBody(size.toLong(), chunkBytes = 256 * 1024, pauseMs = 75))
+                received.set(exchange.readBody(size.toLong(), chunkBytes = 64 * 1024, pauseMs = 50))
                 exchange.respond(200, "OK", "{}")
             }.use { server ->
                 loopbackService(
                     loopbackClient(server, socketTimeoutMs = shortSocketTimeoutMs),
                     listingSocketMs = 8_000,
-                    shardPutWatchdog = limits(),
+                    shardPutWatchdog = limits(steadyIdleWindowMs, steadyResponseWaitMs),
                 ).use { api ->
                     val start = System.nanoTime()
                     try {
@@ -132,28 +144,22 @@ class InternxtShardPutWatchdogTest {
                         val cutAfterMs = (System.nanoTime() - start) / 1_000_000
                         fail(
                             "step \"steady upload\": the watchdog cut a healthy upload after $cutAfterMs ms " +
-                                "(idle window $idleWindowMs ms; the server had read ${received.get()} of $size bytes): ${e.message}",
+                                "(idle window $steadyIdleWindowMs ms, response wait $steadyResponseWaitMs ms; the server had read ${received.get()} of $size bytes): ${e.message}",
                         )
                     }
                     val elapsedMs = (System.nanoTime() - start) / 1_000_000
 
                     assertEquals(size.toLong(), received.get(), "the server got the whole body")
                     assertEquals(1, server.connections, "one attempt, not cut and retried")
-                    assertAtLeast("steady upload outlives twice the idle window", elapsedMs, 2 * idleWindowMs)
+                    assertAtLeast("steady upload outlives twice the idle window", elapsedMs, 2 * steadyIdleWindowMs)
                 }
             }
         }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 904, reason = "a 3 s runner pause reads as a stalled upload (real TLS loopback, 3 s idle window)",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38463511077/job/115524492531")
     fun `a slow but steady upload that outlives every limit succeeds - file body`() = slowButSteady(Body.FILE)
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 904, reason = "a 3 s runner pause reads as a stalled upload (real TLS loopback, 3 s idle window)",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38594747341/job/115958857568")
     fun `a slow but steady upload that outlives every limit succeeds - in-memory body`() = slowButSteady(Body.BYTES)
 
     // The server reads the first 64 KiB and then nothing: the client's writes block once the buffers are full.
@@ -262,9 +268,6 @@ class InternxtShardPutWatchdogTest {
         }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 904, reason = "a 3 s runner pause reads as a stalled upload (real TLS loopback, 3 s idle window)",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38697003262/job/116296446761")
     fun `cancelling the caller cancels the upload and closes its connection`() =
         runBlocking {
             val size = 64 * 1024 * 1024
@@ -291,7 +294,7 @@ class InternxtShardPutWatchdogTest {
                 loopbackService(
                     loopbackClient(server, socketTimeoutMs = outerSocketTimeoutMs),
                     listingSocketMs = 8_000,
-                    shardPutWatchdog = limits(),
+                    shardPutWatchdog = limits(steadyIdleWindowMs, steadyResponseWaitMs),
                 ).use { api ->
                     val outcome = AtomicReference<Throwable?>(null)
                     val job =
@@ -317,7 +320,7 @@ class InternxtShardPutWatchdogTest {
                     )
                     assertWithinBudget("upload reaches the server", reachedMs, uploadStartBudgetMs)
                     // The watchdog now runs for longer than its idle window while the body keeps moving: it must not cut.
-                    delay(idleWindowMs + 500)
+                    delay(steadyIdleWindowMs + 500)
                     cancelled.set(true)
                     val cancelAtMs = System.nanoTime()
                     job.cancel()

@@ -4,9 +4,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Job
-import org.junit.experimental.categories.Category
-import org.krost.unidrive.testing.Flaky
-import org.krost.unidrive.testing.FlakyTests
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withTimeout
@@ -350,9 +347,6 @@ class DaemonRuntimeTest {
      * dropped. daemon.shutdown goes last because its ack stops the daemon.
      */
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 906, reason = "the daemon is not ready within its 30 s budget on a loaded Windows runner",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/37616178178/job/112774934133")
     fun verbs_sent_as_soon_as_the_socket_appears_all_get_a_reply() =
         runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             val runtime = DaemonRuntime(
@@ -420,7 +414,7 @@ class DaemonRuntimeTest {
                         val req = request + "\n"
                         val w = ByteBuffer.wrap(req.toByteArray(Charsets.UTF_8))
                         while (w.hasRemaining()) channel.write(w)
-                        val reply = readFirstReplyLine(channel, timeoutMs = 5_000)
+                        val reply = readFirstReplyLine(channel, timeoutMs = IPC_STEP_BUDGET_MS)
                         val json = kotlinx.serialization.json.Json.parseToJsonElement(reply)
                         assertTrue(
                             json is kotlinx.serialization.json.JsonObject && json.containsKey("ok"),
@@ -673,7 +667,7 @@ class DaemonRuntimeTest {
             channel.configureBlocking(false)
             channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
             val collected = StringBuilder()
-            val deadline = System.currentTimeMillis() + 5_000
+            val deadline = System.currentTimeMillis() + IPC_STEP_BUDGET_MS
             while (System.currentTimeMillis() < deadline && !collected.contains('\n')) {
                 val buf = ByteBuffer.allocate(4096)
                 val n = channel.read(buf)
@@ -684,7 +678,7 @@ class DaemonRuntimeTest {
                     Thread.sleep(20)
                 }
             }
-            check(collected.contains('\n')) { "no reply line within 5s; collected: $collected" }
+            check(collected.contains('\n')) { "no reply line within ${IPC_STEP_BUDGET_MS}ms; collected: $collected" }
             return collected.toString().substringBefore('\n')
         } finally {
             channel.close()
@@ -692,10 +686,7 @@ class DaemonRuntimeTest {
     }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 906, reason = "refresh.done not seen within the 30 s budget on a loaded Windows runner",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/37958159941/job/113913868350")
-    fun refresh_run_emits_terminal_event_after_completing_enumeration() = runBlocking {
+    fun refresh_run_emits_terminal_event_after_completing_enumeration() = runBlocking(Dispatchers.IO) {
         // Spec T5: subscribe -> refresh.run -> await refresh.done terminal event.
         // Then re-issue refresh.run; must succeed (not stuck in 'busy').
         val provider: CloudProvider = StubProvider()
@@ -1196,7 +1187,7 @@ class DaemonRuntimeTest {
 
     // Polls daemon.status until its enumeration object satisfies [predicate]; fails with the last reply otherwise.
     private suspend fun awaitEnumeration(
-        timeoutMs: Long = 10_000,
+        timeoutMs: Long = IPC_STEP_BUDGET_MS,
         predicate: (JsonObject) -> Boolean,
     ): JsonObject {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -1236,10 +1227,7 @@ class DaemonRuntimeTest {
     }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 906, reason = "daemon.status shows no enumeration within 30 s on a loaded Windows runner",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38569710968/job/115871656693")
-    fun `daemon_status follows an enumeration from running to done`() = runBlocking {
+    fun `daemon_status follows an enumeration from running to done`() = runBlocking(Dispatchers.IO) {
         val gate = CompletableDeferred<Unit>()
         val runtime = startDaemon(ScriptedDeltaProvider(gate = gate))
         val daemonJob = launch { runtime.start() }
@@ -1248,7 +1236,12 @@ class DaemonRuntimeTest {
             val started = sendOneRequest("""{"verb":"sync.enumerate"}""")
             assertTrue(started.contains("\"ok\":true"), started)
 
-            val running = awaitEnumeration { it.getValue("state").jsonPrimitive.content == "running" && "items" in it }
+            // A running enumeration shows its items (0) before the provider has reported anything: wait for the
+            // provider's own report, which is what the assertions below describe.
+            val running =
+                awaitEnumeration {
+                    it.getValue("state").jsonPrimitive.content == "running" && it["items"]?.jsonPrimitive?.int == 1_234
+                }
             assertEquals("listing", running.getValue("phase").jsonPrimitive.content)
             assertEquals("tree", running.getValue("listing").jsonPrimitive.content)
             assertTrue(running.getValue("first").jsonPrimitive.boolean)
@@ -1276,10 +1269,7 @@ class DaemonRuntimeTest {
     }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 906, reason = "daemon.status shows no failed enumeration within 30 s on a loaded Windows runner",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38556058682/job/115833079932")
-    fun `daemon_status reports a failed enumeration with a reason that names no path`() = runBlocking {
+    fun `daemon_status reports a failed enumeration with a reason that names no path`() = runBlocking(Dispatchers.IO) {
         val runtime = startDaemon(ScriptedDeltaProvider(failure = ProviderException("cannot list /Secret/Plans: boom")))
         val daemonJob = launch { runtime.start() }
         awaitSocket(daemonJob)

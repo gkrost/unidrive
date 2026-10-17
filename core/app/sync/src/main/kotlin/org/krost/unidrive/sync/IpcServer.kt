@@ -36,6 +36,9 @@ class IpcServer(
     private val idleTimeoutMs: Long = readIdleTimeoutFromEnv(),
     // Monotonic milliseconds for the idle timeout; injectable so tests move time instead of waiting.
     private val clock: () -> Long = { System.nanoTime() / 1_000_000L },
+    // How long a refused connection is kept open for its peer's request (see refuse); a test widens it so that a slow
+    // runner cannot make the peer's request arrive after the server stopped waiting for it.
+    private val refusalLingerMs: Long = REFUSAL_LINGER_MS,
 ) {
     // Captured at construction so a later companion-object change can't accidentally
     // re-read the env var mid-flight. Multiply once into nanos so writeNonBlocking
@@ -662,7 +665,7 @@ class IpcServer(
     // bounds a peer that reads nothing. Closing a socket that still has unread input can reset the
     // connection, and a reset discards a reason the client has not read yet (Windows does it for any
     // request that arrives after the close, however soon). So the write side is shut down, and the
-    // read side is kept open and drained until the peer's end of stream or REFUSAL_LINGER_MS, whichever
+    // read side is kept open and drained until the peer's end of stream or [refusalLingerMs], whichever
     // comes first. That wait runs on a coroutine of its own: the accept loop never sleeps for it.
     // At most MAX_LINGERING_REFUSALS wait at once; past that a refusal drains what has arrived and closes.
     private fun refuse(
@@ -684,7 +687,7 @@ class IpcServer(
         }
         if (lingeringRefusals.incrementAndGet() <= MAX_LINGERING_REFUSALS) {
             try {
-                val job = scope.launch(transport) { drainUntilEofOrDeadline(sc, REFUSAL_LINGER_MS) }
+                val job = scope.launch(transport) { drainUntilEofOrDeadline(sc, refusalLingerMs) }
                 // Runs on every end of the job, including a cancellation before it started (server stop).
                 job.invokeOnCompletion {
                     lingeringRefusals.decrementAndGet()
