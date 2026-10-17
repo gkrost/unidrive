@@ -10,12 +10,9 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import org.junit.experimental.categories.Category
 import org.krost.unidrive.sync.StateDatabase
 import org.krost.unidrive.sync.SyncEngine
 import org.krost.unidrive.sync.model.SyncEntry
-import org.krost.unidrive.testing.Flaky
-import org.krost.unidrive.testing.FlakyTests
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
@@ -23,6 +20,7 @@ import java.time.Instant
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.time.Duration.Companion.minutes
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -43,6 +41,15 @@ import kotlin.test.assertTrue
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class HydrationCacheBudgetTest {
+    private companion object {
+        /**
+         * `runTest` bounds the real time of its body, not only the virtual time. The tests that walk and delete real
+         * files inside it ran into the default minute on a loaded Windows runner while a lone run takes under a second;
+         * the budget here is for the harness only, nothing the product does waits on it.
+         */
+        val REAL_FILE_WORK_BUDGET = 5.minutes
+    }
+
     private class Env(
         val provider: MemProvider,
         val db: StateDatabase,
@@ -125,13 +132,10 @@ class HydrationCacheBudgetTest {
         }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 902, reason = "runTest hits its 1 min wall clock on a loaded Windows runner (real files)",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38625423397/job/116063293745")
-    fun `a path with a queued or in-flight upload is never evicted, even when its copy is identical to the sync root`() =
-        runTest {
-            val env = freshEnv()
-            val cache = env.syncedAndRead("a.txt")
+    fun `a path with a queued or in-flight upload is never evicted, even when its copy is identical to the sync root`() {
+        val env = freshEnv()
+        val cache = runBlocking { env.syncedAndRead("a.txt") }
+        runTest(timeout = REAL_FILE_WORK_BUDGET) {
             val hydration = env.hydration(this, budget = 1)
             val gate = CompletableDeferred<Unit>().also { env.provider.uploadGate = it }
             // The mount saved the very bytes that are already there: identical to the sync-root copy.
@@ -150,6 +154,7 @@ class HydrationCacheBudgetTest {
             hydration.evictCache()
             assertFalse(Files.exists(cachePath), "once the upload landed the copy is evictable again")
         }
+    }
 
     @Test
     fun `a never-uploaded create and a failed upload are never evicted`() =
@@ -473,14 +478,11 @@ class HydrationCacheBudgetTest {
     }
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 902, reason = "runTest hits its 1 min wall clock on a loaded Windows runner (real files)",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38284021448/job/114927958874")
     fun `an over-budget pass classifies the cache in batches, not one row query per file`() {
         val env = freshEnv()
         val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40
         env.manyCachedFiles('f', fileCount)
-        runTest {
+        runTest(timeout = REAL_FILE_WORK_BUDGET) {
             val hydration = env.hydration(this, budget = 1, delayMs = 0)
             val batches = mutableListOf<Int>()
             hydration.onDispositionBatch = { batches += it }
@@ -502,7 +504,7 @@ class HydrationCacheBudgetTest {
         val env = freshEnv()
         val fileCount = HydrationImpl.EVICTION_DISPOSITION_BATCH + 40
         env.manyCachedFiles('g', fileCount)
-        runTest {
+        runTest(timeout = REAL_FILE_WORK_BUDGET) {
             val hydration = env.hydration(this, budget = (fileCount - 2) * 1_000L, delayMs = 0)
             val batches = mutableListOf<Int>()
             hydration.onDispositionBatch = { batches += it }
