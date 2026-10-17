@@ -10,7 +10,7 @@ import java.nio.file.Path
 
 /**
  * #625: the shared daemon-startup wait for every test that binds a daemon socket. A cold or busy
- * runner gets 30 s, and when the caller has the daemon's [daemonJob] a start that ENDED without
+ * runner gets [DAEMON_START_BUDGET_MS], and when the caller has the daemon's [daemonJob] a start that ENDED without
  * binding fails at once instead of running out the clock (a real regression then names itself).
  * The poll exits the moment the socket exists — the budget is only a ceiling.
  */
@@ -18,7 +18,7 @@ internal suspend fun awaitDaemonSocket(
     socketPath: Path,
     daemonJob: Job? = null,
 ) {
-    withTimeout(30_000) {
+    withTimeout(DAEMON_START_BUDGET_MS) {
         while (!Files.exists(socketPath)) {
             if (daemonJob?.isCompleted == true) {
                 error("the daemon start finished without binding its socket")
@@ -29,11 +29,18 @@ internal suspend fun awaitDaemonSocket(
 }
 
 /**
- * The ceiling for one wait on a daemon's reply or pushed event. Like [awaitDaemonSocket]'s 30 s it is only
- * a ceiling: the poll returns the moment the line arrives, so a healthy run pays nothing for it, and a
- * loaded Windows runner (cold JIT, a busy disk) gets room instead of a flake.
+ * The ceiling for the daemon to bind its socket. A runner that runs several modules' tests at once has stalled a
+ * daemon's start for more than 30 s (#906), so the ceiling is four times that; a healthy start pays nothing for it.
  */
-internal const val IPC_STEP_BUDGET_MS = 30_000L
+internal const val DAEMON_START_BUDGET_MS = 120_000L
+
+/**
+ * The ceiling for one wait on a daemon's reply or pushed event. Like [DAEMON_START_BUDGET_MS] it is only
+ * a ceiling: the poll returns the moment the line arrives, so a healthy run pays nothing for it, and a
+ * loaded Windows runner (cold JIT, a busy disk) gets room instead of a flake. A wait on a reply was seen to
+ * run 36 s past a 30 s budget (#906).
+ */
+internal const val IPC_STEP_BUDGET_MS = 120_000L
 
 /**
  * Polls [channel] (non-blocking) until a complete line satisfies [accept], and returns that line. Lines
