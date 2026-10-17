@@ -134,6 +134,36 @@ class RemoteShrinkGuardTest {
             assertNotNull(db.getEntry("/f0.txt"))
         }
 
+    // --- Invariant F: with streaming on, a full enumeration against an established baseline still runs buffered, so
+    //     the guard aborts before the sweep's deletions can be planned or applied. (The streaming gather has no 410
+    //     recovery that could upgrade an incremental pass to a full one behind the gate's back.) ---
+    @Test
+    fun `a full enumeration against a large baseline runs buffered under streaming and trips the guard`() =
+        runTest {
+            repeat(100) { provider.putRemote("/f$it.txt", "v$it") }
+            val seed = engine.enumerateRemoteIntoState(reset = false)
+            assertTrue(seed.complete)
+            for (i in 0 until 100) Files.writeString(syncRoot.resolve("f$i.txt"), "v$i")
+            for (i in 17 until 100) provider.removeRemote("/f$i.txt")
+            db.setSyncState("delta_cursor", "")
+            val streaming =
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    reporter = ProgressReporter.Silent,
+                    cacheRoot = cacheRoot,
+                    cacheKey = "shrink-test",
+                    streamingReconciliation = true,
+                )
+
+            assertFailsWith<IllegalStateException> { streaming.syncOnce(dryRun = false) }
+            assertEquals(100, db.getEntryCount(), "no tracked row may be reaped by an aborted pass")
+            for (i in 0 until 100) {
+                assertTrue(Files.exists(syncRoot.resolve("f$i.txt")), "f$i.txt must survive an aborted pass")
+            }
+        }
+
     class ShrinkFakeProvider : CloudProvider {
         override val id = "shrink-fake"
         override val displayName = "Shrink Fake"
