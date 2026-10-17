@@ -299,6 +299,99 @@ class IpcContractCorpusTest {
     }
 
     /**
+     * `sessions/trash-status.ndjson` and `sessions/trash-status-renamed.ndjson`: the `trash` object of `daemon.status`
+     * (docs/dev/specs/unidrive-daemon-design.md section 4.3), present only once a listing has placed an item in the
+     * provider's trash. Each transcript is a `sync.enumerate` and the `daemon.status` that follows it, replayed against a
+     * live mount daemon whose provider lists one trashed item. In the second one a live top-level folder already has the
+     * default name, so the root takes `Papierkorb (2)` while `configured_name` stays what the profile asks for.
+     * The status is asked until the enumeration has landed; run-dependent instants stand in as in the history event.
+     */
+    @Test
+    fun daemon_status_with_a_trash_matches_corpus_over_live_socket() {
+        val trashed = CloudItem("t1", "a.txt", "/Old/a.txt", 1, false, null, null, null, null, trashed = true)
+        replayTrashStatus("trash-status", listOf(trashed))
+        replayTrashStatus(
+            "trash-status-renamed",
+            listOf(CloudItem("live-pk", "Papierkorb", "/Papierkorb", 0, true, null, null, null, null), trashed),
+        )
+    }
+
+    private fun replayTrashStatus(
+        session: String,
+        listing: List<CloudItem>,
+    ) = runBlocking {
+        val pairs = loadSession(session)
+        assertEquals(2, pairs.size, "$session: one enumerate and one status")
+        val tempDir = Files.createTempDirectory("ipc-contract-trash-status")
+        val socketPath = tempDir.resolve("daemon.sock")
+        val runtime = DaemonRuntime(
+            profileMode = ProfileMode.MOUNT,
+            profileName = "contract_profile",
+            lockFile = tempDir.resolve(".lock"),
+            dbPath = tempDir.resolve("state.db"),
+            syncRoot = tempDir,
+            socketPath = socketPath,
+            providerFactory = { StubProvider(listing) },
+            providerHasQuota = false,
+        )
+        val daemonJob = launch { runtime.start() }
+        try {
+            awaitDaemonSocket(socketPath)
+            val endpoint = IpcEndpoint(socketPath, tempDir, "contract_profile")
+
+            suspend fun ask(request: String): String {
+                val channel = IpcAuthClient.connect(endpoint, IpcAuth.Scope.FULL)
+                try {
+                    channel.configureBlocking(false)
+                    channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
+                    return readFirstLine(channel, timeoutMs = 5_000)
+                } finally {
+                    channel.close()
+                }
+            }
+
+            val (enumerate, enumerated) = pairs[0]
+            assertJsonMatches(Json.parseToJsonElement(enumerated), Json.parseToJsonElement(ask(enumerate)), "$session: reply to $enumerate")
+
+            val (statusRequest, expectedStatus) = pairs[1]
+            val expected = Json.parseToJsonElement(expectedStatus) as JsonObject
+            // The enumeration runs after its reply: ask until it has landed (idle, a success instant, the trash placed).
+            fun JsonObject.section(key: String): JsonObject = getValue(key) as JsonObject
+            fun landed(reply: JsonObject): Boolean =
+                "trash" in reply &&
+                    (reply.section("enumeration")["state"] as? JsonPrimitive)?.content == "idle" &&
+                    reply.section("enumeration")["last_success_at_ms"].let { it != null && it !is JsonNull } &&
+                    reply.section("provider_health")["last_contact_ms"].let { it != null && it !is JsonNull }
+            val deadline = System.currentTimeMillis() + 10_000
+            var reply: JsonObject
+            do {
+                reply = Json.parseToJsonElement(ask(statusRequest)) as JsonObject
+                if (landed(reply)) break
+                delay(50)
+            } while (System.currentTimeMillis() < deadline)
+            assertTrue(landed(reply), "$session: the enumeration did not land within 10 s; last status: $reply")
+
+            // The instants of the run: each must be a number, and the transcript's value stands in for it.
+            val instants = mapOf("enumeration" to listOf("started_at_ms", "last_success_at_ms"), "provider_health" to listOf("last_contact_ms"))
+            val comparable =
+                JsonObject(
+                    reply + instants.mapValues { (section, keys) ->
+                        for (key in keys) {
+                            val value = reply.section(section).getValue(key)
+                            assertTrue(value is JsonPrimitive && !value.isString && value !is JsonNull, "$section.$key is a number, got $value")
+                        }
+                        JsonObject(reply.section(section) + keys.associateWith { expected.section(section).getValue(it) })
+                    },
+                )
+            assertJsonMatches(expected, comparable, "$session: reply to $statusRequest")
+        } finally {
+            runtime.close()
+            daemonJob.join()
+            runCatching { tempDir.toFile().deleteRecursively() }
+        }
+    }
+
+    /**
      * `auth/<name>.ndjson`: one session each, replayed in order on ONE connection against a server
      * holding the fixed test vectors (profile `p1`, token bytes 00..1f for both scopes, server nonce
      * 10..1f). They pin the handshake replies and the auth_required / auth_failed / forbidden shapes.
@@ -683,7 +776,8 @@ class IpcContractCorpusTest {
      * the it's-a-folder family, `/docs/open.txt` → busy, `/docs/nonempty` →
      * not_empty, `/docs/report.txt` → an existing file, `/outside...` →
      * outside_scope (sync_path guard), `/excluded/...` → accepted with
-     * excluded:true (keep-local rule), an open_write cache path outside
+     * excluded:true (keep-local rule), `/Papierkorb...` → the read-only trash
+     * namespace (every write answers read_only), an open_write cache path outside
      * `/cache/unidrive/hydration` → invalid_path.
      */
     private class ScriptedHydration : Hydration {
@@ -698,6 +792,7 @@ class IpcContractCorpusTest {
             when {
                 // A cache path outside the profile's hydration cache folder is refused before anything else.
                 !cachePath.startsWith(cacheDir) -> OpenResult.Failed(HydrationError.InvalidPath)
+                inTrash(path) -> OpenResult.Failed(HydrationError.ReadOnly)
                 path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
                 // A stale base_etag refuses the write before any upload runs.
                 path == "/docs/report.txt" && baseEtag == "stale-etag" -> OpenResult.Failed(HydrationError.Conflict)
@@ -763,32 +858,68 @@ class IpcContractCorpusTest {
                         ),
                     ),
                 )
+            } else if (prefix == "/") {
+                // The top level of a mount with a trash: a live file, and the trash root (its remote_id is the stable key).
+                ListResult.Ok(
+                    listOf(
+                        ListResult.Entry(
+                            "/Live.txt", 3, FIXED_MTIME_MS, isHydrated = false, isFolder = false,
+                            remoteModifiedEpochMillis = FIXED_REMOTE_MS, remoteId = "rid-live", etag = "etag-live",
+                            pendingUpload = false, hasError = false,
+                        ),
+                        ListResult.Entry(
+                            "/Papierkorb", 0, FIXED_MTIME_MS, isHydrated = false, isFolder = true,
+                            remoteModifiedEpochMillis = FIXED_REMOTE_MS, remoteId = "unidrive:trash", etag = null,
+                            pendingUpload = false, hasError = false, readOnly = true, trashRoot = true,
+                        ),
+                    ),
+                )
+            } else if (prefix == "/Papierkorb") {
+                // Below the root: read_only, and only the root is the root.
+                ListResult.Ok(
+                    listOf(
+                        ListResult.Entry(
+                            "/Papierkorb/Old", 0, FIXED_MTIME_MS, isHydrated = false, isFolder = true,
+                            remoteModifiedEpochMillis = FIXED_REMOTE_MS, remoteId = "rid-old", etag = null,
+                            pendingUpload = false, hasError = false, readOnly = true,
+                        ),
+                        ListResult.Entry(
+                            "/Papierkorb/note.txt", 9, FIXED_MTIME_MS, isHydrated = false, isFolder = false,
+                            remoteModifiedEpochMillis = FIXED_REMOTE_MS, remoteId = "rid-note", etag = "etag-note",
+                            pendingUpload = false, hasError = false, readOnly = true,
+                        ),
+                    ),
+                )
             } else {
                 ListResult.Ok(emptyList())
             }
 
         override suspend fun mkdir(path: String): MkdirResult =
             when {
+                inTrash(path) -> MkdirResult.Failed(HydrationError.ReadOnly)
                 path.startsWith("/missing/") -> MkdirResult.ParentNotFound
                 path.startsWith("/outside") -> MkdirResult.Failed(HydrationError.OutOfScope)
                 else -> MkdirResult.Ok
             }
 
         override suspend fun unlink(path: String): UnlinkResult =
-            when (path) {
-                "/docs/sub" -> UnlinkResult.PathIsFolder
-                "/docs/uploading.txt" -> UnlinkResult.Busy
+            when {
+                inTrash(path) -> UnlinkResult.Failed(HydrationError.ReadOnly)
+                path == "/docs/sub" -> UnlinkResult.PathIsFolder
+                path == "/docs/uploading.txt" -> UnlinkResult.Busy
                 else -> UnlinkResult.Ok
             }
 
-        override suspend fun rmdir(path: String): RmdirResult = when (path) {
-            "/docs/report.txt" -> RmdirResult.PathIsFile
-            "/docs/nonempty" -> RmdirResult.NotEmpty
-            "/docs/uploading" -> RmdirResult.Busy
+        override suspend fun rmdir(path: String): RmdirResult = when {
+            inTrash(path) -> RmdirResult.Failed(HydrationError.ReadOnly)
+            path == "/docs/report.txt" -> RmdirResult.PathIsFile
+            path == "/docs/nonempty" -> RmdirResult.NotEmpty
+            path == "/docs/uploading" -> RmdirResult.Busy
             else -> RmdirResult.Ok
         }
 
         override suspend fun create(connectionId: String, handleId: String, path: String): CreateResult = when {
+            inTrash(path) -> CreateResult.Failed(HydrationError.ReadOnly)
             path.startsWith("/missing/") -> CreateResult.ParentNotFound
             path == "/docs/report.txt" -> CreateResult.PathExists
             // keep-local: the row and cache file exist; the upload never runs.
@@ -798,6 +929,7 @@ class IpcContractCorpusTest {
         }
 
         override suspend fun openWriteBegin(connectionId: String, path: String, handleId: String?): OpenResult = when {
+            inTrash(path) -> OpenResult.Failed(HydrationError.ReadOnly)
             path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
             path == "/docs/sub" -> OpenResult.Failed(HydrationError.Generic("path_is_folder"))
             path.startsWith("/excluded/") -> OpenResult.Ok(cachePathFor(path), excluded = true)
@@ -806,6 +938,8 @@ class IpcContractCorpusTest {
         }
 
         override suspend fun rename(oldPath: String, newPath: String, replace: Boolean): RenameResult = when {
+            // Either end: nothing moves into, out of or within the trash namespace.
+            inTrash(oldPath) || inTrash(newPath) -> RenameResult.Failed(HydrationError.ReadOnly)
             oldPath.startsWith("/missing") -> RenameResult.OldPathNotFound
             newPath.startsWith("/missing/") -> RenameResult.NewParentNotFound
             // Without replace an existing destination refuses; with replace the
@@ -822,6 +956,9 @@ class IpcContractCorpusTest {
 
         private fun cachePathFor(path: String): Path = Paths.get("/cache/unidrive/hydration$path")
 
+        // The trash namespace: the root folder and everything below it.
+        private fun inTrash(path: String): Boolean = path == "/Papierkorb" || path.startsWith("/Papierkorb/")
+
         private val cacheDir: Path = Paths.get("/cache/unidrive/hydration")
     }
 
@@ -830,7 +967,10 @@ class IpcContractCorpusTest {
      * authenticateAndLog() plus an empty delta run during refresh.run /
      * sync.enumerate are exercised here.
      */
-    private class StubProvider : CloudProvider {
+    private class StubProvider(
+        // What the listing reports (empty unless a test puts a trashed item here).
+        private val listing: List<CloudItem> = emptyList(),
+    ) : CloudProvider {
         override val id: String = "stub"
         override val displayName: String = "Stub"
         override var isAuthenticated: Boolean = true
@@ -863,7 +1003,7 @@ class IpcContractCorpusTest {
             cursor: String?,
             onPageProgress: ((Int) -> Unit)?,
             scanContext: org.krost.unidrive.ScanContext?,
-        ): DeltaPage = DeltaPage(items = emptyList(), cursor = "x", hasMore = false)
+        ): DeltaPage = DeltaPage(items = listing, cursor = "x", hasMore = false)
 
         override suspend fun quota(): QuotaInfo = QuotaInfo(total = 0L, used = 0L, remaining = 0L)
     }

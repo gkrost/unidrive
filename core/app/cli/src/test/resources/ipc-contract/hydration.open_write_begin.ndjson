@@ -12,3 +12,5 @@
 {"ok":false,"error":"outside_scope"}
 {"verb":"hydration.open_write_begin","path":"/docs/./report.txt"}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.open_write_begin","path":"/Papierkorb/Old/a.txt"}
+{"ok":false,"error":"read_only"}

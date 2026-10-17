@@ -6,3 +6,5 @@
 {"ok":false,"error":"outside_scope"}
 {"verb":"hydration.mkdir","path":"/docs/../newdir"}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.mkdir","path":"/Papierkorb/Old/newdir"}
+{"ok":false,"error":"read_only"}
