@@ -146,6 +146,20 @@ class InternxtTrackedAncestorsTest {
         }
 
     @Test
+    fun `a purged tracked trash folder with only re-delivered items is checked remotely`() =
+        runTest {
+            val t = FakeFolder("T", "Binned", "root", fakeAt("10:00:00"), "TRASHED")
+            val drive = FakeDrive(emptyList(), listOf(FakeFile("seen", "old", "T", fakeAt("19:41:00"))), pageSize = 100, metaOnly = listOf(t), metaGone = setOf("T"))
+            val tracked = listOf(row("T", "Binned", "root", true).copy(trashed = true), row("seen", "old.txt", "T", false))
+
+            val page = delta(drive, tracked)
+
+            assertEquals(listOf("T"), drive.metaRequests.toList())
+            assertEquals(emptySet(), paths(page))
+            assertEquals(setOf("seen"), page.unreachableIds)
+        }
+
+    @Test
     fun `a trashed tracked folder keeps the items below it trashed`() =
         runTest {
             val t = FakeFolder("T", "Binned", "root", fakeAt("10:00:00"), "TRASHED")
@@ -154,7 +168,7 @@ class InternxtTrackedAncestorsTest {
 
             val page = delta(drive, tracked)
 
-            assertEquals(emptyList(), drive.metaRequests.toList())
+            assertEquals(listOf("T"), drive.metaRequests.toList())
             assertTrue(page.items.single { it.id == "in" }.trashed, "the row said trashed")
             assertTrue(page.items.single { it.id == "T" }.let { it.isFolder && it.trashed }, "and the folder of the trash is reported, as when it was fetched")
         }

@@ -3462,7 +3462,8 @@ class InternxtProvider(
         // from a folder the pass delivered it is made only where the tracked parent is the delivered one. A folder that
         // is asked for stays out of the result even when another edge confirmed it, so what the remote says of it
         // (moved, gone) is never overruled by a row. A row that is not a folder, or that the engine cannot vouch for
-        // (ScanContext.trackedRow answers null), ends the climb: that folder is asked for.
+        // (ScanContext.trackedRow answers null), ends the climb: that folder is asked for. Trashed folders are also
+        // asked for: a purged folder can leave re-delivered children behind with no new child to challenge its row.
         internal fun trackedAncestorRows(
             files: Collection<InternxtFile>,
             folders: Collection<InternxtFolder>,
@@ -3491,7 +3492,7 @@ class InternxtProvider(
                     val folder =
                         certain
                             ?: found[uuid].takeIf { confirmed }
-                            ?: row(uuid)?.takeIf { confirmed && it.isFolder }?.toTrackedFolder()?.also { found[uuid] = it }
+                            ?: row(uuid)?.takeIf { confirmed && it.isFolder && !it.trashed }?.toResumedFolder()?.also { found[uuid] = it }
                     if (folder == null || !climbed.add(uuid)) return
                     below = uuid
                     uuid = folder.parentUuid
@@ -3502,8 +3503,6 @@ class InternxtProvider(
             found.keys.removeAll(ask)
             return found
         }
-
-        private fun CloudItem.toTrackedFolder(): InternxtFolder = toResumedFolder().let { if (trashed) it.copy(status = "TRASHED") else it }
 
         /** How [resolveAncestors] found the folders that the listing did not return: [fromRows] of the ancestor-only rows, [fetched] by request, [unfetchable] not at all. */
         internal class AncestorResolution(
