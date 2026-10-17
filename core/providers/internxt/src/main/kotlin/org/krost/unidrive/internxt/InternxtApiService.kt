@@ -14,9 +14,9 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import org.krost.unidrive.AuthenticationException
 import org.krost.unidrive.HttpDefaults
-import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.ProviderException
 import org.krost.unidrive.QuotaInfo
+import org.krost.unidrive.RemoteContentRefusedDownloadException
 import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.http.InFlightDedup
@@ -940,7 +940,7 @@ class InternxtApiService(
         cipher: javax.crypto.Cipher,
         destination: Path,
         expectedSize: Long? = null,
-        expectedCiphertextSha256: String? = null,
+        expectedShardHash: ShardHashExpectation.Checkable? = null,
         targetMtimeMillis: Long? = null,
     ): InternxtDownloadedContent {
         bridgeBudget.awaitSlot()
@@ -955,12 +955,15 @@ class InternxtApiService(
                     // #536: the shard's Content-Length already says when the stored object is shorter
                     // than the size the drive reports (a multipart upload another client truncated) —
                     // refuse before reading a single byte instead of pulling 285 MiB that cannot
-                    // succeed. An absent header (chunked) or an unknown declared size (0) stays with
-                    // the post-download completeness guard, as before.
+                    // succeed. #940: the same for a longer one; the stream cipher keeps the length, so
+                    // the post-download guard would refuse it after the whole transfer too. An absent
+                    // header (chunked) or an unknown declared size (0) stays with that post-download
+                    // completeness guard, as before.
                     response.headers[HttpHeaders.ContentLength]?.toLongOrNull()?.let { contentLength ->
-                        if (expectedSize != null && expectedSize > 0 && contentLength < expectedSize) {
+                        if (expectedSize != null && expectedSize > 0 && contentLength != expectedSize) {
+                            val comparison = if (contentLength < expectedSize) "shorter" else "longer"
                             throw RemoteIncompleteDownloadException(
-                                "Stored object for ${destination.fileName} is shorter than the size the drive reports: " +
+                                "Stored object for ${destination.fileName} is $comparison than the size the drive reports: " +
                                     "$contentLength of $expectedSize bytes",
                                 storedBytes = contentLength,
                                 declaredBytes = expectedSize,
@@ -991,18 +994,16 @@ class InternxtApiService(
                                         written += decrypted.size
                                     }
                                 }
-                                expectedCiphertextSha256?.let { expectedHash ->
-                                    val expectedBytes = expectedHash.lowercase().toByteArray(Charsets.US_ASCII)
-                                    val actualHash = ciphertextDigest.digest().joinToString("") { "%02x".format(it) }
-                                    if (expectedBytes.size != 64 ||
-                                        !expectedHash.matches(Regex("[0-9a-fA-F]{64}")) ||
-                                        !java.security.MessageDigest.isEqual(
-                                            expectedBytes,
-                                            actualHash.toByteArray(Charsets.US_ASCII),
-                                        )
-                                    ) {
-                                        throw PermanentDownloadFailureException(
-                                            "Internxt shard SHA-256 mismatch for ${destination.fileName}; refusing unverified content",
+                                // #295: the stream cipher is malleable, so the ciphertext is checked against
+                                // the hash the network recorded before a single plaintext byte is published.
+                                // #940: the algorithm follows the recorded shape (the caller parsed it), and a
+                                // refusal names it: the old SHA-256-only comparison reported every official
+                                // client's RIPEMD-160(SHA-256) hash as a "SHA-256 mismatch".
+                                expectedShardHash?.let { expected ->
+                                    if (!expected.matches(ciphertextDigest.digest())) {
+                                        throw RemoteContentRefusedDownloadException(
+                                            "Internxt shard ${expected.algorithm} mismatch for ${destination.fileName}; refusing unverified content",
+                                            reason = "${expected.algorithm} mismatch",
                                         )
                                     }
                                 }

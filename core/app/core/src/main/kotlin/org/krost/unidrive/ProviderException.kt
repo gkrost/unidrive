@@ -119,6 +119,21 @@ open class RemoteIncompleteDownloadException(
 ) : PermanentDownloadFailureException(message, cause, requestId)
 
 /**
+ * #940: the object exists and was fetched, but its content failed the integrity check recorded for it (the
+ * downloaded ciphertext does not hash to the value the network stored), so the bytes were discarded instead of
+ * handed over as the file. Another attempt reads the same bytes, so it is permanent and quarantined like the other
+ * [PermanentDownloadFailureException] sites; it is not a gone file, and the hydration layer reports it as its own
+ * `content_refused` token, never `not_found`. [reason] is the short part a client may show (for example
+ * "SHA-256 mismatch"); it never carries a file name.
+ */
+open class RemoteContentRefusedDownloadException(
+    message: String,
+    val reason: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : PermanentDownloadFailureException(message, cause, requestId)
+
+/**
  * The drive still lists the file, but its bridge-side encrypted object is missing. This is a
  * permanent failure for this object ID and is quarantined like other non-retryable downloads, but
  * it is not the same as a deleted drive file: callers should preserve local bytes and report the
