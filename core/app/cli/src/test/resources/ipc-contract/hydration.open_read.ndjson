@@ -6,3 +6,11 @@
 {"ok":false,"error":"invalid_path"}
 {"verb":"hydration.open_read","handle_id":"h-1","path":"/paused/cold.txt"}
 {"ok":false,"error":"paused"}
+{"verb":"hydration.open_read","handle_id":"h-1","path":"/gone/report.txt"}
+{"ok":false,"error":"not_found"}
+{"verb":"hydration.open_read","handle_id":"h-1","path":"/refused/report.txt"}
+{"ok":false,"error":"content_refused: RIPEMD-160(SHA-256) mismatch"}
+{"verb":"hydration.open_read","handle_id":"h-1","path":"/unsupported/report.txt"}
+{"ok":false,"error":"unsupported_object: it is stored in several parts, which this client cannot read"}
+{"verb":"hydration.open_read","handle_id":"h-1","path":"/truncated/report.txt"}
+{"ok":false,"error":"remote_incomplete: got 298844160 of 360951317 bytes"}

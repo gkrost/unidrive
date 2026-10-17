@@ -463,8 +463,9 @@ class InternxtProvider(
                         try {
                             InternxtCrypto.hexToBytes(bridgeInfo.index)
                         } catch (e: IllegalArgumentException) {
-                            throw PermanentDownloadFailureException(
+                            throw UnsupportedRemoteObjectDownloadException(
                                 "Internxt bridge info for $remotePath carries a malformed encryption index: ${e.message}",
+                                reason = "its encryption index is malformed",
                                 cause = e,
                             )
                         }
@@ -482,23 +483,29 @@ class InternxtProvider(
                     // keeps working exactly as before; zero usable shards keeps today's error.
                     val usableShards = bridgeInfo.shards.filter { it.url.isNotBlank() }
                     if (usableShards.size > 1) {
-                        throw PermanentDownloadFailureException(
+                        throw UnsupportedRemoteObjectDownloadException(
                             "multi-shard Internxt files are not supported (${usableShards.size} shards): $remotePath",
+                            reason = "it is stored in several parts, which this client cannot read",
                         )
                     }
                     val downloadUrl =
                         usableShards.firstOrNull()?.url
                             ?: throw ProviderException("No download URL in bridge info for $remotePath")
 
+                    // #940: the recorded hash is checked in the shape the network stored it; a shape this
+                    // client cannot check is read without the ciphertext check and says so (see below).
+                    val checkable = shardHashCheck(fileId, remotePath, usableShards.first().hash)
                     val cipher = crypto.createContentDecryptCipher(fileKey, iv)
-                    api.downloadFileStreaming(
-                        downloadUrl,
-                        cipher,
-                        destination,
-                        expectedSize = expected,
-                        expectedCiphertextSha256 = usableShards.first().hash,
-                        targetMtimeMillis = targetMtimeMillis,
-                    )
+                    refusalLogged(fileId, remotePath, checkable) {
+                        api.downloadFileStreaming(
+                            downloadUrl,
+                            cipher,
+                            destination,
+                            expectedSize = expected,
+                            expectedShardHash = checkable,
+                            targetMtimeMillis = targetMtimeMillis,
+                        )
+                    }
                 }
             } catch (e: RemoteIncompleteDownloadException) {
                 // The stored object cannot produce a whole file; say so with the
@@ -538,6 +545,68 @@ class InternxtProvider(
             stagedMtimeMillis = downloaded.stagedMtimeMillis,
             mtimeAppliedBeforePlacement = downloaded.mtimeAppliedBeforePlacement,
         )
+    }
+
+    // #940: WARN once per object and run; a pin retries, so later reports of the same object go to DEBUG.
+    // Bounded: an account full of such objects must not grow this set without limit.
+    private val shardHashReported: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private fun firstShardHashReport(key: String): Boolean = shardHashReported.size < MAX_SHARD_HASH_REPORTS && shardHashReported.add(key)
+
+    // The check to run for [recorded], or null when its shape is unknown (reported once, then read unverified).
+    private fun shardHashCheck(
+        fileId: String,
+        remotePath: String,
+        recorded: String,
+    ): ShardHashExpectation.Checkable? =
+        when (val parsed = ShardHashExpectation.parse(recorded)) {
+            is ShardHashExpectation.Checkable -> parsed
+            is ShardHashExpectation.Unrecognised -> {
+                warnShardHashUnverified(fileId, remotePath, parsed)
+                null
+            }
+        }
+
+    private fun warnShardHashUnverified(
+        fileId: String,
+        remotePath: String,
+        recorded: ShardHashExpectation.Unrecognised,
+    ) {
+        val message =
+            "Internxt shard hash of {} has a shape this client cannot check ({}); " +
+                "its ciphertext is read WITHOUT the integrity check (known shapes: 40 hex = RIPEMD-160(SHA-256), 64 hex = SHA-256)"
+        if (firstShardHashReport("unverified:$fileId")) {
+            log.warn(message, remotePath, recorded.description)
+        } else {
+            log.debug(message, remotePath, recorded.description)
+        }
+    }
+
+    // The mount logs nothing for a content refusal: record the shape the check ran with, then rethrow.
+    private suspend fun <T> refusalLogged(
+        fileId: String,
+        remotePath: String,
+        checked: ShardHashExpectation.Checkable?,
+        download: suspend () -> T,
+    ): T =
+        try {
+            download()
+        } catch (e: RemoteContentRefusedDownloadException) {
+            checked?.let { logShardHashRefusal(fileId, remotePath, it) }
+            throw e
+        }
+
+    private fun logShardHashRefusal(
+        fileId: String,
+        remotePath: String,
+        recorded: ShardHashExpectation.Checkable,
+    ) {
+        val message = "download of {} refused: recorded shard hash ({}) did not match the downloaded ciphertext ({}); content discarded"
+        if (firstShardHashReport("refused:$fileId")) {
+            log.warn(message, remotePath, recorded.description, recorded.algorithm)
+        } else {
+            log.debug(message, remotePath, recorded.description, recorded.algorithm)
+        }
     }
 
     // Stages 5-7 of the upload pipeline (startUpload → PUT shard → finishUpload)
@@ -2761,6 +2830,9 @@ class InternxtProvider(
     }
 
     companion object {
+        // Upper bound of objects remembered by shardHashReported (#940).
+        private const val MAX_SHARD_HASH_REPORTS = 4096
+
         /** #493: statuses by which the server refuses an upload request as such; another attempt is refused again. */
         internal val PERMANENT_UPLOAD_STATUS = setOf(400, 413, 415, 422)
 

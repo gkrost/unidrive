@@ -50,6 +50,36 @@ class HydrationErrorTest {
         assertEquals("remote_object_missing", HydrationError.REMOTE_OBJECT_MISSING_TOKEN)
     }
 
+    // #941: a refused content and an object this client cannot read each have their own token, then a short reason
+    // without a file name; a client matches the prefix up to ": ".
+    @Test
+    fun `content refused and unsupported object carry their stable tokens with the reason`() {
+        assertEquals("content_refused: SHA-256 mismatch", HydrationError.ContentRefused("SHA-256 mismatch").message)
+        assertEquals("content_refused", HydrationError.CONTENT_REFUSED_TOKEN)
+        assertEquals(
+            "unsupported_object: it is stored in several parts, which this client cannot read",
+            HydrationError.UnsupportedObject("it is stored in several parts, which this client cannot read").message,
+        )
+        assertEquals("unsupported_object", HydrationError.UNSUPPORTED_OBJECT_TOKEN)
+        // A blank reason still leaves a readable wire form.
+        assertEquals("content_refused: integrity check failed", HydrationError.ContentRefused(" ").message)
+        assertEquals("unsupported_object: this client cannot read it", HydrationError.UnsupportedObject("").message)
+    }
+
+    // The tokens of the failed-download causes are all different (a client keys its column text on them).
+    @Test
+    fun `the download failure causes have distinct tokens`() {
+        val tokens =
+            listOf(
+                HydrationError.NotFound.message,
+                HydrationError.RemoteIncomplete(1, 2).message.substringBefore(":"),
+                HydrationError.RemoteObjectMissing.message.substringBefore(":"),
+                HydrationError.ContentRefused("x").message.substringBefore(":"),
+                HydrationError.UnsupportedObject("x").message.substringBefore(":"),
+            )
+        assertEquals(tokens.size, tokens.toSet().size, "tokens: $tokens")
+    }
+
     @Test
     fun `sealed interface allows future variants without breaking exhaustiveness`() {
         val e: HydrationError = HydrationError.Generic("x")
@@ -63,6 +93,8 @@ class HydrationErrorTest {
             HydrationError.Cancelled -> "cancelled"
             is HydrationError.RemoteIncomplete -> "remote_incomplete"
             HydrationError.RemoteObjectMissing -> "remote_object_missing"
+            is HydrationError.ContentRefused -> "content_refused"
+            is HydrationError.UnsupportedObject -> "unsupported_object"
             HydrationError.InvalidPath -> "invalid_path"
             is HydrationError.NameRefused -> "name_refused"
             is HydrationError.BlockedByParent -> "blocked_by_parent"

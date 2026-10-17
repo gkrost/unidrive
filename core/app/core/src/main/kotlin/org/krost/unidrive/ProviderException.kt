@@ -87,6 +87,12 @@ open class TransientNetworkException(
  * waiting for a fresh delta event on the same remote_id to clear the
  * flag.
  *
+ * #941: the plain class means exactly that, GONE, and the hydration layer reports it as `not_found`.
+ * A permanent failure with another cause is a subtype that says so ([RemoteIncompleteDownloadException],
+ * [RemoteObjectMissingDownloadException], [RemoteContentRefusedDownloadException],
+ * [UnsupportedRemoteObjectDownloadException]); each has its own wire token in HydrationImpl.downloadFailureOf,
+ * so a file that exists in the cloud is never reported as not found. Quarantine ignores the difference.
+ *
  * Live evidence motivating this signal: a single zero-byte file
  * (`/Annika.txt`, Internxt bucket entry `69ee2e863da99643eebb3b8a`) was
  * retried 1,248 times over 8 hours after the user deleted it on the
@@ -114,6 +120,34 @@ open class RemoteIncompleteDownloadException(
     message: String,
     val storedBytes: Long,
     val declaredBytes: Long,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : PermanentDownloadFailureException(message, cause, requestId)
+
+/**
+ * #940: the object exists and was fetched, but its content failed the integrity check recorded for it (the
+ * downloaded ciphertext does not hash to the value the network stored), so the bytes were discarded instead of
+ * handed over as the file. Another attempt reads the same bytes, so it is permanent and quarantined like the other
+ * [PermanentDownloadFailureException] sites; it is not a gone file, and the hydration layer reports it as its own
+ * `content_refused` token, never `not_found`. [reason] is the short part a client may show (for example
+ * "SHA-256 mismatch"); it never carries a file name.
+ */
+open class RemoteContentRefusedDownloadException(
+    message: String,
+    val reason: String,
+    cause: Throwable? = null,
+    requestId: String? = null,
+) : PermanentDownloadFailureException(message, cause, requestId)
+
+/**
+ * #941: the object exists, but this client cannot read it as stored: an object spread over several shards, an
+ * encryption index that is not hex, a name the local file system cannot hold. Not a gone file and not a refused
+ * content: the hydration layer reports it as its own `unsupported_object` token. [reason] is the short part a
+ * client may show; it never carries a file name.
+ */
+open class UnsupportedRemoteObjectDownloadException(
+    message: String,
+    val reason: String,
     cause: Throwable? = null,
     requestId: String? = null,
 ) : PermanentDownloadFailureException(message, cause, requestId)
