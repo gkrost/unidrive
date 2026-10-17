@@ -638,6 +638,9 @@ open class SyncEngine(
         try {
             doSyncOnce(dryRun, forceDelete, scanId, reason, startTime, skipTransfers, skipRemoteGather)
         } finally {
+            // The pass gathers outside the enumeration and writes the cursor and the listing figures the
+            // enumeration's status tells; that status is answered from what its last attempt left.
+            enumeration.settleStatus()
             val duration = System.currentTimeMillis() - startTime
             log.info("Scan ended scan={} reason={} duration={}ms", scanId, reason, duration)
             if (priorScanMdc == null) {

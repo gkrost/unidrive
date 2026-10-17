@@ -63,6 +63,38 @@ class StateDatabaseNameBlockTest {
         }
     }
 
+    private fun queryPlan(
+        dbPath: Path,
+        sql: String,
+    ): List<String> =
+        DriverManager.getConnection("jdbc:sqlite:$dbPath").use { conn ->
+            conn.createStatement().use { stmt ->
+                val rs = stmt.executeQuery("EXPLAIN QUERY PLAN $sql")
+                generateSequence { if (rs.next()) rs.getString("detail") else null }.toList()
+            }
+        }
+
+    @Test
+    fun `the blocked rows are read from the index of the few, not by walking every row in path order`() {
+        // Asked every few seconds by the upload snapshot, under the monitor. `ORDER BY path` alone made SQLite walk
+        // the whole path index to get the order for free: on a drive of 372,000 rows that was 0.3 s a call, with the
+        // status request queued behind it.
+        val dbPath = Files.createTempDirectory("ud-nameblock-plan").resolve("state.db")
+        val db = open(dbPath)
+        try {
+            db.upsertEntry(entry("/a.txt"))
+            db.upsertEntry(entry("/b.txt"))
+            db.markNameBlocked("/b.txt", "similar_name", null)
+            val plan = queryPlan(dbPath, StateDatabase.BLOCKED_ROWS_SQL)
+
+            assertTrue(plan.any { it.contains("idx_sync_entries_name_block") }, "the partial index of blocked rows answers: $plan")
+            assertTrue(plan.none { it.contains("idx_sync_entries_path_alive") }, "the path index is not walked: $plan")
+            assertEquals(listOf("/b.txt"), db.blockedRows().map { it.path })
+        } finally {
+            db.close()
+        }
+    }
+
     @Test
     fun `the nearest blocked ancestor is a proper ancestor folder, never the path itself or a similar prefix`() {
         val db = open()

@@ -82,6 +82,11 @@ class StateDatabase(
     // drive SyncEngine in :app:sync. Production code never sets it.
     var batchCommitHook: (() -> Unit)? = null
 
+    // Runs between the chunks of a staged-row delete (see [clearScan]), outside the transaction and outside the
+    // monitor. The pause lets a reader that queued on the monitor during the chunk take it before the next chunk
+    // starts (a monitor is not fair: its last owner would otherwise walk in again). A test replaces it.
+    internal var scanClearChunkGap: () -> Unit = { Thread.yield() }
+
     val recovery: Recovery = Recovery()
 
     @Synchronized
@@ -1232,7 +1237,7 @@ class StateDatabase(
         conn
             .createStatement()
             .use { stmt ->
-                val rs = stmt.executeQuery("SELECT path, is_folder, name_block FROM alive_entries WHERE name_block IS NOT NULL ORDER BY path")
+                val rs = stmt.executeQuery(BLOCKED_ROWS_SQL)
                 while (rs.next()) out += BlockedRow(rs.getString(1), rs.getInt(2) == 1, parseNameBlock(rs.getString(3)))
             }
         return out
@@ -1727,26 +1732,33 @@ class StateDatabase(
      * (whose fast-bootstrap didn't clear the checkpoint) silently pages
      * past items modified in the seam.
      */
-    @Synchronized
     fun getActiveScan(staleThreshold: Duration): ActiveScan? {
-        val scanId = getSyncState(SCAN_IN_PROGRESS_ID) ?: return null
-        val startedAtRaw = getSyncState(SCAN_IN_PROGRESS_STARTED_AT)
-        val startedAt = startedAtRaw?.let { runCatching { Instant.parse(it) }.getOrNull() }
-        if (startedAt == null || Instant.now().isAfter(startedAt.plus(staleThreshold))) {
-            clearScan(scanId)
-            return null
-        }
-        val lastFullScanRaw = getSyncState("last_full_scan")
-        val lastFullScan = lastFullScanRaw?.let { runCatching { Instant.parse(it) }.getOrNull() }
-        if (lastFullScan != null && lastFullScan.isAfter(startedAt)) {
-            clearScan(scanId)
-            return null
-        }
-        return ActiveScan(
-            scanId = scanId,
-            marker = getSyncState(SCAN_IN_PROGRESS_MARKER),
-            startedAt = startedAt,
-        )
+        // The verdict is read under the monitor in one piece; the clearing of a stale slice is not: it can be the
+        // whole of a large listing, and [clearScan] gives the monitor back between its steps.
+        var staleScanId: String? = null
+        val active =
+            synchronized(this) {
+                val scanId = getSyncState(SCAN_IN_PROGRESS_ID) ?: return null
+                val startedAtRaw = getSyncState(SCAN_IN_PROGRESS_STARTED_AT)
+                val startedAt = startedAtRaw?.let { runCatching { Instant.parse(it) }.getOrNull() }
+                if (startedAt == null || Instant.now().isAfter(startedAt.plus(staleThreshold))) {
+                    staleScanId = scanId
+                    return@synchronized null
+                }
+                val lastFullScanRaw = getSyncState("last_full_scan")
+                val lastFullScan = lastFullScanRaw?.let { runCatching { Instant.parse(it) }.getOrNull() }
+                if (lastFullScan != null && lastFullScan.isAfter(startedAt)) {
+                    staleScanId = scanId
+                    return@synchronized null
+                }
+                ActiveScan(
+                    scanId = scanId,
+                    marker = getSyncState(SCAN_IN_PROGRESS_MARKER),
+                    startedAt = startedAt,
+                )
+            }
+        staleScanId?.let(::clearScan)
+        return active
     }
 
     /**
@@ -1906,7 +1918,6 @@ class StateDatabase(
      * via [upsertEntry] by the engine remain in place; only the per-scan
      * staging slice is removed.
      */
-    @Synchronized
     fun completeScan(scanId: String) {
         clearScan(scanId)
     }
@@ -1934,17 +1945,59 @@ class StateDatabase(
         }
     }
 
+    /**
+     * Drops the checkpoint and the staged rows of [scanId]. The staged rows are the whole listing (372,000 rows on a
+     * large drive), and deleting them one by one inside one transaction held the monitor for 23 s while every
+     * reader of the database waited (a recording of the daemon named it). Not synchronized as a whole, so the
+     * monitor is free between the steps:
+     * - When the table holds only this scan's rows, which is the normal case, one DELETE without a WHERE clause
+     *   empties it: SQLite frees the pages instead of removing the rows (64 ms against 2.3 s for 200,000 rows in a
+     *   benchmark), together with the checkpoint in one transaction, as before.
+     * - Otherwise the checkpoint goes first, in a transaction of its own (a crash after it leaves staged rows that
+     *   no checkpoint points to, which is harmless; the reverse order would resume a scan from its marker without
+     *   the rows that marker stands for), and then the rows of this scan go in chunks of [SCAN_CLEAR_CHUNK_ROWS],
+     *   one transaction each.
+     */
     private fun clearScan(scanId: String) {
-        batch {
-            conn.prepareStatement("DELETE FROM scan_staging WHERE scan_id=?").use { stmt ->
-                stmt.setString(1, scanId)
-                stmt.executeUpdate()
+        val emptied =
+            batch {
+                val onlyThisScan = stagingHoldsOnly(scanId)
+                if (onlyThisScan) {
+                    conn.createStatement().use { it.executeUpdate("DELETE FROM scan_staging") }
+                }
+                clearSyncState(SCAN_IN_PROGRESS_ID)
+                clearSyncState(SCAN_IN_PROGRESS_MARKER)
+                clearSyncState(SCAN_IN_PROGRESS_STARTED_AT)
+                onlyThisScan
             }
-            clearSyncState(SCAN_IN_PROGRESS_ID)
-            clearSyncState(SCAN_IN_PROGRESS_MARKER)
-            clearSyncState(SCAN_IN_PROGRESS_STARTED_AT)
+        if (emptied) return
+        while (true) {
+            val removed =
+                batch {
+                    conn
+                        .prepareStatement(
+                            "DELETE FROM scan_staging WHERE rowid IN (SELECT rowid FROM scan_staging WHERE scan_id=? LIMIT ?)",
+                        ).use { stmt ->
+                            stmt.setString(1, scanId)
+                            stmt.setInt(2, SCAN_CLEAR_CHUNK_ROWS)
+                            stmt.executeUpdate()
+                        }
+                }
+            if (removed < SCAN_CLEAR_CHUNK_ROWS) return
+            scanClearChunkGap()
         }
     }
+
+    // Whether scan_staging holds no row of another scan: min and max of the indexed scan_id are two seeks.
+    @Synchronized
+    private fun stagingHoldsOnly(scanId: String): Boolean =
+        conn.createStatement().use { stmt ->
+            stmt.executeQuery("SELECT min(scan_id), max(scan_id) FROM scan_staging").use { rs ->
+                rs.next()
+                val lowest = rs.getString(1)
+                lowest == null || (lowest == scanId && rs.getString(2) == scanId)
+            }
+        }
 
     private fun clearSyncState(key: String) {
         conn.prepareStatement("DELETE FROM sync_state WHERE key=?").use { stmt ->
@@ -2038,6 +2091,9 @@ class StateDatabase(
 
         private const val SNAPSHOT_DIR_PREFIX = "unidrive-dryrun-"
 
+        /** Rows one transaction removes when the staged rows of a scan cannot be dropped as a whole table (see [clearScan]). */
+        internal const val SCAN_CLEAR_CHUNK_ROWS = 5_000
+
         /**
          * The WHERE clause that selects the alive file rows awaiting upload; [pendingUploadPaths] and
          * [resetKeepingPending] share it. GLOB, not LIKE (#552): it is case-sensitive like the
@@ -2045,6 +2101,17 @@ class StateDatabase(
          * from 'local:' on instead of every row.
          */
         private const val PENDING_UPLOAD_ROWS = "status='EXISTS' AND remote_id GLOB 'local:*' AND is_folder=0 AND is_hydrated<>0"
+
+        /**
+         * The rows blocked by name, ordered by path. `ORDER BY path` alone lets SQLite walk the whole path index to
+         * get the order for free, before it has any statistics of the table: on a drive of 372,000 rows each call
+         * read every row under the monitor (about 0.3 s, asked every few seconds by the upload snapshot, with the
+         * status request queued behind it). The unary plus is no change of order (the column has the default
+         * collation) but it ends the use of that index, so the partial index of the few blocked rows answers and
+         * only they are sorted.
+         */
+        internal const val BLOCKED_ROWS_SQL =
+            "SELECT path, is_folder, name_block FROM alive_entries WHERE name_block IS NOT NULL ORDER BY +path"
 
         /** `path` starts with the bound prefix, exactly (see [bindPrefix]): two parameters, both the prefix. */
         private const val UNDER_PREFIX = "substr(path, 1, length(?)) = ?"

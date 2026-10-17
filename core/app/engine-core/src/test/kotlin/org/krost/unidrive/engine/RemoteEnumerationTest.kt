@@ -16,6 +16,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
 import java.time.Instant
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -266,6 +269,81 @@ class RemoteEnumerationTest {
             assertEquals("c1", db.getSyncState("delta_cursor"))
             assertEquals(EnumerationStatus.State.FAILED, enumeration.status().state)
             assertNotNull(db.getEntry("/a.txt"))
+        }
+
+    // ---- the status of an idle enumeration is answered from memory ----
+
+    @Test
+    fun `an idle status is answered while another thread holds state db's monitor`() =
+        runTest {
+            // A recording of a daemon showed 593 status requests queued on the monitor behind the readers of the upload
+            // snapshot and the saves of a scan, 141 s together.
+            provider.items = listOf(file("1", "/a.txt"))
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+            val held = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val holder =
+                Thread {
+                    synchronized(db) {
+                        held.countDown()
+                        release.await()
+                    }
+                }.apply { start() }
+            try {
+                assertTrue(held.await(5, TimeUnit.SECONDS))
+
+                val status = CompletableFuture.supplyAsync { enumeration.status() }.get(5, TimeUnit.SECONDS)
+
+                assertEquals(EnumerationStatus.State.IDLE, status.state)
+                assertFalse(status.first, "the cursor the last attempt left")
+                assertNotNull(status.lastSuccessAtMs)
+            } finally {
+                release.countDown()
+                holder.join()
+            }
+        }
+
+    @Test
+    fun `the status follows what each attempt leaves in state db, a failed one included`() =
+        runTest {
+            provider.items = listOf(file("1", "/a.txt"), file("2", "/b.txt"))
+            provider.unreachable = setOf("2")
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+            assertEquals(1, enumeration.status().unreachableItems)
+            assertEquals(true, enumeration.status().lastScanComplete)
+
+            // The next listing places both: the figure goes. Both are read back from state.db, not remembered.
+            provider.unreachable = emptySet()
+            enumeration.enumerate(reset = true)
+            assertNull(enumeration.status().unreachableItems)
+
+            // An attempt that fails after the cursor was reset: the status is the failed one's, with the cursor it left.
+            db.setSyncState("delta_cursor", "")
+            provider.failure = ProviderException("listing failed")
+            enumeration.enumerate(reset = false)
+            val failed = enumeration.status()
+            assertEquals(EnumerationStatus.State.FAILED, failed.state)
+            assertTrue(failed.first, "the failed attempt settled the status from state.db, which has no cursor")
+        }
+
+    @Test
+    fun `a pass that writes the keys outside the enumeration tells the status to read them again`() =
+        runTest {
+            provider.items = listOf(file("1", "/a.txt"))
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+            assertFalse(enumeration.status().first)
+
+            // The mirror's sync pass writes the same keys (SyncEngine.syncOnce settles after it).
+            db.setSyncState("delta_cursor", "")
+            db.setSyncState(RemoteGather.DROPPED_ITEMS_KEY, "4")
+            enumeration.settleStatus()
+
+            val status = enumeration.status()
+            assertTrue(status.first)
+            assertEquals(4, status.droppedItems)
         }
 
     @Test
