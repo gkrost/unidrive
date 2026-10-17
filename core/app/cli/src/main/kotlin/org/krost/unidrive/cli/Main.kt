@@ -9,6 +9,7 @@ import org.krost.unidrive.sync.ProfileInfo
 import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.RawProvider
 import org.krost.unidrive.sync.RawSyncConfig
+import org.krost.unidrive.sync.NoDefaultProfileException
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.Vault
 import org.slf4j.MDC
@@ -70,7 +71,7 @@ open class Main : Runnable {
     // the default via [SyncConfig.resolveDefaultProfile] in [resolveCurrentProfile]
     // so the CLI honours [general] default_profile from config.toml. The MCP jar
     // uses the same resolver, keeping the two invocation surfaces in lock-step.
-    @Option(names = ["-p", "--provider"], description = ["Provider profile name or type"])
+    @Option(names = ["-p", "--provider"], description = ["Profile name or type. Without -p: [general] default_profile, else the only configured profile; several profiles need -p"])
     var provider: String? = null
 
     // UD-271: scope = INHERIT propagates -v / --verbose down to every subcommand
@@ -127,11 +128,17 @@ open class Main : Runnable {
             System.exit(1)
         }
 
-        // UD-252: fall back to the shared default resolver when -p was omitted.
-        // The resolver honours `[general] default_profile` and otherwise returns
-        // "onedrive" (the historical CLI default). Keeping the fallback in one
-        // place guarantees CLI and MCP jars resolve identically.
-        val profileName = provider ?: SyncConfig.resolveDefaultProfile(baseConfigDir)
+        // No -p: [general] default_profile, else the only configured profile, else a refusal that
+        // lists the configured profiles. Shared with the MCP jar and the lifecycle commands.
+        val profileName =
+            provider
+                ?: try {
+                    SyncConfig.resolveDefaultProfile(raw)
+                } catch (e: NoDefaultProfileException) {
+                    System.err.println(e.message)
+                    System.exit(1)
+                    throw e
+                }
         _profile =
             try {
                 SyncConfig.resolveProfile(profileName, raw)
@@ -313,7 +320,7 @@ open class Main : Runnable {
         val profile = resolveCurrentProfile()
         val tokenPath = baseConfigDir.resolve(profile.name)
         val rp = mergeVaultCreds(profile)
-        return createProviderFrom(profile.type, rp, tokenPath)
+        return createProviderFrom(profile.name, profile.type, rp, tokenPath)
     }
 
     /**
@@ -326,7 +333,7 @@ open class Main : Runnable {
         val profile =
             requireNotNull(resolveProfile(name)) { "profile '$name' is not configured" }
         val tokenPath = baseConfigDir.resolve(profile.name)
-        return createProviderFrom(profile.type, mergeVaultCreds(profile), tokenPath)
+        return createProviderFrom(profile.name, profile.type, mergeVaultCreds(profile), tokenPath)
     }
 
     fun resolveProfile(name: String): ProfileInfo? {
@@ -349,10 +356,11 @@ open class Main : Runnable {
         val rp =
             mergeVaultCreds(profile)
                 ?: throw IllegalStateException("Profile '${profile.name}' has no provider configuration")
-        return createProviderFrom(profile.type, rp, tokenPath)
+        return createProviderFrom(profile.name, profile.type, rp, tokenPath)
     }
 
     private fun createProviderFrom(
+        profileName: String,
         type: String,
         rp: RawProvider?,
         tokenPath: Path,
@@ -378,7 +386,7 @@ open class Main : Runnable {
         return try {
             factory.create(properties, tokenPath)
         } catch (e: org.krost.unidrive.ConfigurationException) {
-            System.err.println("Configuration error: ${e.message}")
+            System.err.println(configurationErrorLine(profileName, type, e.message))
             System.exit(1)
             throw e
         }
@@ -1000,3 +1008,10 @@ private fun forceExitAfterGracePeriod(exitCode: Int) {
     watchdog.isDaemon = true
     watchdog.start()
 }
+
+/** The "Configuration error" line, naming the profile and its type so the user can tell which one failed. */
+internal fun configurationErrorLine(
+    profileName: String,
+    type: String,
+    message: String,
+): String = "Configuration error: profile '$profileName' ($type): $message"

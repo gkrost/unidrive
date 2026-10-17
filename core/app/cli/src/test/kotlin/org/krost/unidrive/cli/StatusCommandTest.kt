@@ -840,18 +840,34 @@ class StatusCommandTest {
 
     // ── #646: status without a default profile ───────────────────────────────
 
-    @Test
-    fun `no-default notice fires when no -p and no default_profile over configured profiles`() {
-        val notice = noDefaultProfileNotice(null, null, hasConfiguredProfiles = true)
-        assertNotNull(notice)
-        assertTrue("-p <name>" in notice, "the notice names the -p remedy: $notice")
-        assertTrue("-a" in notice, "the notice names the -a remedy: $notice")
+    private fun rawOf(
+        defaultProfile: String?,
+        vararg profiles: Pair<String, String>,
+    ): org.krost.unidrive.sync.RawSyncConfig {
+        val lines = mutableListOf("[general]")
+        if (defaultProfile != null) lines += "default_profile = \"$defaultProfile\""
+        for ((n, t) in profiles) {
+            lines += "[providers.$n]"
+            lines += "type = \"$t\""
+        }
+        return org.krost.unidrive.sync.SyncConfig.parseRaw(lines.joinToString(System.lineSeparator()))
     }
 
     @Test
-    fun `no-default notice stays silent when a default exists is asked for or nothing is configured`() {
-        assertNull(noDefaultProfileNotice("internxt_test", null, hasConfiguredProfiles = true), "explicit -p")
-        assertNull(noDefaultProfileNotice(null, "internxt_test", hasConfiguredProfiles = true), "default_profile set")
-        assertNull(noDefaultProfileNotice(null, null, hasConfiguredProfiles = false), "no profiles: the config-missing report owns it")
+    fun `no-default notice fires when no -p and no default_profile over several profiles and lists them`() {
+        val notice = noDefaultProfileNotice(null, rawOf(null, "a" to "internxt", "b" to "localfs"))
+        assertNotNull(notice)
+        assertTrue("-p <name>" in notice, "the notice names the -p remedy: $notice")
+        assertTrue("-a" in notice, "the notice names the -a remedy: $notice")
+        assertTrue("a (internxt)" in notice && "b (localfs)" in notice, "the notice lists the profiles: $notice")
+    }
+
+    @Test
+    fun `no-default notice stays silent when a default exists is asked for or at most one profile is configured`() {
+        val two = arrayOf("a" to "internxt", "b" to "localfs")
+        assertNull(noDefaultProfileNotice("a", rawOf(null, *two)), "explicit -p")
+        assertNull(noDefaultProfileNotice(null, rawOf("a", *two)), "default_profile set")
+        assertNull(noDefaultProfileNotice(null, rawOf(null, "a" to "internxt")), "one profile is the default")
+        assertNull(noDefaultProfileNotice(null, rawOf(null)), "no profiles: the config-missing report owns it")
     }
 }

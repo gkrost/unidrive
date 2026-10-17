@@ -9,6 +9,7 @@ import org.krost.unidrive.internxt.InternxtConfig
 import org.krost.unidrive.internxt.authenticateInternxt
 import org.krost.unidrive.internxt.model.InternxtCredentials
 import org.krost.unidrive.sync.ProcessLock
+import org.krost.unidrive.sync.NoDefaultProfileException
 import org.krost.unidrive.sync.SyncConfig
 import org.krost.unidrive.sync.isValidProfileName
 import java.nio.file.Files
@@ -86,7 +87,7 @@ internal class ProfileTarget(
 
 /**
  * Resolves the profile without ever exiting the JVM or prompting: the explicit [profileOption], else
- * the global `-p`, else `[general] default_profile`. A name that is not a configured profile is
+ * the global `-p`, else `[general] default_profile`, else the only configured profile. A name that is not a configured profile is
  * refused; the type is the profile's `type`.
  */
 internal fun resolveProfileTarget(
@@ -105,7 +106,13 @@ internal fun resolveProfileTarget(
             // The parser's message can quote the offending config line, which may hold a credential.
             throw LifecycleError("config_invalid", "config.toml could not be parsed")
         }
-    val name = profileOption ?: main.provider ?: SyncConfig.resolveDefaultProfile(baseDir)
+    val name =
+        profileOption ?: main.provider
+            ?: try {
+                SyncConfig.resolveDefaultProfile(raw)
+            } catch (e: NoDefaultProfileException) {
+                throw LifecycleError("no_default_profile", e.message ?: "no default profile", e)
+            }
     if (!isValidProfileName(name)) {
         throw LifecycleError("invalid_profile_name", "'$name' is not a valid profile name")
     }

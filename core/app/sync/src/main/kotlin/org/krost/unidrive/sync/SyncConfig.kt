@@ -421,6 +421,8 @@ data class ProfileInfo(
     val isOrphan: Boolean = false,
 )
 
+class NoDefaultProfileException(message: String) : IllegalStateException(message)
+
 data class SyncConfig(
     val syncRoot: Path,
     val pollInterval: Int,
@@ -772,40 +774,40 @@ data class SyncConfig(
         }
 
         /**
-         * UD-252: the single source of truth for "which profile does unidrive use
-         * when the user did not pass `-p`?".
+         * The single source of truth for "which profile does unidrive use when the user did not
+         * pass `-p`?" (CLI and MCP call it, so they stay identical).
          *
-         * Both the CLI entry point (`core/app/cli/.../Main.kt`) and the MCP jar
-         * (`core/app/mcp/.../Main.kt`) must call this function so they stay
-         * byte-identical. Previously the MCP picked `raw.providers.keys.firstOrNull()`
-         * (first-in-file, alphabetical under ktoml's map ordering) while the CLI
-         * hardcoded `"onedrive"` via picocli's `defaultValue`. Users with multi-profile
-         * configs saw the MCP report status for a cold profile while the real daemon
-         * was elsewhere.
-         *
-         * Resolution order:
-         *   1. `[general] default_profile = "..."` in config.toml, if present.
-         *   2. `ProviderRegistry.defaultProvider()` (UD-012) — `"localfs"` when
-         *      discovered, else the first SPI-discovered factory id. Used
-         *      unconditionally when the config is missing, empty, or doesn't
-         *      pin a default_profile. Still returned even if no such profile
-         *      exists in the file; the caller is responsible for handing the
-         *      result to [resolveProfile], which throws a readable "Unknown
-         *      profile" error listing the configured alternatives.
+         * Resolution order, the same rule as the Windows client scripts:
+         *   1. `[general] default_profile = "..."`, when set and not blank.
+         *   2. The ONLY configured profile, when exactly one is configured.
+         *   3. Otherwise [NoDefaultProfileException]: with several profiles the message lists them
+         *      (name and type) and asks for `-p`; with none it says that no profile is configured.
+         * A profile of another type is never picked silently, and no profile is ever invented from
+         * a provider type name.
          */
+        fun resolveDefaultProfile(raw: RawSyncConfig): String {
+            raw.general.default_profile?.takeIf { it.isNotBlank() }?.let { return it }
+            if (raw.providers.size == 1) return raw.providers.keys.first()
+            throw NoDefaultProfileException(noDefaultProfileMessage(raw))
+        }
+
+        /** [resolveDefaultProfile] over `config.toml` in [configDir]; a missing file is no profile. */
         fun resolveDefaultProfile(configDir: Path): String {
             val configFile = configDir.resolve("config.toml")
-            if (!Files.exists(configFile)) return org.krost.unidrive.ProviderRegistry.defaultProvider()
-            return try {
-                val raw = parseRaw(Files.readString(configFile))
-                raw.general.default_profile?.takeIf { it.isNotBlank() } ?: org.krost.unidrive.ProviderRegistry.defaultProvider()
-            } catch (_: Exception) {
-                // Corrupt / unparseable config: fall back to the CLI default rather
-                // than crashing at startup. Downstream resolveProfile() will surface
-                // the real parse error with full context.
-                org.krost.unidrive.ProviderRegistry.defaultProvider()
-            }
+            val raw =
+                if (Files.exists(configFile)) parseRaw(Files.readString(configFile), configFile.toString()) else parseRaw("[general]\n")
+            return resolveDefaultProfile(raw)
         }
+
+        /** The refusal for "no `-p`, no `default_profile`, and not exactly one profile". */
+        fun noDefaultProfileMessage(raw: RawSyncConfig): String =
+            if (raw.providers.isEmpty()) {
+                "No profile configured: add an account first (unidrive profile add)."
+            } else {
+                val listed = raw.providers.entries.joinToString(", ") { (name, p) -> "$name (${p.type ?: name})" }
+                "No default profile is set and several profiles are configured: $listed. " +
+                    "Pass -p <name>, or set default_profile in [general] (unidrive profile default <name>)."
+            }
 
         /**
          * #560 U6: the profiles' local roots must not alias each other. Two mirror profiles may

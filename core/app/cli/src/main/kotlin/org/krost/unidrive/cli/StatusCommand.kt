@@ -7,6 +7,7 @@ import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.CredentialHealth
 import org.krost.unidrive.ProviderRegistry
 import org.krost.unidrive.authenticateAndLog
+import org.krost.unidrive.sync.NoDefaultProfileException
 import org.krost.unidrive.sync.ProfileInfo
 import org.krost.unidrive.sync.RawSyncConfig
 import org.krost.unidrive.sync.Reconciler
@@ -185,7 +186,7 @@ class StatusCommand : Runnable {
                 } else {
                     SyncConfig.parseRaw("[general]\n")
                 }
-            noDefaultProfileNotice(parent.provider, raw.general.default_profile, raw.providers.isNotEmpty())?.let {
+            noDefaultProfileNotice(parent.provider, raw)?.let {
                 System.err.println(it)
                 System.exit(1)
             }
@@ -360,7 +361,14 @@ class StatusCommand : Runnable {
 
     private fun showSingleProviderStatus() {
         val baseDir = parent.configBaseDir()
-        val requestedName = parent.provider ?: SyncConfig.resolveDefaultProfile(baseDir)
+        // No profile to name: resolveCurrentProfile prints the refusal (or the config-missing report) and exits.
+        val requestedName =
+            parent.provider
+                ?: try {
+                    SyncConfig.resolveDefaultProfile(baseDir)
+                } catch (_: NoDefaultProfileException) {
+                    parent.resolveCurrentProfile().name
+                }
         val configFile = baseDir.resolve("config.toml")
         val raw =
             if (Files.exists(configFile)) SyncConfig.parseRaw(Files.readString(configFile), configFile.toString())
@@ -1008,23 +1016,20 @@ class StatusCommand : Runnable {
 internal fun shouldProbeRemoteForStatus(health: CredentialHealth): Boolean = health is CredentialHealth.Ok
 
 /**
- * #646: the notice `status` prints instead of silently rendering the implicit localfs default.
- * Firing condition: no `-p`, no `[general] default_profile`, and at least one configured
- * profile — a config with no profiles at all belongs to the config-missing report instead.
- * The remedy names both escapes: `-p <name>` for one profile, `-a` for all of them.
+ * The notice `status` prints instead of silently rendering an implicit profile. Fires when there is
+ * no `-p`, no `[general] default_profile`, and more than one configured profile (one profile is the
+ * default; none belongs to the config-missing report). Lists the profiles and names both escapes:
+ * `-p <name>` for one profile, `-a` for all of them.
  */
 internal fun noDefaultProfileNotice(
     explicitProvider: String?,
-    defaultProfile: String?,
-    hasConfiguredProfiles: Boolean,
+    raw: RawSyncConfig,
 ): String? =
     when {
         explicitProvider != null -> null
-        !defaultProfile.isNullOrBlank() -> null
-        !hasConfiguredProfiles -> null
-        else ->
-            "No default profile is configured. Use -p <name> to pick one (see 'unidrive profile list') " +
-                "or -a to show all profiles."
+        !raw.general.default_profile.isNullOrBlank() -> null
+        raw.providers.size <= 1 -> null
+        else -> SyncConfig.noDefaultProfileMessage(raw) + " Or use -a to show all profiles."
     }
 
 /**
