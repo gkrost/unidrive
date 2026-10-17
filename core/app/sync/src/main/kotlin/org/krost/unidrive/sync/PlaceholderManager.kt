@@ -272,7 +272,7 @@ open class PlaceholderManager(
                         file: Path,
                         attrs: BasicFileAttributes,
                     ): FileVisitResult {
-                        Files.deleteIfExists(file)
+                        withLocalIoRetryBlocking { Files.deleteIfExists(file) }
                         return FileVisitResult.CONTINUE
                     }
 
@@ -280,13 +280,13 @@ open class PlaceholderManager(
                         dir: Path,
                         exc: java.io.IOException?,
                     ): FileVisitResult {
-                        Files.deleteIfExists(dir)
+                        withLocalIoRetryBlocking { Files.deleteIfExists(dir) }
                         return FileVisitResult.CONTINUE
                     }
                 },
             )
         } else {
-            Files.deleteIfExists(local)
+            withLocalIoRetryBlocking { Files.deleteIfExists(local) }
         }
         cleanEmptyParents(local.parent)
     }
@@ -326,7 +326,7 @@ open class PlaceholderManager(
         while (current != syncRoot && Files.isDirectory(current)) {
             val isEmpty = Files.list(current).use { it.findFirst().isEmpty }
             if (isEmpty) {
-                Files.deleteIfExists(current)
+                withLocalIoRetryBlocking { Files.deleteIfExists(current) }
                 current = current.parent
             } else {
                 break

@@ -12,6 +12,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.krost.unidrive.*
+import org.krost.unidrive.io.withLocalIoRetry
 import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
@@ -930,7 +931,7 @@ class InternxtProvider(
             try {
                 withContext(Dispatchers.IO) {
                     Files.createDirectories(tempFile.parent)
-                    javax.crypto.CipherInputStream(Files.newInputStream(localPath), encCipher).use { cipherIn ->
+                    javax.crypto.CipherInputStream(withLocalIoRetry { Files.newInputStream(localPath) }, encCipher).use { cipherIn ->
                         Files.newOutputStream(tempFile).use { out ->
                             val buf = ByteArray(8192)
                             var n: Int
