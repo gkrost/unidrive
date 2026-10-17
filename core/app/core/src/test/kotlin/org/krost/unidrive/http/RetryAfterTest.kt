@@ -23,9 +23,9 @@ class RetryAfterTest {
     }
 
     @Test
-    fun `a date that has passed is 0`() {
-        assertEquals(0L, parseRetryAfterHeader("Wed, 21 Oct 2026 07:27:00 GMT", now))
-        assertEquals(0L, parseRetryAfterHeader("Wed, 21 Oct 2026 07:28:00 GMT", now))
+    fun `a date that has passed leaves lower precedence retry hints available`() {
+        assertNull(parseRetryAfterHeader("Wed, 21 Oct 2026 07:27:00 GMT", now))
+        assertNull(parseRetryAfterHeader("Wed, 21 Oct 2026 07:28:00 GMT", now))
     }
 
     @Test

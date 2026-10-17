@@ -12,7 +12,7 @@ private val DELTA_SECONDS = Regex("""\d+""")
 /**
  * The wait in milliseconds a `Retry-After` header asks for (RFC 9110 section 10.2.3), or null when the
  * header is absent, empty, negative or not understood. Both forms are read: delta-seconds, and an HTTP date
- * in the IMF-fixdate form (`Wed, 21 Oct 2026 07:28:00 GMT`). A date that has already passed gives 0, and a
+ * in the IMF-fixdate form (`Wed, 21 Oct 2026 07:28:00 GMT`). A date that has already passed gives null, and a
  * wait longer than [MAX_RETRY_AFTER_MS] is clamped to it.
  */
 fun parseRetryAfterHeader(
@@ -26,7 +26,7 @@ fun parseRetryAfterHeader(
     }
     return try {
         val target = ZonedDateTime.parse(raw, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli()
-        (target - nowMs).coerceIn(0L, MAX_RETRY_AFTER_MS)
+        (target - nowMs).takeIf { it > 0L }?.coerceAtMost(MAX_RETRY_AFTER_MS)
     } catch (_: DateTimeException) {
         null
     }
