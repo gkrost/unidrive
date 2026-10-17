@@ -59,6 +59,11 @@ class Reconciler(
 ) {
     private val log = LoggerFactory.getLogger(Reconciler::class.java)
 
+    // #316: how resolveSlice reads the rows its page needs. The default asks the state database in
+    // bounded chunks of indexed path lookups, so a streamed gather reads the page's and the local
+    // changes' rows, not the whole table once per delta page. A test substitutes a counting wrapper.
+    internal var entryLookup: (Collection<String>) -> Map<String, SyncEntry> = { paths -> entriesByPathsChunked(db, paths) }
+
     // A hash is only comparable when both sides have one. A row written before the provider reported a hash (Internxt rows have
     // remote_hash = null; #464 gave its listing a version token) must not look remotely modified just because the listing now
     // carries one: that would re-download every existing file on the first sync after the upgrade. mtime still decides then.
@@ -455,8 +460,6 @@ class Reconciler(
         // whose local file is absent instead of emitting DeleteRemote.
         downloadOnly: Boolean = false,
     ): List<SyncAction> {
-        val allDbEntries = db.getAllEntries()
-        val entryByPath = allDbEntries.associateBy { it.path }
         val pinRules = db.getPinRules()
 
         // #115: alias context, using the stable full-scan top-level set when
@@ -475,6 +478,12 @@ class Reconciler(
             (pageRemoteLocal.keys + localChanges.keys)
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
                 .filter { SyncScope.contains(it, syncPaths) }
+
+        // #316: the loop below looks up exactly allPaths, so read only those rows. The batch lookup can
+        // return an NFC row under an NFD caller key when both spellings occur in this slice; key by the
+        // stored spelling, as the old whole-table map did, and keep only paths this slice asks about.
+        val requestedPaths = allPaths.toHashSet()
+        val entryByPath = entryLookup(allPaths).values.filter { it.path in requestedPaths }.associateBy { it.path }
 
         for (path in allPaths) {
             val remoteItem = pageRemoteLocal[path]
@@ -1417,6 +1426,19 @@ class Reconciler(
         }
 
     companion object {
+        // #316: paths per state-database lookup; each call holds the database monitor, so keep it short
+        // and far below SQLite's bound-parameter ceiling.
+        const val ENTRY_LOOKUP_CHUNK = 500
+
+        internal fun entriesByPathsChunked(
+            db: StateDatabase,
+            paths: Collection<String>,
+        ): Map<String, SyncEntry> {
+            val found = HashMap<String, SyncEntry>(paths.size * 2)
+            for (chunk in paths.chunked(ENTRY_LOOKUP_CHUNK)) found.putAll(db.getEntriesByPaths(chunk))
+            return found
+        }
+
         /**
          * UD-240k: split a path into its parent's segment list.
          *

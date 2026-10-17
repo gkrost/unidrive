@@ -2444,7 +2444,25 @@ open class SyncEngine(
         val collisionLoserIds = reportGatheredCollisions(collisions, dryRun = false)
 
         if (isFullSync && allComplete) {
+            val listedKeys = HashSet(changes.keys)
             detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt, unreachable)
+            // The absence sweep adds tombstones for rows no listing page carried, so no page slice reconciled them.
+            // Plan them here with the same resolution the pages get (a deferred DeleteLocal, an edited or hydrated
+            // file kept), or a streamed pass would never apply a remote deletion that only a full listing shows.
+            val sweepTombstones = changes.filterKeys { it !in listedKeys }
+            if (sweepTombstones.isNotEmpty()) {
+                val sweepLocalPaths =
+                    sweepTombstones.values.mapNotNullTo(HashSet()) { db.getEntryByRemoteId(it.id)?.path }
+                val sweepActions =
+                    reconciler.resolveSlice(
+                        sweepTombstones,
+                        localChanges.filterKeys { it in sweepLocalPaths },
+                        scope,
+                        stableRemoteTopLevelNames,
+                        downloadOnly = syncDirection == SyncDirection.DOWNLOAD,
+                    )
+                safeAccumulator.addAll(buffer.classify(sweepActions))
+            }
         } else if (isFullSync) {
             val msg =
                 "UD-360: at least one delta page returned complete=false; " +

@@ -490,9 +490,6 @@ class SyncEngineTest {
     @Test
     fun `the streaming gather records the unreachable item and keeps its row and file as well`() =
         runTest {
-            // The streaming pass plans no delete for a file that only the absence from a full listing shows (#929), so
-            // the vanished file stays here whether or not the item is unreachable; the rest is pinned as for the
-            // buffered pass.
             unreachableItemSurvivesFullSync(
                 SyncEngine(
                     provider = provider,
@@ -502,7 +499,7 @@ class SyncEngineTest {
                     reporter = ProgressReporter.Silent,
                     streamingReconciliation = true,
                 ),
-                absentFileIsDeleted = false,
+                absentFileIsDeleted = true,
             )
         }
 

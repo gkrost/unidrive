@@ -51,6 +51,9 @@ class FakeS3(
     /** Answers the next request [matching] with [status] and an S3 error [code] instead of serving it. */
     val failures = mutableListOf<Triple<(Request) -> Boolean, Int, String>>()
 
+    /** The `Retry-After` value every scripted failure carries, when set. */
+    var failureRetryAfter: String? = null
+
     fun put(
         key: String,
         content: String,
@@ -254,7 +257,11 @@ class FakeS3(
     private fun MockRequestHandleScope.error(
         status: Int,
         code: String,
-    ) = respond("<Error><Code>$code</Code><Message>$code</Message></Error>", HttpStatusCode.fromValue(status), headersOf("Content-Type", "application/xml"))
+    ) = respond(
+        "<Error><Code>$code</Code><Message>$code</Message></Error>",
+        HttpStatusCode.fromValue(status),
+        headersOf("Content-Type" to listOf("application/xml"), *listOfNotNull(failureRetryAfter?.let { "Retry-After" to listOf(it) }).toTypedArray()),
+    )
 
     companion object {
         fun md5Hex(bytes: ByteArray): String = MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02x".format(it) }
