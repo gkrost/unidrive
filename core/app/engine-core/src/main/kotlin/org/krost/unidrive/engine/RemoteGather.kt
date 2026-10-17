@@ -117,6 +117,40 @@ class RemoteGather(
     private fun liveTopLevelNames(): List<String> =
         db.listDirectChildren("").filter { it.remoteId != TrashNamespace.ROOT_ID }.map { it.path.removePrefix("/") }
 
+    /**
+     * What state.db tracks for [remoteId], for a provider that would otherwise ask the remote for a folder this pass did
+     * not change (ScanContext.trackedRow). The parent is the row the folder above holds at the path the row is kept
+     * under, not the `parent_uuid` column: the gather does not write that column, and a rename moves the path. Null
+     * parent: the top of the drive. No row at all for what the engine cannot vouch for: the folder above is not tracked,
+     * or is the root of the trash namespace, which has no counterpart at the provider.
+     */
+    internal fun trackedRow(remoteId: String): CloudItem? {
+        if (remoteId == TrashNamespace.ROOT_ID) return null
+        val entry = db.getEntryByRemoteId(remoteId) ?: return null
+        val path = entry.remotePath ?: entry.path
+        val parentPath = path.substringBeforeLast('/')
+        val parentId =
+            if (parentPath.isEmpty()) {
+                null
+            } else {
+                val parent = db.getEntryByRemotePath(parentPath)?.takeIf { it.isFolder } ?: return null
+                parent.remoteId?.takeIf { it != TrashNamespace.ROOT_ID } ?: return null
+            }
+        return CloudItem(
+            id = remoteId,
+            name = path.substringAfterLast('/'),
+            path = path,
+            size = entry.remoteSize,
+            isFolder = entry.isFolder,
+            modified = entry.remoteModified,
+            created = null,
+            hash = null,
+            mimeType = null,
+            parentId = parentId,
+            trashed = guard.trash.contains(entry.path),
+        )
+    }
+
     /** Reads the place of the trash root from state.db again: its row has appeared, moved or been reaped. */
     fun refreshTrash() = guard.trash.refresh(db)
 
@@ -471,6 +505,7 @@ class RemoteGather(
                 scopeRoots = guard.trackScope,
                 readOnly = readOnly,
                 onProgress = providerProgress,
+                trackedRow = ::trackedRow,
             )
 
         suspend fun nextPage(c: String?): DeltaPage {
@@ -564,6 +599,7 @@ class RemoteGather(
                     scopeRoots = guard.trackScope,
                     readOnly = readOnly,
                     onProgress = providerProgress,
+                    trackedRow = ::trackedRow,
                 )
             suspend fun nextPageRecovery(c: String?): DeltaPage {
                 val p =

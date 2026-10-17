@@ -41,6 +41,16 @@ package org.krost.unidrive
  * after every page or folder, so it must stay cheap; the receiver throttles.
  * Providers that cannot tell leave it uncalled.
  *
+ * [trackedRow] answers, from the engine's state.db, the row it tracks for a remote id: [CloudItem.id], [CloudItem.name]
+ * (the last segment of the path the engine keeps it under), [CloudItem.parentId] (the remote id of the folder row above
+ * it at that path; null for an item at the top of the drive), [CloudItem.isFolder], [CloudItem.modified], and
+ * [CloudItem.trashed] for a row that sits in the trash namespace. The answer itself is null when state.db has no live row
+ * for the id, or one the engine cannot vouch for (the folder above is not tracked, or is the root of the trash
+ * namespace). It is what the engine knew after its last pass, no more: a provider that uses it to avoid asking the remote
+ * for a folder it has not changed must check it against what the pass delivers and ask the remote where they disagree.
+ * The engine offers it on every gather; a full listing, which is what runs when the engine cannot believe its rows, does
+ * not use it.
+ *
  * Providers that don't have a resume story (snapshot-once APIs, all-in-one
  * recursive listings) leave [ScanContext] unset on `delta()` and continue
  * accumulating in memory as before.
@@ -52,6 +62,7 @@ data class ScanContext(
     val scopeRoots: List<String> = emptyList(),
     val readOnly: Boolean = false,
     val onProgress: ((ScanProgress) -> Unit)? = null,
+    val trackedRow: ((remoteId: String) -> CloudItem?)? = null,
 )
 
 /**
