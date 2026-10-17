@@ -7,28 +7,28 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * UD-232: shared throttle coordinator for a single `GraphApiService`.
+ * UD-232: throttle coordinator for one provider HTTP client. Each client owns its own instance
+ * (`GraphApiService` one, `DropboxApi` one, `S3Api` one, `InternxtApiService` two: `driveBudget` and
+ * `bridgeBudget`), tuned through the constructor; instances share no state.
  *
- * ## Canonical HTTP retry policy matrix (UD-207)
+ * ## Retry policy the providers follow
  *
- * | Class                     | HTTP status / signal           | Retry? | Cap                    | Backoff               | Notes              |
- * |---------------------------|--------------------------------|--------|------------------------|-----------------------|--------------------|
- * | Success                   | 2xx                            | n/a    | n/a                    | n/a                   |                    |
- * | Permanent client error    | 4xx (except 408, 429)          | No     | n/a                    | n/a                   | Fail fast          |
- * | Timeout                   | 408                            | Yes    | budget.maxRetries      | exp + jitter          |                    |
- * | Throttle                  | 429                            | Yes    | budget.maxRetries      | honor Retry-After (cap = budget.maxRetryAfter) | UD-232 alignment |
- * | Server error              | 5xx                            | Yes    | budget.maxRetries      | exp + jitter          |                    |
- * | Network error             | (no status)                    | Yes    | budget.maxRetries      | exp + jitter          |                    |
- * | Unknown exception         | (caller-classified `Unknown`)  | Yes    | min(3, budget.maxRetries) | exp + jitter       | The lower cap is deliberate |
+ * The per-status decision lives in each provider's own retry loop, not in this class; this class
+ * coordinates the throttles those loops report and classifies transient I/O failures
+ * ([isRetriableIoException]). The loops agree on this shape:
  *
- * This is the canonical policy used across all unidrive provider HTTP clients
- * (OneDrive `GraphApiService`, WebDAV `WebDavApiService`, and the rclone /
- * Internxt / S3 / SFTP / HiDrive adapters under UD-330). The matrix mirrors
- * drive-desktop's `client-wrapper.service.ts` doc-comment and is the single
- * source of truth: any per-provider exception (e.g. WebDAV also retries 425
- * Too Early) requires its own backlog ticket and a corresponding update to
- * this table — silent divergence is forbidden. See
- * `docs/dev/lessons/http-retry-policy.md` for the cross-linked rationale.
+ * | Class                     | HTTP status / signal   | Retry? | Wait                                           |
+ * |---------------------------|------------------------|--------|------------------------------------------------|
+ * | Success                   | 2xx                    | n/a    | n/a                                            |
+ * | Permanent client error    | 4xx except 429         | No     | Fail fast (a provider may single out one more) |
+ * | Throttle                  | 429, 503 (Graph, Dropbox, S3, Internxt) | Yes | The server's `Retry-After` ([parseRetryAfterHeader]) or the body hint, else exponential; each provider caps the single wait |
+ * | Server error              | 5xx                    | Provider-specific: Internxt retries 500/502/503/504, S3 retries 500/503, Graph and Dropbox retry only 503 | Exponential |
+ * | Network error             | (no status)            | Yes    | Exponential, see [isRetriableIoException]      |
+ *
+ * No client retries a 408 as a throttle.
+ * Retry counts and caps are per provider (`MAX_THROTTLE_ATTEMPTS`, `MAX_TOTAL_THROTTLE_WAIT_MS`
+ * and `MAX_SINGLE_BACKOFF_MS` in `GraphApiService`, `MIN_WAIT_MS` and `MAX_WAIT_MS` in the S3 and
+ * Dropbox clients); a provider that departs from the table says so where it retries.
  *
  * ## Coordination role
  *
