@@ -138,6 +138,9 @@ class InternxtCursorListingTest {
         ) : Failure
 
         data object Cut : Failure
+
+        // No connection at all: no route, refused, unknown host. The client reports it as status 0.
+        data object Unreachable : Failure
     }
 
     private class Seen(
@@ -310,6 +313,7 @@ class InternxtCursorListingTest {
                         when (val f = failure(stream, page)) {
                             is Failure.Status -> respond("{}", HttpStatusCode.fromValue(f.code), jsonHeaders)
                             Failure.Cut -> throw cutByTheGateway()
+                            Failure.Unreachable -> throw java.net.NoRouteToHostException("No route to host")
                             null -> respond(pageBody(stream, page), HttpStatusCode.OK, jsonHeaders)
                         }
                     }
@@ -1006,6 +1010,49 @@ class InternxtCursorListingTest {
             assertEquals(listOf(2, 3), healthy.seen.filter { it.stream == "files" }.map { healthy.pageOf("files", it.cursor) }, "files go on from the cursor of page 2")
             assertNull(healthy.seen.first { it.stream == "files" }.updatedAt)
             assertTrue(healthy.other.isEmpty())
+        }
+
+    @Test
+    fun `an outage that outlasts the retry window mid-listing keeps the cursor marker and opens no walk window, and the next gather resumes the cursor`() =
+        runTest {
+            // #693: the network is gone for longer than the 180 s an enumeration waits out. The attempt fails; what
+            // it stored stays, the next gather continues the cursors instead of starting the walk from item 0.
+            val staging = FakeStaging()
+            var down = true
+            val outage =
+                DriveMock(
+                    tree = walkTree,
+                    failure = { s, page -> if (down && s == "files" && page == 2) Failure.Unreachable else null },
+                )
+            val provider = provider(outage.engine)
+
+            val failed = assertFailsWith<InternxtApiException> { provider.delta(null, null, staging.context()) }
+            assertEquals(0, failed.statusCode, "the connect failure itself, not a page")
+            assertTrue(
+                testScheduler.currentTime >= InternxtApiService.CONNECT_OUTAGE_BUDGET_MS,
+                "the call waited the whole window first: ${testScheduler.currentTime} ms",
+            )
+            assertTrue(outage.other.isEmpty(), "a connection that cannot be made is not a reason for the tree walk: ${outage.other}")
+            val marker = assertNotNull(decodeCursorMarker(staging.markers.last()), "the marker is still the cursor listing's: ${staging.markers.last()}")
+            assertEquals(outage.cursorOf("files", 2), marker.files.cursor, "the files stream stands after its last stored page")
+            assertTrue(staging.rows.isNotEmpty())
+            val stagedBefore = staging.rows.size
+
+            // The network is back; the same process gathers again. A window in which gathers walk instead of
+            // listing by cursor (the one a server-side failure opens for 30 minutes) must not be open.
+            down = false
+            val seenBefore = outage.seen.size
+            val resumed = provider.delta(null, null, staging.context())
+            assertEquals(standardPaths, resumed.items.map { it.path }.toSet())
+            assertTrue(resumed.complete)
+            assertTrue(outage.other.isEmpty(), "no walk after the outage: ${outage.other}")
+            assertEquals(
+                listOf(2, 3),
+                outage.seen.drop(seenBefore).filter { it.stream == "files" }.map { outage.pageOf("files", it.cursor) },
+                "files go on from the cursor of page 2",
+            )
+            assertEquals(marker.startedAt, resumed.cursor, "the resumed listing keeps the instant the enumeration began")
+            assertTrue(staging.rows.size >= stagedBefore)
         }
 
     // ---- the guards against a server that loops ----------------------------------------------------------------------
