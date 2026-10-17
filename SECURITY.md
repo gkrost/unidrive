@@ -8,6 +8,9 @@ form (the **Security** tab → *Report a vulnerability*). Private vulnerability
 reporting is enabled on this repository, so the report and any discussion stay
 confidential until a fix is published.
 
+If you cannot use that form, write to **oss@unidrive.krost.org** (open-source topics
+only). Do not put secrets in the mail; ask for a way to share details if you need one.
+
 Do **not** open a public issue for a suspected vulnerability, and do not include
 credentials, tokens, or other secrets in a report — describe how to reproduce
 the problem instead.

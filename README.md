@@ -128,3 +128,8 @@ Daemon log: `~/.local/share/unidrive/unidrive.log`. Quick triage: `scripts/dev/l
 - `TrackingEngine.kt` — the frozen tracking-set engine, reachable only as `unidrive ts ...`
 - `HydrationImpl.kt` — physical payload de/reconstruction lifecycle
 - `MountEngine.kt` — mount operations (cache, hydration verbs, mirror hand-off) since the engine split
+
+## Contact
+
+Questions about the open-source engine, licensing of contributions and security reports that cannot go through
+GitHub's private reporting form: **oss@unidrive.krost.org**. This address is for the open-source project only.
