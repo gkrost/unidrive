@@ -472,7 +472,8 @@ open class SyncEngine(
         remoteChanges: MutableMap<String, CloudItem>,
         admittedLoserIds: Set<String> = emptySet(),
         gatherStartedAt: Instant,
-    ) = remoteGather.detectMissingAfterFullSync(remoteChanges, admittedLoserIds, gatherStartedAt)
+        unreachableIds: Set<String> = emptySet(),
+    ) = remoteGather.detectMissingAfterFullSync(remoteChanges, admittedLoserIds, gatherStartedAt, unreachableIds)
 
     // #401: a path-addressed mutation on a collided path could hit either twin and
     // the action carries no remote id to aim it with. Skip; the action re-plans
@@ -1022,14 +1023,13 @@ open class SyncEngine(
         // Keep the recovery latch set until a complete full listing passes the
         // remote-shrink guard. The gather itself cannot know whether a smaller
         // inventory is trustworthy; clearing here prevents falling back to the
-        // cursor that could have hidden the skipped paths.
-        val fullRecoveryTrusted =
-            actualFullEnumeration && runScope.isEmpty() && !skipRemoteGather &&
-                db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull() == true &&
-                remoteShrinkWarning == null
-        if (fullRecoveryTrusted) {
-            db.setSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY, "false")
-        }
+        // cursor that could have hidden the skipped paths. The mount's enumeration
+        // makes the same decision through the same function.
+        remoteGather.settleRecoveryLatch(
+            scoped = runScope.isNotEmpty() || skipRemoteGather,
+            shrinkWarning = remoteShrinkWarning,
+            fullListingFallback = fullEnumerationExpected,
+        )
 
         // Streaming-reconciliation auto-flip: after the first successful
         // streaming scan, persist the sentinel so subsequent runs default to
@@ -2070,6 +2070,9 @@ open class SyncEngine(
         }
 
         var allComplete = true
+        // Items the provider listed but could not place below a permanently gone folder
+        // (DeltaPage.unreachableIds): the absence sweep treats them as present.
+        val unreachable = HashSet<String>()
         val activeScan = db.getActiveScan(staleThreshold = java.time.Duration.ofHours(SCAN_CHECKPOINT_STALE_HOURS))
         val resumedItems: List<CloudItem> =
             if (activeScan != null) db.loadStagedItems(activeScan.scanId) else emptyList()
@@ -2106,6 +2109,7 @@ open class SyncEngine(
             if (!page.complete) {
                 allComplete = false
             }
+            unreachable.addAll(page.unreachableIds)
             return remoteGather.placeTrashed(page)
         }
 
@@ -2426,7 +2430,7 @@ open class SyncEngine(
         val collisionLoserIds = reportGatheredCollisions(collisions, dryRun = false)
 
         if (isFullSync && allComplete) {
-            detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt)
+            detectMissingAfterFullSync(changes, collisionLoserIds, gatherStartedAt, unreachable)
         } else if (isFullSync) {
             val msg =
                 "UD-360: at least one delta page returned complete=false; " +
@@ -2435,6 +2439,7 @@ open class SyncEngine(
             log.warn(msg)
             reporter.onWarning(msg)
         }
+        remoteGather.recordUnreachable(unreachable, isFullSync)
         // Record the gather's full-enumeration verdict (see gatherRemoteChanges).
         db.setSyncState("last_gather_full", isFullSync.toString())
         if (!allComplete) {
@@ -3990,36 +3995,13 @@ open class SyncEngine(
         const val BULK_REAP_ABSOLUTE: Int = RemoteEnumeration.BULK_REAP_ABSOLUTE
         const val BULK_REAP_FRACTION: Double = RemoteEnumeration.BULK_REAP_FRACTION
 
-        // Remote-shrink trust gate. A *full* enumeration is trusted as complete
-        // only if it observed at least ENUM_TRUST_MIN_FRACTION of the tracked
-        // baseline; a silently-partial provider walk (transient errors swallowed
-        // upstream, short pages) can report complete=true while having dropped
-        // whole subtrees, and trusting it would let detectMissingAfterFullSync
-        // synthesize a mass-delete cascade for every unobserved row. Accounts
-        // below ENUM_TRUST_MIN_BASELINE rows are exempt so a legitimately small or
-        // near-empty drive is never pinned incomplete by the gate.
-        const val ENUM_TRUST_MIN_FRACTION: Double = 0.5
-        const val ENUM_TRUST_MIN_BASELINE: Int = 50
+        // The remote-shrink trust gate lives in RemoteGather, where the mount's enumeration
+        // judges its full listing by the same rule (see RemoteGather.remoteShrinkWarningOrNull).
+        const val ENUM_TRUST_MIN_FRACTION: Double = RemoteGather.ENUM_TRUST_MIN_FRACTION
+        const val ENUM_TRUST_MIN_BASELINE: Int = RemoteGather.ENUM_TRUST_MIN_BASELINE
 
-        /**
-         * Remote-shrink trust gate. Returns an operator-facing warning when a FULL
-         * enumeration observed implausibly few live remote items ([observedAlive])
-         * versus the tracked [baseline] — the signature of a silently-partial walk
-         * masquerading as complete — otherwise null. Accounts below
-         * [ENUM_TRUST_MIN_BASELINE] rows are exempt so a legitimately small or
-         * near-empty drive is never blocked. Pure function of the two counts so the
-         * threshold is unit-testable without a live gather.
-         */
-        internal fun remoteShrinkWarningOrNull(observedAlive: Int, baseline: Int): String? {
-            if (baseline < ENUM_TRUST_MIN_BASELINE) return null
-            if (observedAlive >= baseline * ENUM_TRUST_MIN_FRACTION) return null
-            return "Remote enumeration looks partial: a full scan observed only $observedAlive " +
-                "live remote item(s) vs $baseline previously-tracked " +
-                "(< ${(ENUM_TRUST_MIN_FRACTION * 100).toInt()}%). Refusing to reconcile to avoid " +
-                "spurious mass uploads/deletes from an incomplete listing. Do NOT use " +
-                "--force-delete (it would apply the bad plan). Re-run when the connection is " +
-                "healthy; if you really removed most remote files, rebuild with --reset."
-        }
+        internal fun remoteShrinkWarningOrNull(observedAlive: Int, baseline: Int): String? =
+            RemoteGather.remoteShrinkWarningOrNull(observedAlive, baseline)
 
         @JvmField
         val RECENT_UPLOAD_REAP_GRACE: java.time.Duration = RemoteGather.RECENT_UPLOAD_REAP_GRACE

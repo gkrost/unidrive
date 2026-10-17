@@ -498,10 +498,232 @@ class RemoteEnumerationTest {
         assertEquals("timeout", codeOf(ProviderException("slow", cause = java.net.SocketTimeoutException("t"))))
     }
 
+    // ---- the recovery latch: a mount daemon never runs the sync pass that used to clear it --------------------------------------
+
+    private fun latch(): String? = db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY)
+
+    private fun folder(
+        id: String,
+        path: String,
+    ) = file(id, path).copy(isFolder = true, size = 0)
+
+    @Test
+    fun `a complete full listing after an incomplete pass ends the recovery, and the next enumeration continues from the cursor`() =
+        runTest {
+            provider.fullListing = false
+            provider.items = listOf(file("1", "/a.txt"), file("2", "/b.txt"))
+            provider.complete = false
+            val enumeration = enumeration()
+
+            enumeration.enumerate(reset = false)
+            assertEquals("true", latch(), "an incomplete pass sets the latch")
+
+            provider.complete = true
+            val recovery = enumeration.enumerate(reset = false)
+            assertTrue(recovery.complete)
+            assertEquals("false", latch(), "the complete full listing ends the recovery")
+
+            provider.items = emptyList()
+            enumeration.enumerate(reset = false)
+
+            assertEquals(listOf(null, null, "c2"), provider.cursors, "the pass after the recovery is incremental: it asks from the cursor")
+            assertEquals("false", latch())
+        }
+
+    @Test
+    fun `an incomplete full listing keeps the recovery, and the drive is listed from zero again`() =
+        runTest {
+            provider.fullListing = false
+            provider.items = listOf(file("1", "/a.txt"))
+            provider.complete = false
+            val enumeration = enumeration()
+
+            enumeration.enumerate(reset = false)
+            enumeration.enumerate(reset = false)
+
+            assertEquals("true", latch())
+            assertEquals(listOf<String?>(null, null), provider.cursors)
+            assertNotNull(db.getEntry("/a.txt"), "an incomplete pass reaps nothing")
+        }
+
+    @Test
+    fun `a full listing the remote-shrink guard distrusts keeps the recovery`() =
+        runTest {
+            provider.items = (1..60).map { file("id$it", "/f$it.txt") }
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+            db.setSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY, "true")
+
+            // 50 of 60 tracked rows vanish: not above the bulk threshold of 50, so they are reaped, but the listing
+            // looks partial (10 of 60 observed, below the half the shrink guard demands).
+            provider.items = (1..10).map { file("id$it", "/f$it.txt") }
+            val shrunk = enumeration.enumerate(reset = false)
+
+            assertEquals(50, shrunk.reaped)
+            assertEquals("true", latch(), "a listing that looks partial is no trusted inventory")
+
+            // The baseline is 10 rows now: below the floor of the guard, so the same listing is trusted.
+            enumeration.enumerate(reset = false)
+            assertEquals("false", latch())
+        }
+
+    @Test
+    fun `a pass whose reaps the bulk guard deferred keeps the recovery until the listing corroborates it`() =
+        runTest {
+            provider.items = (1..200).map { file("id$it", "/f$it.txt") }
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+            db.setSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY, "true")
+
+            // 60 of 200 vanish: above max(50, 20% = 40), so the reaps wait for a second complete listing. 140 observed is
+            // above half of the baseline, so the shrink guard is quiet: the deferral alone keeps the latch.
+            provider.items = (1..140).map { file("id$it", "/f$it.txt") }
+            val first = enumeration.enumerate(reset = false)
+
+            assertEquals(0, first.reaped)
+            assertNotNull(db.getEntry("/f150.txt"), "deferred, not reaped")
+            assertEquals("true", latch(), "a deferred reap is no trusted inventory; the corroboration needs a full listing again")
+
+            val second = enumeration.enumerate(reset = false)
+
+            assertEquals(60, second.reaped)
+            assertEquals("false", latch(), "corroborated and reaped: the listing is trusted")
+        }
+
+    @Test
+    fun `the recovery latch is settled by one rule, and every condition of it is needed`() {
+        val gather = gather()
+
+        fun settle(
+            full: Boolean = true,
+            complete: Boolean = true,
+            scoped: Boolean = false,
+            shrinkWarning: String? = null,
+            reapsDeferred: Boolean = false,
+        ): Pair<Boolean, String?> {
+            db.setSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY, "true")
+            db.setSyncState("last_gather_full", full.toString())
+            db.setSyncState("pending_cursor_complete", complete.toString())
+            return gather.settleRecoveryLatch(scoped, shrinkWarning, reapsDeferred) to latch()
+        }
+
+        assertEquals(true to "false", settle(), "a complete, full, unscoped listing that the guards accept")
+        assertEquals(false to "true", settle(full = false), "an incremental pass proves nothing about absent paths")
+        assertEquals(false to "true", settle(complete = false))
+        assertEquals(false to "true", settle(scoped = true), "a listing of a part of the drive is no inventory of it")
+        assertEquals(false to "true", settle(shrinkWarning = "looks partial"))
+        assertEquals(false to "true", settle(reapsDeferred = true))
+    }
+
+    // ---- unreachable is not deleted -----------------------------------------------------------------------------------------------
+
+    // /D (gone on the server) holds c.txt and the folder /D/S with e.txt; x.txt and k.txt are beside it.
+    private val tree = listOf(folder("D", "/D"), file("c", "/D/c.txt"), folder("S", "/D/S"), file("e", "/D/S/e.txt"), file("x", "/x.txt"), file("k", "/k.txt"))
+
+    @Test
+    fun `items the provider reports unreachable keep their rows through a complete listing, and a vanished item is still reaped`() =
+        runTest {
+            provider.items = tree
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+            // c.txt is on disk and carries the marks of a local edit.
+            db.upsertEntry(checkNotNull(db.getEntry("/D/c.txt")).copy(isHydrated = true, localMtime = 1234L, localSize = 1L))
+            val before = listOf("/D", "/D/c.txt", "/D/S", "/D/S/e.txt").associateWith { db.getEntry(it) }
+            db.setSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY, "true")
+            invalidations.clear()
+
+            // The listing no longer places c, S and e (the folder above them is gone for good) and the pass is complete.
+            // x.txt really disappeared.
+            provider.items = listOf(file("k", "/k.txt"))
+            provider.unreachable = setOf("c", "S", "e")
+            val result = enumeration.enumerate(reset = false)
+
+            assertTrue(result.ok)
+            assertTrue(result.complete)
+            assertEquals("true", db.getSyncState("pending_cursor_complete"))
+            assertEquals("c2", db.getSyncState("delta_cursor"), "the cursor advanced")
+            assertEquals("false", latch(), "and the recovery ended")
+            for ((path, row) in before) assertEquals(row, db.getEntry(path), "$path is exactly as it was: not reaped, not flagged, not touched")
+            assertNull(db.getEntry("/x.txt"), "an item that really disappeared is reaped as before")
+            assertEquals(1, result.reaped)
+            assertEquals(3, enumeration.status().unreachableItems, "and the figure is told")
+            assertTrue(invalidations.none { (paths, _) -> paths.any { it.startsWith("/D") } }, "the view is told nothing about them: $invalidations")
+        }
+
+    @Test
+    fun `without the unreachable ids the same listing reaps those rows`() =
+        runTest {
+            provider.items = tree
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+
+            provider.items = listOf(file("k", "/k.txt"))
+            val result = enumeration.enumerate(reset = false)
+
+            assertEquals(5, result.reaped, "D, c, S, e and x: the control for what the unreachable ids change")
+            assertNull(db.getEntry("/D/c.txt"))
+            assertNull(db.getEntry("/D"))
+            assertNull(enumeration.status().unreachableItems, "absent when there are none")
+        }
+
+    @Test
+    fun `the folder above an unreachable row is held with it, and swept once nothing is listed below it`() =
+        runTest {
+            provider.items = tree
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+
+            provider.items = listOf(file("k", "/k.txt"))
+            provider.unreachable = setOf("e")
+            enumeration.enumerate(reset = false)
+
+            assertNotNull(db.getEntry("/D/S/e.txt"))
+            assertNotNull(db.getEntry("/D/S"), "the folder e hangs below")
+            assertNotNull(db.getEntry("/D"), "and the one above it: the tree in state.db stays whole")
+            assertNull(db.getEntry("/D/c.txt"), "c is neither listed nor unreachable: it is gone")
+
+            provider.unreachable = emptySet()
+            enumeration.enumerate(reset = false)
+
+            assertNull(db.getEntry("/D/S/e.txt"), "the server stopped listing it")
+            assertNull(db.getEntry("/D/S"))
+            assertNull(db.getEntry("/D"))
+        }
+
+    @Test
+    fun `an incomplete pass leaves every row and the latch alone however many ids it names`() =
+        runTest {
+            provider.items = tree
+            val enumeration = enumeration()
+            enumeration.enumerate(reset = false)
+            val before = tree.associate { it.path to db.getEntry(it.path) }
+
+            provider.items = listOf(file("k", "/k.txt"))
+            provider.complete = false
+            provider.unreachable = setOf("c")
+            enumeration.enumerate(reset = false)
+
+            assertEquals("true", latch())
+            assertEquals("false", db.getSyncState("pending_cursor_complete"))
+            for ((path, row) in before) {
+                if (path != "/k.txt") assertEquals(row, db.getEntry(path), "$path: an incomplete pass reaps nothing")
+            }
+        }
+
     // One page per listing; every cursor names the listing that produced it.
     private class ListingProvider : CloudProvider {
         var items: List<CloudItem> = emptyList()
         var failure: ProviderException? = null
+
+        // The completeness the provider reports, and the ids it could not place (DeltaPage.unreachableIds).
+        var complete = true
+        var unreachable: Set<String> = emptySet()
+
+        // True: every delta lists the whole tree (localfs). False: a delta that is handed a cursor is incremental.
+        var fullListing = true
+
+        // The cursor of every delta() call, to tell a full listing (null) from an incremental one.
+        val cursors = mutableListOf<String?>()
         private var listings = 0
 
         override val id = "test"
@@ -519,11 +741,12 @@ class RemoteEnumerationTest {
         ): DeltaPage {
             failure?.let { throw it }
             listings++
-            // A full listing whatever the cursor: deltaIsFullListing below.
-            return DeltaPage(items = items, cursor = "c$listings", hasMore = false)
+            cursors += cursor
+            // A full listing whatever the cursor unless fullListing is off: deltaIsFullListing below.
+            return DeltaPage(items = items, cursor = "c$listings", hasMore = false, complete = complete, unreachableIds = unreachable)
         }
 
-        override val deltaIsFullListing: Boolean get() = true
+        override val deltaIsFullListing: Boolean get() = fullListing
 
         override suspend fun listChildren(path: String): List<CloudItem> = error("not used")
 

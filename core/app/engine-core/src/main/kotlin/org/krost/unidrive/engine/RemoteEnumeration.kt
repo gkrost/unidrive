@@ -189,6 +189,7 @@ class RemoteEnumeration(
             status.copy(
                 first = db.getSyncState("delta_cursor").isNullOrEmpty(),
                 lastScanComplete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull(),
+                unreachableItems = db.getSyncState(RemoteGather.UNREACHABLE_ITEMS_KEY)?.toIntOrNull()?.takeIf { it > 0 },
                 lastSuccessAtMs =
                     status.lastSuccessAtMs
                         ?: db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
@@ -229,6 +230,8 @@ class RemoteEnumeration(
             first = cursorEmpty,
             expected = if (cursorEmpty || gather.deltaIsFullListing) previousFullEnumeration() else null,
         )
+        // The tracked rows before the gather: what a full listing is measured against for the recovery latch (see below).
+        val preGatherTrackedRows = db.getEntryCount()
         val remoteChanges: Map<String, CloudItem> =
             try {
                 gather.gather(progress = tracker).filterKeys { gather.isTracked(it) }
@@ -251,6 +254,8 @@ class RemoteEnumeration(
         var reaped = 0
         val reapedViewPaths = mutableSetOf<String>()
         var nextDeferred = emptySet<String>()
+        // Whether the corroboration guard held back a reap this pass (see the recovery latch below).
+        var reapsDeferred = false
         // #149: cache files are evicted AFTER the batch commits — a filesystem
         // delete is a non-transactional side effect and must not lengthen the
         // SQLite lock window.
@@ -343,6 +348,7 @@ class RemoteEnumeration(
                     val deferred = missingNow - toReap
                     nextDeferred = missingNow
                     if (deferred.isNotEmpty()) {
+                        reapsDeferred = true
                         log.warn(
                             "enumerate: bulk disappearance ({} paths > threshold {}); " +
                                 "deferring {} uncorroborated path(s) to the next complete enumeration",
@@ -376,6 +382,9 @@ class RemoteEnumeration(
         // The reap may have removed the trash root's row (nothing is in the trash any more).
         gather.refreshTrash()
         gather.promotePendingCursor()
+        // Last, after the merge, the reap and the cursor: a crash before this point leaves the latch set, and the next
+        // pass lists the drive again.
+        settleRecoveryLatch(remoteChanges, preGatherTrackedRows, reapsDeferred)
         // A complete full listing becomes the estimate for the next one (the gather recorded whether it was full).
         if (complete && db.getSyncState("last_gather_full") == "true") recordFullEnumeration(remoteChanges, listingMs)
         // Notify the view-invalidation sink once, with all paths that changed in state.db
@@ -390,6 +399,38 @@ class RemoteEnumeration(
             gather.invalidateView(changedPaths, false, movedView)
         }
         return EnumerateResult(ok = true, upserted = upserted, reaped = reaped, complete = complete)
+    }
+
+    // The recovery latch (RemoteGather.INCOMPLETE_ENUMERATION_KEY). A gather that ends incomplete sets it, and while it is
+    // set every gather lists the whole drive from zero. Only the sync pass cleared it, and a mount daemon never runs that
+    // pass, so one incomplete scan made every later poll a full relisting for ever, complete or not. The enumeration now
+    // asks the same question as the sync pass (RemoteGather.settleRecoveryLatch): a complete, full, unscoped listing that
+    // the remote-shrink guard accepts ends the recovery.
+    //
+    // Scope: the enumeration has no scope of its own per run. A standing scope is the tracked scope, and a complete
+    // listing of it is the complete inventory of everything the profile tracks, which is what the sweep judged.
+    //
+    // A deferred reap keeps the latch (reapsDeferred): the bulk-disappearance guard held back deletions it could not
+    // corroborate, so this pass is no trusted inventory yet, and the corroboration is a SECOND complete FULL listing:
+    // an incremental pass would not report those paths missing again, and the candidates would be forgotten. A reap
+    // deferred for a hydration-cache edit (holdsUnsyncedEdit) does not keep it: that waits for a local upload, not for the
+    // remote's inventory, and holding the latch for it would relist the drive for as long as the upload is stuck.
+    private fun settleRecoveryLatch(
+        remoteChanges: Map<String, CloudItem>,
+        preGatherTrackedRows: Int,
+        reapsDeferred: Boolean,
+    ) {
+        val fullListing = db.getSyncState("last_gather_full") == "true"
+        val observedAlive = remoteChanges.values.count { !it.deleted }
+        val shrinkWarning = if (fullListing) RemoteGather.remoteShrinkWarningOrNull(observedAlive, preGatherTrackedRows) else null
+        if (shrinkWarning != null && db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY)?.equals("true", ignoreCase = true) == true) {
+            log.warn(
+                "enumerate: the full listing observed only {} live item(s) against {} tracked rows; keeping the recovery latch",
+                observedAlive,
+                preGatherTrackedRows,
+            )
+        }
+        gather.settleRecoveryLatch(scoped = false, shrinkWarning = shrinkWarning, reapsDeferred = reapsDeferred)
     }
 
     // The cache copy of the row that moved from [from] to [to]. A copy already at the destination is never replaced, a

@@ -123,6 +123,16 @@ class EnumerationStatusJsonTest {
         assertFalse("last_error_code" in uncoded.keys, "unknown means absent: $uncoded")
     }
 
+    // The items of the last full listing below a folder that is gone for good: a count, absent when there are none.
+    @Test
+    fun `unreachable_items is named when there are some and absent otherwise`() {
+        val some = wire(EnumerationStatus(state = EnumerationStatus.State.IDLE, first = false, attempt = 0, lastScanComplete = true, unreachableItems = 14_591))
+        val none = wire(EnumerationStatus(state = EnumerationStatus.State.IDLE, first = false, attempt = 0, lastScanComplete = true))
+
+        assertEquals(14_591, some.getValue("unreachable_items").jsonPrimitive.int)
+        assertFalse("unreachable_items" in none.keys, "none means absent: $none")
+    }
+
     // The step after the listing: its phase and its own counts, absent (never null) outside it.
     @Test
     fun `resolving paths names its phase and its counts`() {

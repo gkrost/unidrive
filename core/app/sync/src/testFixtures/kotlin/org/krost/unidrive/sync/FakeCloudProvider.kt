@@ -317,6 +317,10 @@ class FakeCloudProvider : CloudProvider {
     // tests can exercise the engine's partial-gather suppression path.
     var deltaComplete = true
 
+    // The remote ids delta() reports as unreachable (DeltaPage.unreachableIds): listed by the
+    // server, but with no place in the tree because a folder above them is gone for good.
+    var deltaUnreachableIds: Set<String> = emptySet()
+
     // #422: stands in for a provider whose delta() lists the whole tree on every call and
     // never sends tombstones (localfs).
     var deltaFullListing = false
@@ -374,6 +378,7 @@ class FakeCloudProvider : CloudProvider {
                 cursor = pageCursor,
                 hasMore = idx < deltaPages.size - 1,
                 complete = deltaComplete,
+                unreachableIds = deltaUnreachableIds,
             )
         }
         return DeltaPage(
@@ -381,6 +386,7 @@ class FakeCloudProvider : CloudProvider {
             cursor = deltaCursor,
             hasMore = false,
             complete = deltaComplete,
+            unreachableIds = deltaUnreachableIds,
         )
     }
 

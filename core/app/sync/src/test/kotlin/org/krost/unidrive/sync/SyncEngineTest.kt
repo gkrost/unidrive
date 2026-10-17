@@ -469,6 +469,83 @@ class SyncEngineTest {
         }
 
     @Test
+    fun `a sync-path run keeps the recovery latch even when its listing is complete`() =
+        runTest {
+            provider.deltaItems = listOf(cloudItem("/a", isFolder = true))
+            provider.deltaComplete = false
+            engine.syncOnce()
+            assertEquals("true", db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY))
+
+            // A listing of a part of the drive is no inventory of the drive: only an unscoped run may end the recovery.
+            provider.deltaComplete = true
+            engineForScope(syncPaths = listOf("/a"), standingScope = listOf("/a")).syncOnce()
+
+            assertEquals("true", db.getSyncState(RemoteGather.INCOMPLETE_ENUMERATION_KEY))
+        }
+
+    @Test
+    fun `an item the provider reports unreachable keeps its row and its file through a complete full sync`() =
+        runTest { unreachableItemSurvivesFullSync(engine, absentFileIsDeleted = true) }
+
+    @Test
+    fun `the streaming gather records the unreachable item and keeps its row and file as well`() =
+        runTest {
+            // The streaming pass plans no delete for a file that only the absence from a full listing shows (#929), so
+            // the vanished file stays here whether or not the item is unreachable; the rest is pinned as for the
+            // buffered pass.
+            unreachableItemSurvivesFullSync(
+                SyncEngine(
+                    provider = provider,
+                    db = db,
+                    syncRoot = syncRoot,
+                    conflictPolicy = ConflictPolicy.KEEP_BOTH,
+                    reporter = ProgressReporter.Silent,
+                    streamingReconciliation = true,
+                ),
+                absentFileIsDeleted = false,
+            )
+        }
+
+    private suspend fun unreachableItemSurvivesFullSync(
+        syncing: SyncEngine,
+        absentFileIsDeleted: Boolean,
+    ) {
+        provider.files["/gone/doc.txt"] = "precious".toByteArray()
+        provider.files["/other.txt"] = ByteArray(3)
+        provider.deltaItems =
+            listOf(
+                cloudItem("/gone", isFolder = true),
+                cloudItem("/gone/doc.txt", size = "precious".length.toLong()),
+                cloudItem("/other.txt", size = 3),
+            )
+        syncing.syncOnce()
+        assertTrue(Files.exists(syncRoot.resolve("gone/doc.txt")))
+        val rowBefore = db.getEntry("/gone/doc.txt")
+        val folderBefore = db.getEntry("/gone")
+
+        // The next full listing no longer places doc.txt: the folder above it is gone for good, so the provider names
+        // the item instead of listing it, and the pass is complete. other.txt really disappeared.
+        db.setSyncState("delta_cursor", "")
+        provider.deltaItems = emptyList()
+        provider.deltaUnreachableIds = setOf("id-/gone/doc.txt")
+        provider.deltaCursor = "cursor-2"
+        syncing.syncOnce()
+
+        assertEquals("true", db.getSyncState("pending_cursor_complete"), "the pass is complete")
+        assertEquals("cursor-2", db.getSyncState("delta_cursor"), "the cursor advanced")
+        assertEquals("precious", Files.readString(syncRoot.resolve("gone/doc.txt")), "the file is not deleted")
+        assertEquals(rowBefore, db.getEntry("/gone/doc.txt"), "its row is exactly as it was")
+        assertEquals(folderBefore, db.getEntry("/gone"), "and so is the folder row above it")
+        assertTrue(Files.isDirectory(syncRoot.resolve("gone")))
+        assertFalse("/gone/doc.txt" in provider.uploadedPaths, "it is not uploaded again as a new file")
+        assertTrue(provider.deletedPaths.isEmpty(), "and nothing is deleted on the remote either: ${provider.deletedPaths}")
+        if (absentFileIsDeleted) {
+            assertFalse(Files.exists(syncRoot.resolve("other.txt")), "an item that really disappeared is deleted as before")
+        }
+        assertEquals("1", db.getSyncState(RemoteGather.UNREACHABLE_ITEMS_KEY))
+    }
+
+    @Test
     fun `delta cursor advances even when some downloads fail`() =
         runTest {
             // Regression for the 2026-05-20 first-sync loop: when transferFailures > 0

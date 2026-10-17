@@ -30,6 +30,8 @@ internal fun EnumerationStatus.toJson(): JsonObject =
         etaKind?.let { put("eta_kind", it.wire) }
         lastSuccessAtMs?.let { put("last_success_at_ms", it) }
         lastScanComplete?.let { put("last_scan_complete", it) }
+        // Absent when none: the items of the last full listing below a folder that is gone for good.
+        unreachableItems?.let { put("unreachable_items", it) }
         lastError?.let { put("last_error", it) }
         // #878: a machine-readable cause (http_408, timeout, auth_rejected); absent when unknown.
         lastErrorCode?.let { put("last_error_code", it) }

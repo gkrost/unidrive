@@ -279,7 +279,7 @@ class InternxtAncestorRowsTest {
         }
 
     @Test
-    fun `a folder nothing can place is recorded and its items are dropped as before`() =
+    fun `a folder the server no longer has is recorded and its items are left out as unreachable`() =
         runTest {
             val drive =
                 FakeDrive(
@@ -292,7 +292,8 @@ class InternxtAncestorRowsTest {
             val page = internxtProviderOn(drive.engine).delta(null, null, FakeStaging().context())
 
             assertEquals(setOf("/Docs", "/Docs/readme.txt"), paths(page))
-            assertFalse(page.complete, "an item was left out, so no deletion may be inferred from the page")
+            assertTrue(page.complete, "the folder is gone for good (404): the pass has nothing it could still get")
+            assertEquals(setOf("f2"), page.unreachableIds, "the item is left out, and named, so that no deletion is inferred from its absence")
         }
 
     // ---- the staging stays readable -------------------------------------------------------------------------------------

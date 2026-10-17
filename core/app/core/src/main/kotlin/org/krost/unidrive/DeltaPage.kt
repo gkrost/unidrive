@@ -14,10 +14,20 @@ package org.krost.unidrive
  * the missing rows would synthesize spurious `DeleteLocal` actions.
  * Pagination semantics ([hasMore]) are unchanged. Providers that always
  * gather the complete scope leave the default `true`.
+ *
+ * [unreachableIds] are remote items the listing returned but could not place in
+ * the tree, because a folder above them is permanently gone (the server answers
+ * 404 or 410 for it). They are not deleted, they have no path this pass: the page
+ * is [complete] without them, and the absence sweep treats them as present, so a
+ * tracked row of theirs is neither reaped nor turned into a local delete. A folder
+ * that is unavailable for a transient reason (5xx, timeout, 429, unreadable
+ * answer) is not this: its items are left out and the page is not [complete].
+ * Providers that always place every item leave the default empty set.
  */
 data class DeltaPage(
     val items: List<CloudItem>,
     val cursor: String,
     val hasMore: Boolean,
     val complete: Boolean = true,
+    val unreachableIds: Set<String> = emptySet(),
 )
