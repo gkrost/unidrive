@@ -1946,15 +1946,15 @@ class StateDatabase(
     }
 
     /**
-     * Drops the checkpoint and the staged rows of [scanId]. The staged rows are the whole listing (372,000 rows on a
-     * large drive), and deleting them one by one inside one transaction held the monitor for 23 s while every
+     * Drops the staged rows of [scanId] and its checkpoint if that scan is still current. The staged rows are the
+     * whole listing (372,000 rows on a large drive), and deleting them one by one inside one transaction held the monitor for 23 s while every
      * reader of the database waited (a recording of the daemon named it). Not synchronized as a whole, so the
      * monitor is free between the steps:
      * - When the table holds only this scan's rows, which is the normal case, one DELETE without a WHERE clause
      *   empties it: SQLite frees the pages instead of removing the rows (64 ms against 2.3 s for 200,000 rows in a
      *   benchmark), together with the checkpoint in one transaction, as before.
-     * - Otherwise the checkpoint goes first, in a transaction of its own (a crash after it leaves staged rows that
-     *   no checkpoint points to, which is harmless; the reverse order would resume a scan from its marker without
+     * - Otherwise this scan's checkpoint goes first, if still current, in a transaction of its own (a crash after it
+     *   leaves staged rows that no checkpoint points to, which is harmless; the reverse order would resume a scan from its marker without
      *   the rows that marker stands for), and then the rows of this scan go in chunks of [SCAN_CLEAR_CHUNK_ROWS],
      *   one transaction each.
      */
@@ -1965,9 +1965,13 @@ class StateDatabase(
                 if (onlyThisScan) {
                     conn.createStatement().use { it.executeUpdate("DELETE FROM scan_staging") }
                 }
-                clearSyncState(SCAN_IN_PROGRESS_ID)
-                clearSyncState(SCAN_IN_PROGRESS_MARKER)
-                clearSyncState(SCAN_IN_PROGRESS_STARTED_AT)
+                // Another scan may have replaced this checkpoint while the caller was clearing an older one.
+                // Its staged rows and marker must remain a resumable pair.
+                if (getSyncState(SCAN_IN_PROGRESS_ID) == scanId) {
+                    clearSyncState(SCAN_IN_PROGRESS_ID)
+                    clearSyncState(SCAN_IN_PROGRESS_MARKER)
+                    clearSyncState(SCAN_IN_PROGRESS_STARTED_AT)
+                }
                 onlyThisScan
             }
         if (emptied) return

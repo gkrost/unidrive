@@ -94,10 +94,12 @@ class StateDatabaseScanClearTest {
         db.completeScan(scanId)
 
         assertEquals(listOf(false, false), heldInGap, "two chunk boundaries, and neither holds the monitor")
-        assertEquals(listOf<String?>(null, null), checkpointInGap, "the checkpoint is gone before the first row is, so a crash resumes nothing")
+        assertEquals(listOf<String?>(other, other), checkpointInGap, "clearing the older scan must not discard the next scan's checkpoint")
         assertEquals(listOf(chunk + 1, 1), rowsLeftInGap, "a chunk of rows per transaction")
         assertEquals(0, db.loadStagedItems(scanId).size)
         assertEquals(7, db.loadStagedItems(other).size, "the rows of the other scan stay")
+        assertEquals(other, db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_ID))
+        assertEquals("m-b", db.getSyncState(StateDatabase.SCAN_IN_PROGRESS_MARKER))
     }
 
     @Test
