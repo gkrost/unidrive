@@ -98,6 +98,14 @@ class SyncScopeTest {
     }
 
     @Test
+    fun `outOfScopeLocal matches decomposed local names under normalized roots`() {
+        val root = tree("A\u0308rzte/Bru\u0308cke/x.txt", "other/y.txt")
+        val roots = SyncScope.normalize(listOf("/A\u0308rzte/Bru\u0308cke"))
+
+        assertEquals(listOf("/other"), SyncScope.outOfScopeLocal(root, roots))
+    }
+
+    @Test
     fun `outOfScopeLocal is empty when unscoped or the root is missing`() {
         val root = tree("a/x.txt")
         assertEquals(emptyList(), SyncScope.outOfScopeLocal(root, emptyList()))

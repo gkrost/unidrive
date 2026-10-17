@@ -93,10 +93,11 @@ object SyncScope {
                     .sortedBy { it.fileName.toString() }
             for (child in children) {
                 val remote = (if (remoteDir == "/") "" else remoteDir) + "/" + child.fileName
+                val canonicalRemote = PathNormalizer.nfc(remote)
                 when {
                     isExcluded(remote) -> Unit
-                    contains(remote, roots) -> Unit
-                    remote in ancestors && java.nio.file.Files.isDirectory(child) -> walk(child, remote)
+                    contains(canonicalRemote, roots) -> Unit
+                    canonicalRemote in ancestors && java.nio.file.Files.isDirectory(child) -> walk(child, remote)
                     else -> found += remote
                 }
             }
