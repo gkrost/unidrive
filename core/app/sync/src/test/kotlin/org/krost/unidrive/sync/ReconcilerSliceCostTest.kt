@@ -247,4 +247,18 @@ class ReconcilerSliceCostTest {
         db.deleteEntry("/a.txt")
         assertEquals(1, reconciler.resolveSlice(page, emptyMap()).size, "and sees its removal")
     }
+
+    @Test
+    fun `a local NFD spelling does not hide the remote NFC row`() {
+        val nfc = "/\u00e9.txt"
+        val nfd = "/e\u0301.txt"
+        db.upsertEntry(row(nfc))
+        val page = mapOf(nfc to item(nfc))
+        val localChanges = mapOf(nfd to ChangeState.NEW)
+
+        val expected = legacy(RowCounter()).resolveSlice(page, localChanges)
+        val actual = counting(RowCounter()).resolveSlice(page, localChanges)
+
+        assertEquals(expected, actual, "the exact stored spelling must still pair with the remote page")
+    }
 }

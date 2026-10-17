@@ -479,9 +479,11 @@ class Reconciler(
                 .filter { path -> excludePatterns.none { pattern -> matchesGlob(path, pattern) } }
                 .filter { SyncScope.contains(it, syncPaths) }
 
-        // #316: the loop below looks up exactly allPaths, so read only those rows. A row counts only
-        // under its stored spelling, as the whole-table map did (the lookup also matches NFD to NFC).
-        val entryByPath = entryLookup(allPaths).filter { (path, entry) -> entry.path == path }
+        // #316: the loop below looks up exactly allPaths, so read only those rows. The batch lookup can
+        // return an NFC row under an NFD caller key when both spellings occur in this slice; key by the
+        // stored spelling, as the old whole-table map did, and keep only paths this slice asks about.
+        val requestedPaths = allPaths.toHashSet()
+        val entryByPath = entryLookup(allPaths).values.filter { it.path in requestedPaths }.associateBy { it.path }
 
         for (path in allPaths) {
             val remoteItem = pageRemoteLocal[path]
