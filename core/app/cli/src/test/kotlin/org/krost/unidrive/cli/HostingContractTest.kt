@@ -1,6 +1,5 @@
 package org.krost.unidrive.cli
 
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -8,7 +7,6 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
-import org.junit.experimental.categories.Category
 import org.krost.unidrive.CloudItem
 import org.krost.unidrive.CloudProvider
 import org.krost.unidrive.DeltaPage
@@ -22,10 +20,7 @@ import org.krost.unidrive.sync.IpcEndpoint
 import org.krost.unidrive.sync.IpcServer
 import org.krost.unidrive.sync.ProfileMode
 import org.krost.unidrive.sync.SyncConfig
-import org.krost.unidrive.testing.Flaky
-import org.krost.unidrive.testing.FlakyTests
 import java.nio.ByteBuffer
-import java.nio.channels.SocketChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -95,9 +90,6 @@ type = "$type"
     // ── a live mirror daemon refuses the mount verbs and reports its mode ────
 
     @Test
-    @Category(FlakyTests::class)
-    @Flaky(issue = 903, reason = "the daemon does not answer its first verb within 5 s on a loaded Windows runner",
-        firstFailure = "https://github.com/gkrost/unidrive/actions/runs/38371612970/job/115210349777")
     fun `a mirror daemon answers wrong_mode to the mount verbs and reports mirror in daemon status`() =
         runBlocking {
             val tempDir = Files.createTempDirectory("hosting-contract-mirror")
@@ -114,11 +106,7 @@ type = "$type"
                 )
             val daemonJob = launch { runtime.start() }
             try {
-                repeat(50) {
-                    if (Files.exists(socketPath)) return@repeat
-                    delay(50)
-                }
-                assertTrue(Files.exists(socketPath), "socket must be bound within 2.5s")
+                awaitDaemonSocket(socketPath, daemonJob)
 
                 for (verb in HydrationIpcHandler.VERBS + "sync.enumerate") {
                     val reply = exchange(tempDir, socketPath, "mirror_profile", """{"verb":"$verb"}""")
@@ -171,10 +159,7 @@ type = "$type"
                 )
             val daemonJob = launch { runtime.start() }
             try {
-                repeat(50) {
-                    if (Files.exists(socketPath)) return@repeat
-                    delay(50)
-                }
+                awaitDaemonSocket(socketPath, daemonJob)
                 val status = exchange(tempDir, socketPath, "mount_profile", """{"verb":"daemon.status"}""")
                 val statusObj = Json.parseToJsonElement(status) as JsonObject
                 assertEquals("mount", statusObj["mode"]!!.jsonPrimitive.content)
@@ -200,30 +185,10 @@ type = "$type"
         try {
             channel.configureBlocking(false)
             channel.write(ByteBuffer.wrap((request + "\n").toByteArray()))
-            return readFirstLine(channel, timeoutMs = 5_000)
+            return awaitIpcLine(channel, "reply to $request") { true }
         } finally {
             channel.close()
         }
-    }
-
-    private suspend fun readFirstLine(
-        channel: SocketChannel,
-        timeoutMs: Long,
-    ): String {
-        val buffer = ByteBuffer.allocate(64 * 1024)
-        val line = StringBuilder()
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            val n = channel.read(buffer)
-            if (n > 0) {
-                line.append(String(buffer.array(), 0, buffer.position()))
-                buffer.clear()
-                val idx = line.indexOf("\n")
-                if (idx >= 0) return line.substring(0, idx)
-            }
-            delay(10)
-        }
-        error("no reply within ${timeoutMs}ms; got: $line")
     }
 
     /** Minimal provider: authenticated, empty drive (the corpus test's stub). */
