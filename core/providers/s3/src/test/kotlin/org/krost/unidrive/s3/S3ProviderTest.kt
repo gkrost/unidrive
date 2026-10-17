@@ -295,10 +295,16 @@ class S3ProviderTest {
     @Test
     fun `a 503 is waited out for the Retry-After in either form`() =
         runTest {
-            for ((header, expectedMs) in listOf("2" to 2_000L..3_000L, httpDateAhead(6) to 4_500L..6_500L)) {
+            val cases: List<Pair<() -> String, LongRange>> = listOf(
+                { "2" } to 2_000L..3_000L,
+                // HTTP dates have second precision. Create this one just before the request, after the numeric case has run.
+                { httpDateAhead(6) } to 3_500L..6_500L,
+            )
+            for ((headerValue, expectedMs) in cases) {
                 val fake = FakeS3()
                 fake.put("a.txt", "x")
                 fake.failures += Triple({ r: FakeS3.Request -> r.method == HttpMethod.Head }, 503, "SlowDown")
+                val header = headerValue()
                 fake.failureRetryAfter = header
                 val started = testScheduler.currentTime
 
