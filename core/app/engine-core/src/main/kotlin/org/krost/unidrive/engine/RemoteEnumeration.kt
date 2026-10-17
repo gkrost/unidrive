@@ -163,39 +163,80 @@ class RemoteEnumeration(
         tracker.begin()
         try {
             val result = runEnumeration(reset)
-            if (result.ok) tracker.succeeded()
+            if (result.ok) {
+                settleStatus()
+                tracker.succeeded()
+            }
             return result
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            settleStatus()
             tracker.failed(e.message ?: e.javaClass.simpleName, authRejected = isCredentialRejection(e), code = errorCodeOf(e))
             throw e
         } finally {
+            // A cancelled attempt wrote some of the keys as well; this is the last point before the tracker leaves
+            // RUNNING for the state it had.
+            settleStatus()
             // A no-op once the attempt succeeded or failed; a cancelled one is neither.
             tracker.aborted()
         }
     }
 
+    // The sync_state values status() tells besides the tracker's snapshot (see settledStatus).
+    private class SettledStatus(
+        val first: Boolean,
+        val lastScanComplete: Boolean?,
+        val unreachableItems: Int?,
+        val droppedItems: Int?,
+        val lastFullScanMs: Long?,
+    )
+
+    // What the last attempt left in those keys, read when the attempt ended (settleStatus), before the tracker
+    // leaves RUNNING, so a status request that finds the tracker idle already finds these. Only a gather writes
+    // the keys: this class's attempts, and the mirror's sync pass (SyncEngine.syncOnce), which settles after it.
+    // A profile has one process (ProcessLock), so no other writer exists. A request that comes before any attempt
+    // has ended reads them once.
+    @Volatile
+    private var settledStatus: SettledStatus? = null
+
+    private fun readSettledStatus() =
+        SettledStatus(
+            first = db.getSyncState("delta_cursor").isNullOrEmpty(),
+            lastScanComplete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull(),
+            unreachableItems = db.getSyncState(RemoteGather.UNREACHABLE_ITEMS_KEY)?.toIntOrNull()?.takeIf { it > 0 },
+            droppedItems = db.getSyncState(RemoteGather.DROPPED_ITEMS_KEY)?.toIntOrNull()?.takeIf { it > 0 },
+            lastFullScanMs = db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
+        )
+
     /**
-     * What a client may be told about the enumeration right now. A running attempt is answered from
-     * memory alone: state.db is held by the batch that saves the result, and a status request must
-     * not wait for it. Otherwise the cursor decides whether the view is still incomplete, and the
-     * last completed scan, when this process has not run one, comes from state.db.
+     * Takes the values [status] tells from state.db, for a pass that wrote them outside [enumerate]. A database
+     * that cannot be read leaves the earlier values in place: status then tells what it knew.
+     */
+    fun settleStatus() {
+        runCatching { readSettledStatus() }.onSuccess { settledStatus = it }
+    }
+
+    /**
+     * What a client may be told about the enumeration right now. It is answered from memory: state.db is
+     * held by the batch that saves a result, by the pass over a large listing and by the readers of the
+     * upload snapshot, and a status request must not wait for any of them (a recording of the daemon showed
+     * 593 requests queued on the monitor, 141 s together). The cursor decides whether the view is still
+     * incomplete, and the last completed scan, when this process has not run one, comes from state.db: both
+     * as the last attempt left them ([settledStatus]).
      */
     fun status(): EnumerationStatus {
         val status = tracker.snapshot()
         if (status.state == EnumerationStatus.State.RUNNING) return status
-        return runCatching {
-            status.copy(
-                first = db.getSyncState("delta_cursor").isNullOrEmpty(),
-                lastScanComplete = db.getSyncState("pending_cursor_complete")?.toBooleanStrictOrNull(),
-                unreachableItems = db.getSyncState(RemoteGather.UNREACHABLE_ITEMS_KEY)?.toIntOrNull()?.takeIf { it > 0 },
-                droppedItems = db.getSyncState(RemoteGather.DROPPED_ITEMS_KEY)?.toIntOrNull()?.takeIf { it > 0 },
-                lastSuccessAtMs =
-                    status.lastSuccessAtMs
-                        ?: db.getSyncState("last_full_scan")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() },
-            )
-        }.getOrDefault(status)
+        val settled =
+            settledStatus ?: runCatching { readSettledStatus() }.getOrNull()?.also { settledStatus = it } ?: return status
+        return status.copy(
+            first = settled.first,
+            lastScanComplete = settled.lastScanComplete,
+            unreachableItems = settled.unreachableItems,
+            droppedItems = settled.droppedItems,
+            lastSuccessAtMs = status.lastSuccessAtMs ?: settled.lastFullScanMs,
+        )
     }
 
     // What the last complete full enumeration found, as the next full one's estimate.
@@ -241,6 +282,7 @@ class RemoteEnumeration(
             try {
                 gather.gather(progress = tracker).filterKeys { gather.isTracked(it) }
             } catch (e: ProviderException) {
+                settleStatus()
                 tracker.failed(e.message ?: e.javaClass.simpleName, authRejected = isCredentialRejection(e), code = errorCodeOf(e))
                 recordEnumerateFailureStreak()
                 return EnumerateResult(ok = false, error = e.message)
@@ -473,8 +515,11 @@ class RemoteEnumeration(
         const val BULK_REAP_FRACTION: Double = 0.20
 
         // #147: rows per merge transaction. Bounded so a concurrent mount read waits at
-        // most one chunk's commit rather than a whole-enumeration batch.
-        const val MERGE_CHUNK_ROWS: Int = 5_000
+        // most one chunk's commit rather than a whole-enumeration batch. A recording of the
+        // first scan of a 372,000-item drive put a chunk of 5,000 rows at about 3.7 s under the
+        // monitor (readers waited 3 to 6 s, 149 s in all); 1,000 rows hold it for about 0.75 s
+        // and cost one more commit per thousand rows.
+        const val MERGE_CHUNK_ROWS: Int = 1_000
 
         // sync_state keys: what the last complete full enumeration found (live items, live folders)
         // and how long its listing took, the estimate behind the next one's ETA. Not the

@@ -11,6 +11,7 @@ import java.nio.channels.Selector
 import java.nio.channels.SocketChannel
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 
 /**
@@ -36,6 +37,9 @@ internal class IpcReadSelector : AutoCloseable {
     private val waiting = ConcurrentHashMap<SocketChannel, CancellableContinuation<Unit>>()
     private val toArm = ConcurrentLinkedQueue<SocketChannel>()
 
+    // When a timed waiter is resumed without data (System.nanoTime). A waiter that was resumed or cancelled has no entry.
+    private val deadlines = ConcurrentHashMap<SocketChannel, Long>()
+
     @Volatile
     private var closed = false
 
@@ -46,14 +50,24 @@ internal class IpcReadSelector : AutoCloseable {
         }
 
     /**
-     * Returns when [channel] has data, reached end of stream, or was closed ([wake] / [close]); the
-     * caller reads to find out which. Cancellable. Throws [IOException] once this selector is closed.
+     * Returns when [channel] has data, reached end of stream, or was closed ([wake] / [close]), or, with
+     * [timeoutMs], when that long has passed; the caller reads to find out which. The timeout is the selector
+     * thread's own: it sleeps until the nearest deadline and resumes the waiter normally. A coroutine timeout
+     * (`withTimeoutOrNull`) cancels the waiter with an exception instead, and builds a stack trace for it each
+     * time: about 1.5 a second on a daemon with two idle connections, all day. Cancellable. Throws
+     * [IOException] once this selector is closed.
      */
-    suspend fun awaitReadable(channel: SocketChannel) {
+    suspend fun awaitReadable(
+        channel: SocketChannel,
+        timeoutMs: Long? = null,
+    ) {
         if (closed) throw IOException("the IPC read selector is closed")
         suspendCancellableCoroutine { cont ->
             waiting[channel] = cont
-            cont.invokeOnCancellation { waiting.remove(channel, cont) }
+            if (timeoutMs != null) deadlines[channel] = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+            cont.invokeOnCancellation {
+                if (waiting.remove(channel, cont)) deadlines.remove(channel)
+            }
             toArm.add(channel)
             selector.wakeup()
             // A close that slipped in between the checks above and the registration.
@@ -63,6 +77,7 @@ internal class IpcReadSelector : AutoCloseable {
 
     /** Resumes the reader waiting on [channel], if any; called after the channel was closed by another path. */
     fun wake(channel: SocketChannel) {
+        deadlines.remove(channel)
         waiting.remove(channel)?.resume(Unit)
     }
 
@@ -70,7 +85,10 @@ internal class IpcReadSelector : AutoCloseable {
         try {
             while (!closed) {
                 while (true) arm(toArm.poll() ?: break)
-                selector.select()
+                val sleepNs = deadlines.values.minOrNull()?.let { it - System.nanoTime() }
+                if (sleepNs == null) selector.select() else selector.select(maxOf(1L, TimeUnit.NANOSECONDS.toMillis(sleepNs + NANOS_PER_MS - 1)))
+                val now = System.nanoTime()
+                deadlines.entries.filter { now - it.value >= 0 }.forEach { wake(it.key) }
                 val keys = selector.selectedKeys().iterator()
                 while (keys.hasNext()) {
                     val key = keys.next()
@@ -103,6 +121,10 @@ internal class IpcReadSelector : AutoCloseable {
         } catch (_: CancelledKeyException) {
             wake(channel)
         }
+    }
+
+    private companion object {
+        const val NANOS_PER_MS = 1_000_000L
     }
 
     override fun close() {

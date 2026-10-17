@@ -347,7 +347,7 @@ means there is none.
 
 The reply also carries `poll_interval_ms` (additive, #463): the effective interval of the remote poll in ms, `0` when it is off. The poll's schedule after a failure is `enumeration.next_attempt_at_ms`.
 
-A running enumeration is answered from memory, never from state.db, so a status request does not wait for the batch that saves the result.
+The enumeration is answered from memory, never from state.db: a running attempt from its tracker, an idle one from the cursor and the listing figures (`first`, `last_scan_complete`, `unreachable_items`, `dropped_items`, `last_success_at_ms`) that the last attempt left, read when it ended. So a status request does not wait for the batch that saves a result, for a pass over a large listing or for any other reader of state.db. Only the first request of a process that has not run an attempt yet reads them from state.db, once.
 
 **The `uploads`, `cache` and `provider_health` objects** (additive, #658; the protocol version does not change). They are the engine's own account of "is everything uploaded?", which a front-end cannot work out from its own journal: the engine knows its start-up replays, its keep-local rows and its stuck uploads. A value the daemon does not have is `null`, or the whole object is absent, never `0` and never a "healthy" default.
 

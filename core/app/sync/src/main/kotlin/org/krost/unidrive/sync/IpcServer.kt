@@ -344,12 +344,7 @@ class IpcServer(
                                             break
                                         }
                                         // Sleep until the socket has data (#687); the timeout only re-runs the checks above.
-                                        val recheckMs = recheckDelayMs(connId, entry)
-                                        if (recheckMs == null) {
-                                            selector.awaitReadable(sc)
-                                        } else {
-                                            withTimeoutOrNull(recheckMs) { selector.awaitReadable(sc) }
-                                        }
+                                        selector.awaitReadable(sc, recheckDelayMs(connId, entry))
                                         continue
                                     }
                                     buf.flip()

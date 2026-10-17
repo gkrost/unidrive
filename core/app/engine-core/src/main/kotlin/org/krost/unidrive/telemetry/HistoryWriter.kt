@@ -114,7 +114,7 @@ internal class HistoryWriter(
             prune()
             var running = true
             while (running) {
-                val first = queue.poll(POLL_MS, TimeUnit.MILLISECONDS)
+                val first = queue.poll(idleWaitMs(pruneDueInNs), TimeUnit.MILLISECONDS)
                 if (first != null) {
                     batch.add(first)
                     queue.drainTo(batch, config.batchSize - 1)
@@ -202,11 +202,12 @@ internal class HistoryWriter(
     }
 
     private fun pruneIfDue() {
-        val due =
-            writtenSincePrune >= config.pruneEveryRows ||
-                System.nanoTime() - lastPruneAt >= TimeUnit.MILLISECONDS.toNanos(config.pruneIntervalMs)
+        val due = writtenSincePrune >= config.pruneEveryRows || pruneDueInNs <= 0
         if (due) prune()
     }
+
+    // The retention by rows is checked after every batch; the one by time is all an idle writer waits for.
+    private val pruneDueInNs: Long get() = TimeUnit.MILLISECONDS.toNanos(config.pruneIntervalMs) - (System.nanoTime() - lastPruneAt)
 
     @Suppress("TooGenericExceptionCaught")
     private fun prune() {
@@ -227,7 +228,6 @@ internal class HistoryWriter(
         private val log = LoggerFactory.getLogger(HistoryWriter::class.java)
         const val DEFAULT_WAIT_MS = 10_000L
         private const val JOIN_TIMEOUT_MS = 10_000L
-        private const val POLL_MS = 500L
         private val WARN_EVERY_NANOS = TimeUnit.MINUTES.toNanos(1)
     }
 }
