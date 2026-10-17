@@ -80,6 +80,26 @@ class EnumerationTrackerTest {
     }
 
     @Test
+    fun `an attempt that lists the drive again because of the recovery says so while it runs, and only then`() {
+        tracker.begin()
+        assertFalse(tracker.snapshot().recovery, "an attempt is no recovery unless the engine says so")
+
+        tracker.baseline(first = false, expected = null, recovery = true)
+        assertTrue(tracker.snapshot().recovery)
+
+        tracker.failed("boom")
+        assertFalse(tracker.snapshot().recovery, "a failed attempt runs no more")
+
+        tracker.begin()
+        assertFalse(tracker.snapshot().recovery, "the next attempt starts from nothing until it is told")
+        tracker.baseline(first = false, expected = null, recovery = true)
+        tracker.saving(10)
+        assertTrue(tracker.snapshot().recovery, "the recovery attempt is one until it ends, saving included")
+        tracker.succeeded()
+        assertFalse(tracker.snapshot().recovery)
+    }
+
+    @Test
     fun `the baseline tells whether this is the first enumeration`() {
         tracker.begin()
         tracker.baseline(first = false, expected = null)
