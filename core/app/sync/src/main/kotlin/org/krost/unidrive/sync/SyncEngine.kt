@@ -743,6 +743,20 @@ open class SyncEngine(
         // `--sync-path X --dry-run`: previewing a scope addition silently
         // committed it. Both writes are now gated on `!dryRun`. The refusal
         // / warning branches are pure reads and stay structured as before.
+        // #395: a per-run --sync-path outside the standing scope is tracked for this run only; the next
+        // run without the flag untracks those rows again (the local files stay). Intentional, so say it.
+        if (standingScope.isNotEmpty()) {
+            val standing = SyncScope.normalize(standingScope)
+            val outside = SyncScope.normalize(syncPaths).filter { !SyncScope.contains(it, standing) }
+            if (outside.isNotEmpty()) {
+                log.info(
+                    "Sync path {} lies outside the standing scope {}: tracked for this run only; " +
+                        "the next run without it stops tracking those rows (local files stay)",
+                    outside,
+                    standing,
+                )
+            }
+        }
         val priorScope = loadEffectiveScope()
         // #532: a refresh (skipTransfers) of a profile that has a persisted scope but no
         // runtime syncPaths continues WITHIN the persisted scope instead of being refused

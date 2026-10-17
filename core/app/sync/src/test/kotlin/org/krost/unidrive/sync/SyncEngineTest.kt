@@ -4958,4 +4958,35 @@ class SyncEngineTest {
                 "the counted message must stay when a row really was untracked: $messages",
             )
         }
+
+    // ---- #395: a per-run --sync-path outside the standing scope is announced ----------------
+
+    @Test
+    fun `a per-run sync path outside the standing scope is logged with both`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            val messages =
+                captureEngineLogs {
+                    preview {
+                        engineForScope(standingScope = listOf("/Docs"), syncPaths = listOf("/Other")).syncOnce(dryRun = true)
+                    }
+                }
+            assertTrue(
+                messages.any { it.contains("[/Other]") && it.contains("[/Docs]") && it.contains("outside the standing scope") },
+                "the drift must be logged naming the path and the standing scope: $messages",
+            )
+        }
+
+    @Test
+    fun `a per-run sync path inside the standing scope is not announced as drift`() =
+        runTest {
+            provider.deltaItems = emptyList()
+            val messages =
+                captureEngineLogs {
+                    preview {
+                        engineForScope(standingScope = listOf("/Docs"), syncPaths = listOf("/Docs/sub")).syncOnce(dryRun = true)
+                    }
+                }
+            assertTrue(messages.none { it.contains("outside the standing scope") }, "no drift expected: $messages")
+        }
 }
