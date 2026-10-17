@@ -42,6 +42,7 @@ import org.krost.unidrive.http.HttpRetryBudget
 import org.krost.unidrive.http.RequestId
 import org.krost.unidrive.http.RequestMetricsSink
 import org.krost.unidrive.http.RequestMetricsTap
+import org.krost.unidrive.http.parseRetryAfterHeader
 import org.krost.unidrive.http.readBoundedErrorBody
 import org.krost.unidrive.http.truncateErrorBody
 import java.nio.file.Files
@@ -263,14 +264,14 @@ class DropboxApi(
         body: String,
         attempt: Int,
     ): Long {
-        val header = response.headers["Retry-After"]?.trim()?.toLongOrNull()
+        val header = parseRetryAfterHeader(response.headers["Retry-After"])
         val inBody =
             runCatching {
                 json.parseToJsonElement(body).jsonObject["error"]?.jsonObject?.get("retry_after")?.jsonPrimitive?.intOrNull?.toLong()
             }.getOrNull()
-        val seconds = header ?: inBody
-        return if (seconds != null) {
-            (seconds * 1000L).coerceIn(MIN_WAIT_MS, MAX_WAIT_MS)
+        val hintMs = header ?: inBody?.let { it * 1000L }
+        return if (hintMs != null) {
+            hintMs.coerceIn(MIN_WAIT_MS, MAX_WAIT_MS)
         } else {
             (MIN_WAIT_MS shl attempt.coerceAtMost(6)).coerceAtMost(MAX_WAIT_MS)
         }

@@ -31,6 +31,7 @@ import org.krost.unidrive.http.RequestId
 import org.krost.unidrive.http.RequestMetricsSink
 import org.krost.unidrive.http.RequestMetricsTap
 import org.krost.unidrive.http.UploadTimeoutPolicy
+import org.krost.unidrive.http.parseRetryAfterHeader
 import org.krost.unidrive.http.readBoundedErrorBody
 import org.krost.unidrive.http.streamingFileBody
 import org.krost.unidrive.http.truncateErrorBody
@@ -434,9 +435,9 @@ class S3Api(
         response: HttpResponse,
         attempt: Int,
     ): Long {
-        val retryAfter = response.headers["Retry-After"]?.trim()?.toLongOrNull()
-        return if (retryAfter != null) {
-            (retryAfter * 1000).coerceIn(MIN_WAIT_MS, MAX_WAIT_MS)
+        val retryAfterMs = parseRetryAfterHeader(response.headers["Retry-After"])
+        return if (retryAfterMs != null) {
+            retryAfterMs.coerceIn(MIN_WAIT_MS, MAX_WAIT_MS)
         } else {
             (MIN_WAIT_MS shl attempt).coerceAtMost(MAX_WAIT_MS)
         }

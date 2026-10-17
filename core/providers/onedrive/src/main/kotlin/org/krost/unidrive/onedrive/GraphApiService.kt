@@ -21,6 +21,7 @@ import org.krost.unidrive.http.RequestMetricsSink
 import org.krost.unidrive.http.RequestMetricsTap
 import org.krost.unidrive.http.UploadTimeoutPolicy
 import org.krost.unidrive.http.assertNotHtml
+import org.krost.unidrive.http.parseRetryAfterHeader
 import org.krost.unidrive.http.readBoundedErrorBody
 import org.krost.unidrive.http.truncateErrorBody
 import org.krost.unidrive.onedrive.model.*
@@ -422,7 +423,7 @@ class GraphApiService(
         attempts: Int,
         totalWaitMs: Long,
     ): Long {
-        val retryAfterHeader = response.headers["Retry-After"]?.toLongOrNull()?.let { it * 1000 }
+        val retryAfterHeader = parseRetryAfterHeader(response.headers["Retry-After"])
         val retryAfterBody = parseRetryAfterFromJsonBody(body)?.let { it * 1000 }
         val hintedMs = retryAfterHeader ?: retryAfterBody
         val backoffMs = hintedMs ?: (DEFAULT_BACKOFF_START_MS * (1L shl attempts))
@@ -942,7 +943,7 @@ class GraphApiService(
 
             // Rate limit — retry with backoff
             if (response.status.value == 429) {
-                val retryAfter = response.headers["Retry-After"]?.toLongOrNull()?.times(1000) ?: delayMs
+                val retryAfter = parseRetryAfterHeader(response.headers["Retry-After"]) ?: delayMs
                 throttleBudget.recordThrottle(minOf(retryAfter, MAX_SINGLE_BACKOFF_MS)) // same cap the reads apply to a hint
                 if (attempt == retryDelays.lastIndex) {
                     throw GraphApiException(
@@ -1144,10 +1145,9 @@ class GraphApiService(
         attempts: Int,
         totalWaitMs: Long,
     ): Long {
-        // Prefer the server's Retry-After if present. Graph sends integer seconds.
-        val retryAfterHeader = response.headers["Retry-After"]
+        // Prefer the server's Retry-After if present (delta-seconds or an HTTP date).
         val retryAfterMs =
-            retryAfterHeader?.toLongOrNull()?.let { it * 1000 }
+            parseRetryAfterHeader(response.headers["Retry-After"])
                 ?: (DEFAULT_BACKOFF_START_MS * (1L shl attempts)) // 2s, 4s, 8s, 16s
         // Cap per-call and per-sequence budgets — never block a request longer than the
         // remaining throttle budget, and never honour a per-call hint above the single-call cap.

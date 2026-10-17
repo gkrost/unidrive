@@ -28,6 +28,7 @@ import org.krost.unidrive.http.UploadWatchdogException
 import org.krost.unidrive.http.UploadWatchdogLimits
 import org.krost.unidrive.http.assertNotHtml
 import org.krost.unidrive.http.currentPriority
+import org.krost.unidrive.http.parseRetryAfterHeader
 import org.krost.unidrive.http.progressTrackingBody
 import org.krost.unidrive.http.progressTrackingFileBody
 import org.krost.unidrive.http.truncateErrorBody
@@ -1526,35 +1527,6 @@ class InternxtApiService(
         if (message == null) return null
         val match = RETRY_AFTER_REGEX.find(message) ?: return null
         return match.groupValues[1].toLongOrNull()?.times(1000)
-    }
-
-    // Parse the RFC 7231 §7.1.3 `Retry-After` HTTP header. Accepts either
-    // a non-negative decimal integer of delta-seconds or an HTTP-date
-    // (IMF-fixdate / RFC 1123 form — the only one current servers emit;
-    // the obsolete RFC 850 + asctime forms aren't observed in practice
-    // and Internxt's gateway never returns them). Returns the wait in
-    // milliseconds relative to "now", or null if the header is absent,
-    // malformed, or the date is in the past.
-    internal fun parseRetryAfterHeader(headerValue: String?): Long? {
-        val raw = headerValue?.trim()?.takeUnless { it.isEmpty() } ?: return null
-        // Delta-seconds path: a bare integer.
-        raw.toLongOrNull()?.let { seconds ->
-            if (seconds < 0) return null
-            return seconds * 1000
-        }
-        // HTTP-date path: parse as RFC 1123 and diff against now. Negative
-        // diffs (date already in the past) return null so the caller falls
-        // through to the next precedence step.
-        return try {
-            val target =
-                java.time.ZonedDateTime
-                    .parse(raw, java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
-                    .toInstant()
-            val deltaMs = target.toEpochMilli() - System.currentTimeMillis()
-            deltaMs.takeIf { it > 0 }
-        } catch (_: java.time.format.DateTimeParseException) {
-            null
-        }
     }
 
 
