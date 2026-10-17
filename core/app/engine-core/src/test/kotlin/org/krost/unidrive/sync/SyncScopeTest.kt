@@ -47,6 +47,16 @@ class SyncScopeTest {
     }
 
     @Test
+    fun `a root typed with decomposed characters equals its composed form and matches composed paths`() {
+        val nfd = "/A\u0308rzte/Bru\u0308cke"
+        val nfc = "/\u00C4rzte/Br\u00FCcke"
+        assertEquals(nfc, SyncScope.normalizePath(nfd))
+        assertEquals(listOf(nfc), SyncScope.normalize(listOf(nfd, nfc)))
+        assertTrue(SyncScope.contains("$nfc/file.txt", SyncScope.normalize(listOf(nfd))))
+        assertEquals(listOf(nfc), SyncScope.fromConfig(listOf(nfd), "p"))
+    }
+
+    @Test
     fun `normalize drops empty entries duplicates and nested roots`() {
         assertEquals(
             listOf("/a", "/b"),

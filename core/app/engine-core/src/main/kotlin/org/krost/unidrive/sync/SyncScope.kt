@@ -8,8 +8,10 @@ package org.krost.unidrive.sync
 object SyncScope {
     /**
      * Do-what-I-mean path cleanup: backslashes become slashes, separator runs
-     * collapse, a leading slash is added and a trailing one dropped. Returns
-     * null for null, empty, and the drive root.
+     * collapse, a leading slash is added and a trailing one dropped, and the
+     * text is put in NFC, the form the engine keys every path on (an NFD-typed
+     * `ä` would otherwise never match). Returns null for null, empty, and the
+     * drive root.
      */
     fun normalizePath(raw: String?): String? {
         if (raw.isNullOrEmpty()) return null
@@ -17,7 +19,7 @@ object SyncScope {
         s = s.replace(Regex("/+"), "/")
         if (!s.startsWith("/")) s = "/$s"
         if (s.length > 1 && s.endsWith("/")) s = s.removeSuffix("/")
-        return if (s == "/") null else s
+        return if (s == "/") null else PathNormalizer.nfc(s)
     }
 
     /**
