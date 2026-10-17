@@ -8,3 +8,5 @@
 {"ok":false,"error":"busy"}
 {"verb":"hydration.rmdir","path":"/docs/.."}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.rmdir","path":"/Papierkorb/Old"}
+{"ok":false,"error":"read_only"}

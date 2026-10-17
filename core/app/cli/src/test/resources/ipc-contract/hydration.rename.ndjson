@@ -18,3 +18,7 @@
 {"ok":false,"error":"invalid_path"}
 {"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/docs/../renamed.txt"}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.rename","old_path":"/Papierkorb/Old/a.txt","new_path":"/docs/renamed.txt"}
+{"ok":false,"error":"read_only"}
+{"verb":"hydration.rename","old_path":"/docs/report.txt","new_path":"/Papierkorb/report.txt"}
+{"ok":false,"error":"read_only"}

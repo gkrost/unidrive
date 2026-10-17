@@ -4,3 +4,7 @@
 {"ok":true,"entries":[]}
 {"verb":"hydration.list","prefix":"/docs/.."}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.list","prefix":"/"}
+{"ok":true,"entries":[{"path":"/Live.txt","size":3,"mtime_ms":1234567890123,"hydrated":false,"folder":false,"remote_modified_ms":1234567890000,"remote_id":"rid-live","etag":"etag-live","pending_upload":false,"error":false},{"path":"/Papierkorb","size":0,"mtime_ms":1234567890123,"hydrated":false,"folder":true,"remote_modified_ms":1234567890000,"remote_id":"unidrive:trash","etag":null,"pending_upload":false,"error":false,"read_only":true,"trash_root":true}]}
+{"verb":"hydration.list","prefix":"/Papierkorb"}
+{"ok":true,"entries":[{"path":"/Papierkorb/Old","size":0,"mtime_ms":1234567890123,"hydrated":false,"folder":true,"remote_modified_ms":1234567890000,"remote_id":"rid-old","etag":null,"pending_upload":false,"error":false,"read_only":true},{"path":"/Papierkorb/note.txt","size":9,"mtime_ms":1234567890123,"hydrated":false,"folder":false,"remote_modified_ms":1234567890000,"remote_id":"rid-note","etag":"etag-note","pending_upload":false,"error":false,"read_only":true}]}

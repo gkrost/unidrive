@@ -8,3 +8,5 @@
 {"ok":false,"error":"invalid_path"}
 {"verb":"hydration.unlink","path":"/docs//report.txt"}
 {"ok":false,"error":"invalid_path"}
+{"verb":"hydration.unlink","path":"/Papierkorb/Old/a.txt"}
+{"ok":false,"error":"read_only"}
