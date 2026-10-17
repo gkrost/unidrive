@@ -463,8 +463,9 @@ class InternxtProvider(
                         try {
                             InternxtCrypto.hexToBytes(bridgeInfo.index)
                         } catch (e: IllegalArgumentException) {
-                            throw PermanentDownloadFailureException(
+                            throw UnsupportedRemoteObjectDownloadException(
                                 "Internxt bridge info for $remotePath carries a malformed encryption index: ${e.message}",
+                                reason = "its encryption index is malformed",
                                 cause = e,
                             )
                         }
@@ -482,8 +483,9 @@ class InternxtProvider(
                     // keeps working exactly as before; zero usable shards keeps today's error.
                     val usableShards = bridgeInfo.shards.filter { it.url.isNotBlank() }
                     if (usableShards.size > 1) {
-                        throw PermanentDownloadFailureException(
+                        throw UnsupportedRemoteObjectDownloadException(
                             "multi-shard Internxt files are not supported (${usableShards.size} shards): $remotePath",
+                            reason = "it is stored in several parts, which this client cannot read",
                         )
                     }
                     val downloadUrl =
@@ -494,7 +496,7 @@ class InternxtProvider(
                     // client cannot check is read without the ciphertext check and says so (see below).
                     val checkable = shardHashCheck(fileId, remotePath, usableShards.first().hash)
                     val cipher = crypto.createContentDecryptCipher(fileKey, iv)
-                    try {
+                    refusalLogged(fileId, remotePath, checkable) {
                         api.downloadFileStreaming(
                             downloadUrl,
                             cipher,
@@ -503,10 +505,6 @@ class InternxtProvider(
                             expectedShardHash = checkable,
                             targetMtimeMillis = targetMtimeMillis,
                         )
-                    } catch (e: RemoteContentRefusedDownloadException) {
-                        // The mount logs nothing for a content refusal: record the shape the check ran with.
-                        checkable?.let { logShardHashRefusal(fileId, remotePath, it) }
-                        throw e
                     }
                 }
             } catch (e: RemoteIncompleteDownloadException) {
@@ -583,6 +581,20 @@ class InternxtProvider(
             log.debug(message, remotePath, recorded.description)
         }
     }
+
+    // The mount logs nothing for a content refusal: record the shape the check ran with, then rethrow.
+    private suspend fun <T> refusalLogged(
+        fileId: String,
+        remotePath: String,
+        checked: ShardHashExpectation.Checkable?,
+        download: suspend () -> T,
+    ): T =
+        try {
+            download()
+        } catch (e: RemoteContentRefusedDownloadException) {
+            checked?.let { logShardHashRefusal(fileId, remotePath, it) }
+            throw e
+        }
 
     private fun logShardHashRefusal(
         fileId: String,

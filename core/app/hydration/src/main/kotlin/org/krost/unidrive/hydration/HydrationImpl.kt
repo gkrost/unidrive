@@ -24,8 +24,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.krost.unidrive.FolderNotEmptyException
 import org.krost.unidrive.PermanentDownloadFailureException
+import org.krost.unidrive.RemoteContentRefusedDownloadException
 import org.krost.unidrive.RemoteIncompleteDownloadException
 import org.krost.unidrive.RemoteObjectMissingDownloadException
+import org.krost.unidrive.UnsupportedRemoteObjectDownloadException
 import org.krost.unidrive.engine.CachePaths
 import org.krost.unidrive.engine.MountHost
 import org.krost.unidrive.sync.PathNormalizer
@@ -2363,13 +2365,17 @@ class HydrationImpl(
 
     // One classification for a failed download, shared by the open_read path and the hydrate verb:
     // a refusal for a pause (#778) carries the paused token, a stored object shorter than the size the
-    // drive reports (#536) carries its own token with the numbers, a genuinely-gone read the not_found
-    // token, everything else stays Generic (→ EIO).
+    // drive reports (#536) carries its own token with the numbers, a download whose content failed its
+    // integrity check (#940) content_refused and an object this client cannot read as stored
+    // unsupported_object (#941), both with a short reason that names no file; a genuinely-gone read the
+    // not_found token, everything else stays Generic (→ EIO).
     private fun downloadFailureOf(e: Exception, fallback: String): HydrationError = when {
         // #778: the daemon is paused (or paused while this download ran): not a failure of the download.
         e is TransferPausedException -> HydrationError.Paused
         e is RemoteIncompleteDownloadException -> HydrationError.RemoteIncomplete(e.storedBytes, e.declaredBytes)
         e is RemoteObjectMissingDownloadException -> HydrationError.RemoteObjectMissing
+        e is RemoteContentRefusedDownloadException -> HydrationError.ContentRefused(e.reason)
+        e is UnsupportedRemoteObjectDownloadException -> HydrationError.UnsupportedObject(e.reason)
         isNotFound(e) -> HydrationError.NotFound
         else -> HydrationError.Generic(e.message ?: fallback)
     }
@@ -2377,8 +2383,8 @@ class HydrationImpl(
     // Classify a download failure as genuinely-not-found versus any other error.
     // Two provider-agnostic signals, since this module cannot reference a concrete
     // provider's exception type:
-    //  - PermanentDownloadFailureException — the typed "remote object is gone
-    //    (stable 404)" signal (Internxt raises it directly).
+    //  - PermanentDownloadFailureException itself — the typed "remote object is gone
+    //    (stable 404)" signal (Internxt raises it directly). A subtype is another cause (#941).
     //  - An exception carrying an Int `statusCode` == 404 — covers OneDrive's
     //    GraphApiException, read reflectively to avoid a provider classpath dep.
     private fun isNotFound(e: Throwable): Boolean {
@@ -2386,6 +2392,9 @@ class HydrationImpl(
         // one — but it is not a gone file: it keeps its own remote_incomplete token.
         if (e is RemoteIncompleteDownloadException) return false
         if (e is RemoteObjectMissingDownloadException) return false
+        // #941: a refused content and an unreadable object exist in the cloud: not a gone file either.
+        if (e is RemoteContentRefusedDownloadException) return false
+        if (e is UnsupportedRemoteObjectDownloadException) return false
         if (e is PermanentDownloadFailureException) return true
         return statusCodeOf(e) == 404 || (e.cause?.let { statusCodeOf(it) } == 404)
     }

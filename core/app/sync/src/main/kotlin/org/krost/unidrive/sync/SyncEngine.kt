@@ -14,6 +14,7 @@ import org.krost.unidrive.DownloadReceipt
 import org.krost.unidrive.PermanentDownloadFailureException
 import org.krost.unidrive.PermanentUploadFailureException
 import org.krost.unidrive.ProviderException
+import org.krost.unidrive.UnsupportedRemoteObjectDownloadException
 import org.krost.unidrive.http.Priority
 import org.krost.unidrive.engine.AuditSink
 import org.krost.unidrive.engine.EnumerationEntryPoint
@@ -2608,8 +2609,9 @@ open class SyncEngine(
         // quarantined (handlePermanentDownloadFailure) instead of re-attempted
         // every poll cycle.
         localNameIssue(action.path)?.let { issue ->
-            throw PermanentDownloadFailureException(
+            throw UnsupportedRemoteObjectDownloadException(
                 "cannot represent '${action.path}' on the local filesystem: $issue",
+                reason = "its name cannot exist in the local file system",
             )
         }
         val localPath = placeholder.resolveLocal(action.path)

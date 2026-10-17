@@ -12,7 +12,9 @@ sealed interface HydrationError {
 
     /**
      * The remote object is genuinely gone (provider download still
-     * not-found after the re-resolve). Its [message] is the STABLE wire
+     * not-found after the re-resolve); since #941 only that: a stored object that
+     * cannot be served for another reason has its own token ([RemoteIncomplete],
+     * [RemoteObjectMissing], [ContentRefused], [UnsupportedObject]). Its [message] is the STABLE wire
      * token `not_found`, matched verbatim by the mount crate's
      * `ipc_error_to_errno` to return ENOENT instead of the catch-all EIO.
      * Changing this string breaks that cross-repo contract.
@@ -111,6 +113,31 @@ sealed interface HydrationError {
         override val message: String = "$REMOTE_INCOMPLETE_TOKEN: got $storedBytes of $declaredBytes bytes"
     }
 
+    /**
+     * The object exists in the cloud and was downloaded, but its content failed the integrity check the network
+     * recorded for it (#940), so the bytes were discarded instead of served as the file. Not a gone file (#941): its
+     * own wire form is the STABLE token `content_refused`, then a short reason without any file name:
+     * `content_refused: <reason>`. A client matches the prefix up to ": " and says "the cloud copy failed its integrity
+     * check"; a retry reads the same bytes. A mount crate falls to the EIO catch-all (correct: the read failed).
+     */
+    data class ContentRefused(
+        val reason: String,
+    ) : HydrationError {
+        override val message: String = "$CONTENT_REFUSED_TOKEN: ${reason.ifBlank { "integrity check failed" }}"
+    }
+
+    /**
+     * The object exists in the cloud, but this client cannot read it as stored (#941): spread over several shards,
+     * an encryption index that is not hex, a name the local file system cannot hold. Not a gone file: its own wire
+     * form is the STABLE token `unsupported_object`, then a short reason without any file name:
+     * `unsupported_object: <reason>`. A client matches the prefix up to ": ". A mount crate falls to the EIO catch-all.
+     */
+    data class UnsupportedObject(
+        val reason: String,
+    ) : HydrationError {
+        override val message: String = "$UNSUPPORTED_OBJECT_TOKEN: ${reason.ifBlank { "this client cannot read it" }}"
+    }
+
     /** The drive lists this item but its stored cloud object is missing. */
     data object RemoteObjectMissing : HydrationError {
         override val message: String = "$REMOTE_OBJECT_MISSING_TOKEN: drive item exists, but its stored cloud object is missing"
@@ -186,6 +213,12 @@ sealed interface HydrationError {
 
         /** Wire token prefix for [RemoteIncomplete]; the numbers follow after ": got ". */
         const val REMOTE_INCOMPLETE_TOKEN = "remote_incomplete"
+
+        /** Wire token prefix for [ContentRefused]; the short reason follows after ": ". */
+        const val CONTENT_REFUSED_TOKEN = "content_refused"
+
+        /** Wire token prefix for [UnsupportedObject]; the short reason follows after ": ". */
+        const val UNSUPPORTED_OBJECT_TOKEN = "unsupported_object"
 
         /** Wire token for a listed drive item whose stored object is absent. */
         const val REMOTE_OBJECT_MISSING_TOKEN = "remote_object_missing"

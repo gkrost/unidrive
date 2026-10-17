@@ -687,10 +687,21 @@ class IpcContractCorpusTest {
      * `/cache/unidrive/hydration` → invalid_path.
      */
     private class ScriptedHydration : Hydration {
+        // The four causes of a failed cloud download (#941), one token each; the reasons are the daemon's own wording.
+        private fun downloadFailureFor(path: String): HydrationError? = when {
+            path.startsWith("/gone") -> HydrationError.NotFound
+            path.startsWith("/refused") -> HydrationError.ContentRefused("RIPEMD-160(SHA-256) mismatch")
+            path.startsWith("/unsupported") ->
+                HydrationError.UnsupportedObject("it is stored in several parts, which this client cannot read")
+            path.startsWith("/truncated") -> HydrationError.RemoteIncomplete(storedBytes = 298_844_160L, declaredBytes = 360_951_317L)
+            else -> null
+        }
+
         override suspend fun openForRead(connectionId: String, handleId: String, path: String): OpenResult = when {
             path.startsWith("/missing") -> OpenResult.Failed(HydrationError.UnknownPath)
             // A cloud download while the daemon is paused: refused at once (#778).
             path.startsWith("/paused") -> OpenResult.Failed(HydrationError.Paused)
+            downloadFailureFor(path) != null -> OpenResult.Failed(downloadFailureFor(path)!!)
             else -> OpenResult.Ok(cachePathFor(path))
         }
 
@@ -714,6 +725,7 @@ class IpcContractCorpusTest {
         override suspend fun hydrate(path: String): HydrateResult = when {
             path.startsWith("/missing") -> HydrateResult.Failed(HydrationError.UnknownPath)
             path.startsWith("/paused") -> HydrateResult.Failed(HydrationError.Paused)
+            downloadFailureFor(path) != null -> HydrateResult.Failed(downloadFailureFor(path)!!)
             else -> HydrateResult.Ok
         }
 

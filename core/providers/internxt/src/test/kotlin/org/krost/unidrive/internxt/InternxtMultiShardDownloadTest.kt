@@ -13,6 +13,8 @@ import io.ktor.http.headersOf
 import java.nio.file.Files
 import java.nio.file.Path
 import org.krost.unidrive.PermanentDownloadFailureException
+import org.krost.unidrive.RemoteContentRefusedDownloadException
+import org.krost.unidrive.UnsupportedRemoteObjectDownloadException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -114,17 +116,22 @@ class InternxtMultiShardDownloadTest {
         bridgeInfoJson = bridgeInfoJsonWith(listOf(shardUrl1, shardUrl2))
         val provider = newProvider()
 
+        // #941: an unsupported object is its own type (it reaches the client as `unsupported_object`, not `not_found`),
+        // still a PermanentDownloadFailureException so the engine quarantines it as before.
         val e =
-            assertFailsWith<PermanentDownloadFailureException> {
+            assertFailsWith<UnsupportedRemoteObjectDownloadException> {
                 kotlinx.coroutines.test.runTest {
                     provider.downloadById(fileUuid, "/multi.bin", destination)
                 }
             }
 
+        assertTrue(PermanentDownloadFailureException::class.java.isAssignableFrom(e.javaClass))
         assertTrue(
             "multi-shard Internxt files are not supported (2 shards)" in (e.message ?: ""),
             "message must name the multi-shard limit; got: ${e.message}",
         )
+        assertEquals("it is stored in several parts, which this client cannot read", e.reason)
+        assertTrue("multi.bin" !in e.reason, "the short reason names no file")
         assertTrue(
             requestLog.none { it.contains("shard-host.invalid") },
             "no download request may be made; requests: $requestLog",
@@ -138,13 +145,14 @@ class InternxtMultiShardDownloadTest {
         val provider = newProvider()
 
         val e =
-            assertFailsWith<PermanentDownloadFailureException> {
+            assertFailsWith<UnsupportedRemoteObjectDownloadException> {
                 kotlinx.coroutines.test.runTest {
                     provider.downloadById(fileUuid, "/badindex.bin", destination)
                 }
             }
 
         assertTrue("malformed encryption index" in (e.message ?: ""), "got: ${e.message}")
+        assertEquals("its encryption index is malformed", e.reason)
         assertTrue(requestLog.none { it.contains("shard-host.invalid") }, "no download request may be made: $requestLog")
     }
 
@@ -172,7 +180,7 @@ class InternxtMultiShardDownloadTest {
         val provider = newProvider()
 
         val e =
-            assertFailsWith<PermanentDownloadFailureException> {
+            assertFailsWith<RemoteContentRefusedDownloadException> {
                 kotlinx.coroutines.test.runTest {
                     provider.downloadById(fileUuid, "/tampered.bin", destination)
                 }
@@ -196,7 +204,7 @@ class InternxtMultiShardDownloadTest {
         val provider = newProvider()
 
         val e =
-            assertFailsWith<PermanentDownloadFailureException> {
+            assertFailsWith<UnsupportedRemoteObjectDownloadException> {
                 kotlinx.coroutines.test.runTest {
                     provider.downloadById(fileUuid, "/mixed.bin", destination)
                 }
