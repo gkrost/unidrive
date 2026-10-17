@@ -485,11 +485,14 @@ class SyncEngineTest {
 
     @Test
     fun `an item the provider reports unreachable keeps its row and its file through a complete full sync`() =
-        runTest { unreachableItemSurvivesFullSync(engine) }
+        runTest { unreachableItemSurvivesFullSync(engine, absentFileIsDeleted = true) }
 
     @Test
-    fun `the streaming gather keeps the row and the file of an unreachable item as well`() =
+    fun `the streaming gather records the unreachable item and keeps its row and file as well`() =
         runTest {
+            // The streaming pass plans no delete for a file that only the absence from a full listing shows (#929), so
+            // the vanished file stays here whether or not the item is unreachable; the rest is pinned as for the
+            // buffered pass.
             unreachableItemSurvivesFullSync(
                 SyncEngine(
                     provider = provider,
@@ -499,10 +502,14 @@ class SyncEngineTest {
                     reporter = ProgressReporter.Silent,
                     streamingReconciliation = true,
                 ),
+                absentFileIsDeleted = false,
             )
         }
 
-    private suspend fun unreachableItemSurvivesFullSync(syncing: SyncEngine) {
+    private suspend fun unreachableItemSurvivesFullSync(
+        syncing: SyncEngine,
+        absentFileIsDeleted: Boolean,
+    ) {
         provider.files["/gone/doc.txt"] = "precious".toByteArray()
         provider.files["/other.txt"] = ByteArray(3)
         provider.deltaItems =
@@ -532,7 +539,9 @@ class SyncEngineTest {
         assertTrue(Files.isDirectory(syncRoot.resolve("gone")))
         assertFalse("/gone/doc.txt" in provider.uploadedPaths, "it is not uploaded again as a new file")
         assertTrue(provider.deletedPaths.isEmpty(), "and nothing is deleted on the remote either: ${provider.deletedPaths}")
-        assertFalse(Files.exists(syncRoot.resolve("other.txt")), "an item that really disappeared is deleted as before")
+        if (absentFileIsDeleted) {
+            assertFalse(Files.exists(syncRoot.resolve("other.txt")), "an item that really disappeared is deleted as before")
+        }
         assertEquals("1", db.getSyncState(RemoteGather.UNREACHABLE_ITEMS_KEY))
     }
 
