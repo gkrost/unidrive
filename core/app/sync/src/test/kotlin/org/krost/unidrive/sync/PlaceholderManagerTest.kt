@@ -1,9 +1,14 @@
 package org.krost.unidrive.sync
 
+import com.sun.nio.file.ExtendedOpenOption
 import org.krost.unidrive.engine.localNameIssue
 import org.junit.Assume.assumeFalse
+import org.junit.Assume.assumeTrue
+import java.nio.channels.FileChannel
+import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.time.Instant
 import kotlin.test.*
 
@@ -119,6 +124,27 @@ class PlaceholderManagerTest {
         Files.writeString(file, "bye")
         mgr.deleteLocal("/delete-me.txt")
         assertFalse(Files.exists(file))
+    }
+
+    @Test
+    fun `deleteLocal waits for a short exclusive Windows file lock`() {
+        assumeTrue(System.getProperty("os.name").lowercase().contains("windows"))
+        val file = syncRoot.resolve("held.txt")
+        Files.writeString(file, "content")
+        val channel = FileChannel.open(file, StandardOpenOption.READ, ExtendedOpenOption.NOSHARE_DELETE)
+        val releaser = Thread {
+            Thread.sleep(300)
+            channel.close()
+        }
+        releaser.start()
+        try {
+            assertFailsWith<FileSystemException> { Files.delete(file) }
+            mgr.deleteLocal("/held.txt")
+            assertFalse(Files.exists(file))
+        } finally {
+            releaser.join(2_000)
+            runCatching { channel.close() }
+        }
     }
 
     @Test

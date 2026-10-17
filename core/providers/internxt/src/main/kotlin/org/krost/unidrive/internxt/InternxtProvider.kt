@@ -16,6 +16,7 @@ import org.krost.unidrive.internxt.model.FolderContentResponse
 import org.krost.unidrive.internxt.model.InternxtFile
 import org.krost.unidrive.internxt.model.InternxtFolder
 import org.krost.unidrive.internxt.model.tryParseInternxtInstant
+import org.krost.unidrive.io.withLocalIoRetry
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
@@ -764,7 +765,7 @@ class InternxtProvider(
         try {
             fileSize = withContext(Dispatchers.IO) { Files.size(localPath) }
             localMtime = withContext(Dispatchers.IO) { Files.getLastModifiedTime(localPath).toInstant() }
-            contentFingerprint = withContext(Dispatchers.IO) { UploadTombstoneStore.contentFingerprint(localPath) }
+            contentFingerprint = withContext(Dispatchers.IO) { withLocalIoRetry { UploadTombstoneStore.contentFingerprint(localPath) } }
         } catch (e: java.nio.file.NoSuchFileException) {
             withContext(Dispatchers.IO) { tombstoneStore.discard(pathHashStr) }
             throw e
@@ -930,7 +931,7 @@ class InternxtProvider(
             try {
                 withContext(Dispatchers.IO) {
                     Files.createDirectories(tempFile.parent)
-                    javax.crypto.CipherInputStream(Files.newInputStream(localPath), encCipher).use { cipherIn ->
+                    javax.crypto.CipherInputStream(withLocalIoRetry { Files.newInputStream(localPath) }, encCipher).use { cipherIn ->
                         Files.newOutputStream(tempFile).use { out ->
                             val buf = ByteArray(8192)
                             var n: Int
